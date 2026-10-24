@@ -271,12 +271,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           </button>
         </div>
 
-        {/* Status Supabase Banner */}
-        <div className="px-6 pt-3">
-          {(() => {
-            const status = getSupabaseConfigStatus();
-            if (status.isServiceRoleBlocked) {
-              return (
+        {/* Status de Segurança (Apenas se houver chave incorreta bloqueada) */}
+        {(() => {
+          const status = getSupabaseConfigStatus();
+          if (status.isServiceRoleBlocked) {
+            return (
+              <div className="px-6 pt-3">
                 <div className="flex items-start space-x-2 text-[11px] text-red-400 bg-red-500/10 border border-red-500/20 px-3 py-2 rounded-lg">
                   <AlertCircle className="w-4 h-4 shrink-0 text-red-400 mt-0.5" />
                   <div>
@@ -284,24 +284,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     <span className="text-zinc-300">Foi detectada uma chave "service_role". Substitua pela chave pública "anon" para proteger o banco.</span>
                   </div>
                 </div>
-              );
-            }
-            if (status.configured) {
-              return (
-                <div className="flex items-center space-x-2 text-[11px] text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-3 py-1.5 rounded-lg">
-                  <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
-                  <span>Conectado ao Supabase Auth via chave pública (anon)</span>
-                </div>
-              );
-            }
-            return (
-              <div className="flex items-center space-x-2 text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/20 px-3 py-1.5 rounded-lg">
-                <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                <span>Modo Demonstração (Configure VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY no Vercel)</span>
               </div>
             );
-          })()}
-        </div>
+          }
+          return null;
+        })()}
 
         {step === 'credentials' ? (
           /* ================= ETAPA 1: CREDENCIAIS (GOOGLE OU EMAIL E SENHA) ================= */

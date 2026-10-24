@@ -435,13 +435,34 @@ export default function App() {
       }
     });
 
-    // Verificar sessão existente
-    authService.getCurrentUser().then((user) => {
+    const handleUserSession = (user: SupabaseUser | null) => {
+      setCurrentUser(user);
       if (user) {
-        setCurrentUser(user);
+        const metaName =
+          user.user_metadata?.full_name ||
+          user.user_metadata?.name ||
+          (user.email ? user.email.split('@')[0] : 'Leitor');
+        const metaAvatar = user.user_metadata?.avatar_url || null;
+        if (metaAvatar) {
+          setCurrentUserAvatar(metaAvatar);
+        }
+
+        try {
+          localStorage.setItem(
+            'sinal_user_profile',
+            JSON.stringify({
+              name: metaName,
+              displayName: metaName,
+              email: user.email,
+              avatarUrl: metaAvatar,
+              timezone: 'America/Sao_Paulo'
+            })
+          );
+        } catch {}
+
         // Sincronizar itens salvos do usuário
         userService.getSavedEventIds(user.id).then((savedIds) => {
-          if (savedIds.length > 0) {
+          if (savedIds && savedIds.length > 0) {
             setSavedEventIds(new Set(savedIds));
             setEvents((prev) =>
               prev.map((e) => ({
@@ -451,11 +472,48 @@ export default function App() {
             );
           }
         });
+
+        // Verificar se precisa de Onboarding no primeiro acesso
+        const hasOnboarded = localStorage.getItem('sinal_onboarded_' + user.id) === 'true';
+        if (!hasOnboarded) {
+          setIsOnboardingOpen(true);
+        }
+      }
+    };
+
+    // Verificar sessão existente
+    authService.getCurrentUser().then((user) => {
+      if (user) {
+        handleUserSession(user);
       }
     });
 
+    // Detectar retorno de OAuth (/oauth/consent ou query/hash com tokens)
+    if (typeof window !== 'undefined') {
+      const pathname = window.location.pathname;
+      const search = window.location.search;
+      const hash = window.location.hash;
+
+      const isOAuth =
+        pathname.includes('/oauth') ||
+        hash.includes('access_token') ||
+        search.includes('code=') ||
+        search.includes('error=');
+
+      if (isOAuth) {
+        authService.getCurrentUser().then((user) => {
+          if (user) {
+            handleUserSession(user);
+            setCurrentNav('home');
+          }
+          // Limpa a barra de navegação para a raiz sem deixar preso em /oauth/consent
+          window.history.replaceState(null, '', '/');
+        });
+      }
+    }
+
     const { data: authListener } = authService.onAuthStateChange((_event, session) => {
-      setCurrentUser(session?.user ?? null);
+      handleUserSession(session?.user ?? null);
     });
 
     return () => {
@@ -641,11 +699,11 @@ export default function App() {
 
 
 
-  // Super Admin oficial com acesso irrestrito
+  // Super Admin oficial com acesso irrestrito (Estritamente astryasuporte@gmail.com)
   const SUPER_ADMIN_EMAIL = 'astryasuporte@gmail.com';
   const isSuperAdmin = currentUser?.email
     ? currentUser.email.toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase()
-    : true; // Padrão ativo para o ambiente local/Super Admin
+    : false; // NUNCA deve ser true para usuários comuns ou deslogados
 
   // Renderização de Telas Especiais: Landing Page ou Admin Panel
   if (currentNav === 'landing') {
@@ -673,6 +731,12 @@ export default function App() {
           onClose={() => setIsAuthModalOpen(false)}
           onAuthSuccess={(_email) => {
             setIsAuthModalOpen(false);
+            const user = currentUser;
+            const key = user?.id ? user.id : _email;
+            const hasOnboarded = localStorage.getItem('sinal_onboarded_' + key) === 'true';
+            if (!hasOnboarded) {
+              setIsOnboardingOpen(true);
+            }
             setCurrentNav('home');
           }}
         />
@@ -1208,6 +1272,7 @@ export default function App() {
             </div>
 
             <ProfileView
+              currentUser={currentUser}
               entities={entities}
               topics={topics}
               sources={sources}
@@ -1233,6 +1298,7 @@ export default function App() {
                 setCurrentNav('landing');
                 if (typeof window !== 'undefined') {
                   window.scrollTo({ top: 0, behavior: 'smooth' });
+                  window.history.replaceState(null, '', '/');
                 }
               }}
             />
@@ -1739,7 +1805,11 @@ export default function App() {
       {/* ================= 8. ONBOARDING & CALIBRAGEM INICIAL DO FEED ================= */}
       <OnboardingModal
         isOpen={isOnboardingOpen}
-        onClose={() => setIsOnboardingOpen(false)}
+        onClose={() => {
+          const userKey = currentUser?.id || currentUser?.email || 'guest';
+          localStorage.setItem('sinal_onboarded_' + userKey, 'true');
+          setIsOnboardingOpen(false);
+        }}
         entities={entities}
         topics={topics}
         sources={sources}
@@ -1747,6 +1817,8 @@ export default function App() {
         onToggleTopic={handleToggleFollowTopic}
         onToggleSource={handleToggleFollowSource}
         onComplete={() => {
+          const userKey = currentUser?.id || currentUser?.email || 'guest';
+          localStorage.setItem('sinal_onboarded_' + userKey, 'true');
           setIsOnboardingOpen(false);
           setCurrentNav('home');
         }}

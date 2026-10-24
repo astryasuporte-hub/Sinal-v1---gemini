@@ -1924,9 +1924,6 @@ export const LandingPage: React.FC<LandingPageProps> = ({
             Começar 3 dias grátis
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M13 6l6 6-6 6" /></svg>
           </button>
-          <button onClick={onEnterApp} className="btn btn-ghost btn-lg" style={{ width: '100%' }}>
-            Acessar o App Agora
-          </button>
           <button onClick={onOpenAuth || onEnterApp} className="btn btn-ghost" style={{ width: '100%' }}>
             Fazer Login
           </button>
@@ -1959,8 +1956,8 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                   Começar 3 dias grátis
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M13 6l6 6-6 6" /></svg>
                 </button>
-                <button onClick={onEnterApp} className="btn btn-ghost btn-lg magnetic">
-                  Acessar o App
+                <button onClick={onOpenAuth || onEnterApp} className="btn btn-ghost btn-lg magnetic">
+                  Fazer Login
                 </button>
               </div>
               <div className="hero-proof reveal d3">
@@ -2586,30 +2583,6 @@ export const LandingPage: React.FC<LandingPageProps> = ({
         </div>
       </footer>
 
-      {/* Floating shortcut to App */}
-      <aside aria-label="Acesso Rápido" style={{ position: 'fixed', bottom: '24px', right: '24px', zIndex: 120 }}>
-        <button
-          onClick={onEnterApp}
-          className="btn btn-primary"
-          style={{
-            background: 'rgba(11,11,14,0.92)',
-            color: '#fff',
-            border: '1px solid rgba(255,255,255,0.18)',
-            boxShadow: '0 16px 36px rgba(0,0,0,0.6)',
-            backdropFilter: 'blur(16px)',
-            fontSize: '13px',
-            padding: '11px 20px',
-            minHeight: '44px'
-          }}
-          title="Entrar na plataforma"
-        >
-          <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#4ade80', boxShadow: '0 0 8px #4ade80' }} />
-          <span>Acessar Plataforma</span>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ width: '13px', height: '13px' }}>
-            <path d="M5 12h14M13 6l6 6-6 6" />
-          </svg>
-        </button>
-      </aside>
     </div>
   );
 };

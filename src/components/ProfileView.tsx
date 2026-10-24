@@ -49,8 +49,10 @@ import { ticketService } from '../services/ticketService';
 import { soundAlertService } from '../services/soundAlertService';
 import { notificationService } from '../services/notificationService';
 import { ApiHealthModal } from './ApiHealthModal';
+import { User as SupabaseUser } from '@supabase/supabase-js';
 
 interface ProfileViewProps {
+  currentUser?: SupabaseUser | null;
   entities: Entity[];
   topics: Topic[];
   sources: Source[];
@@ -77,6 +79,7 @@ export interface UserProfileData {
 }
 
 export const ProfileView: React.FC<ProfileViewProps> = ({
+  currentUser,
   entities,
   topics,
   sources,
@@ -92,26 +95,59 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   onLogout,
   onProfileUpdated
 }) => {
-  // User Profile state — Carregar persistido se existir
+  // Sincronização Dinâmica do Perfil com o Usuário Autenticado
   const [profile, setProfile] = useState<UserProfileData>(() => {
+    if (currentUser) {
+      const metaName =
+        currentUser.user_metadata?.full_name ||
+        currentUser.user_metadata?.name ||
+        (currentUser.email ? currentUser.email.split('@')[0] : 'Leitor');
+      const metaAvatar = currentUser.user_metadata?.avatar_url || null;
+      return {
+        name: metaName,
+        displayName: metaName,
+        email: currentUser.email || 'leitor@fatosbr.com.br',
+        avatarUrl: metaAvatar,
+        bio: currentUser.email?.toLowerCase() === 'astryasuporte@gmail.com' ? 'Super Administrador — FatosBR' : 'Leitor FatosBR',
+        timezone: 'America/Sao_Paulo (UTC-3)'
+      };
+    }
     try {
       const saved = localStorage.getItem('sinal_user_profile');
       if (saved) return JSON.parse(saved);
-    } catch {
-      // fallback
-    }
+    } catch {}
     return {
-      name: 'Astrya Suporte',
-      displayName: 'Astrya Admin',
-      email: 'astryasuporte@gmail.com',
+      name: 'Leitor',
+      displayName: 'Leitor',
+      email: 'leitor@fatosbr.com.br',
       avatarUrl: null,
-      bio: 'Super Administrador — FatosBR Intelligence Platform',
+      bio: 'Leitor FatosBR',
       timezone: 'America/Sao_Paulo (UTC-3)'
     };
   });
 
+  // Atualizar perfil reativamente quando currentUser mudar (ex: login com outra conta)
+  React.useEffect(() => {
+    if (currentUser) {
+      const metaName =
+        currentUser.user_metadata?.full_name ||
+        currentUser.user_metadata?.name ||
+        (currentUser.email ? currentUser.email.split('@')[0] : 'Leitor');
+      const metaAvatar = currentUser.user_metadata?.avatar_url || null;
+      setProfile((prev) => ({
+        ...prev,
+        name: prev.name === 'Astrya Suporte' && currentUser.email?.toLowerCase() !== 'astryasuporte@gmail.com' ? metaName : (prev.name || metaName),
+        email: currentUser.email || prev.email,
+        avatarUrl: prev.avatarUrl || metaAvatar,
+        bio: currentUser.email?.toLowerCase() === 'astryasuporte@gmail.com' ? 'Super Administrador — FatosBR' : 'Leitor FatosBR'
+      }));
+    }
+  }, [currentUser]);
+
   const [isApiHealthModalOpen, setIsApiHealthModalOpen] = useState(false);
-  const [adminPreviewMode, setAdminPreviewMode] = useState<'admin' | 'client'>('admin');
+  const [adminPreviewMode, setAdminPreviewMode] = useState<'admin' | 'client'>(
+    isSuperAdmin ? 'admin' : 'client'
+  );
 
   // Regra de 1 mudança de nome por e-mail
   const getNameChangeKey = (email: string) => `sinal_name_changed_${email.trim().toLowerCase()}`;
@@ -393,8 +429,8 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
         </div>
       )}
 
-      {/* ================= BARRA SUPERIOR: ALTERNAR VISÃO ADMIN / CLIENTE ================= */}
-      {(isSuperAdmin || profile.email.toLowerCase() === 'astryasuporte@gmail.com') && (
+      {/* ================= BARRA SUPERIOR: ALTERNAR VISÃO ADMIN / CLIENTE (ESTRITAMENTE SUPER ADMIN) ================= */}
+      {isSuperAdmin && profile.email.toLowerCase() === 'astryasuporte@gmail.com' && (
         <div className="p-3.5 sm:p-4 rounded-2xl bg-black border-2 border-zinc-700 shadow-xl flex flex-col sm:flex-row items-center justify-between gap-3 text-xs">
           <div className="flex items-center gap-2.5">
             <div className="w-7 h-7 rounded-lg bg-zinc-900 border border-zinc-700 flex items-center justify-center text-white shrink-0">
@@ -496,8 +532,8 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                 <span>Editar perfil</span>
               </button>
 
-              {/* Acesso ao Painel Admin visível apenas no Modo Admin */}
-              {adminPreviewMode === 'admin' && (isSuperAdmin || profile.email.toLowerCase() === 'astryasuporte@gmail.com') && onOpenAdmin && (
+              {/* Acesso ao Painel Admin visível apenas no Modo Admin e para o Super Admin Oficial */}
+              {isSuperAdmin && adminPreviewMode === 'admin' && profile.email.toLowerCase() === 'astryasuporte@gmail.com' && onOpenAdmin && (
                 <button
                   onClick={onOpenAdmin}
                   className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full border border-zinc-700 hover:border-white bg-zinc-900 hover:bg-zinc-800 text-xs font-semibold text-white transition cursor-pointer shadow-sm"
@@ -511,8 +547,8 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                 </button>
               )}
 
-              {/* Acesso à Saúde da API visível apenas no Modo Admin */}
-              {adminPreviewMode === 'admin' && (isSuperAdmin || profile.email.toLowerCase() === 'astryasuporte@gmail.com') && (
+              {/* Acesso à Saúde da API visível apenas no Modo Admin e para o Super Admin Oficial */}
+              {isSuperAdmin && adminPreviewMode === 'admin' && profile.email.toLowerCase() === 'astryasuporte@gmail.com' && (
                 <button
                   onClick={() => setIsApiHealthModalOpen(true)}
                   className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full border border-white bg-white hover:bg-zinc-200 text-black text-xs font-bold transition cursor-pointer shadow-sm"
@@ -621,7 +657,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
       </div>
 
       {/* ================= DASHBOARD FINANCEIRO (EXCLUSIVO DO MODO ADMINISTRADOR) ================= */}
-      {adminPreviewMode === 'admin' && (isSuperAdmin || profile.email.toLowerCase() === 'astryasuporte@gmail.com') && (
+      {isSuperAdmin && adminPreviewMode === 'admin' && profile.email.toLowerCase() === 'astryasuporte@gmail.com' && (
         <FinancialDashboard
           subscription={subscription}
           isAdmin={true}
