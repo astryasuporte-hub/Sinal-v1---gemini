@@ -37,10 +37,43 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [password, setPassword] = useState('');
   const [fullName, setFullName] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isGoogleLoading, setIsGoogleLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   if (!isOpen) return null;
+
+  const handleGoogleSignIn = async () => {
+    setErrorMessage(null);
+    setSuccessMessage(null);
+    setIsGoogleLoading(true);
+
+    try {
+      if (!isSupabaseConfigured) {
+        // Modo demonstração quando as variáveis do Supabase ainda não foram adicionadas no Vercel
+        setTimeout(() => {
+          setIsGoogleLoading(false);
+          setSuccessMessage('Login com Google autenticado (Modo Demonstração).');
+          setTimeout(() => {
+            onAuthSuccess?.('usuario.google@fatosbr.com.br', 'Usuário Google');
+            onClose();
+          }, 800);
+        }, 600);
+        return;
+      }
+
+      const res = await authService.signInWithOAuth('google');
+      if (!res.success) {
+        setErrorMessage(res.error || 'Falha ao conectar com o Google.');
+      } else {
+        setSuccessMessage('Redirecionando para o Google...');
+      }
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : 'Erro ao autenticar com Google.');
+    } finally {
+      setIsGoogleLoading(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -156,8 +189,49 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           })()}
         </div>
 
+        {/* Botão de Autenticação Social com Google */}
+        <div className="px-6 pt-4">
+          <button
+            type="button"
+            disabled={isLoading || isGoogleLoading}
+            onClick={handleGoogleSignIn}
+            className="w-full flex items-center justify-center space-x-3 px-4 py-2.5 bg-[#12141a] hover:bg-[#181a22] text-zinc-100 border border-zinc-700/80 hover:border-zinc-500 font-medium text-sm rounded-xl transition-all cursor-pointer active:scale-[0.99] shadow-sm disabled:opacity-60"
+          >
+            {isGoogleLoading ? (
+              <span className="inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+            ) : (
+              <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24">
+                <path
+                  fill="#EA4335"
+                  d="M12 5c1.6 0 3 .6 4.1 1.6l3.1-3.1C17.3 1.7 14.8 1 12 1 7.5 1 3.7 3.6 1.9 7.3l3.7 2.9C6.5 7.4 9 5 12 5z"
+                />
+                <path
+                  fill="#4285F4"
+                  d="M23.5 12.3c0-.8-.1-1.6-.2-2.3H12v4.5h6.5c-.3 1.5-1.1 2.8-2.4 3.7l3.7 2.9c2.2-2 3.7-5 3.7-8.8z"
+                />
+                <path
+                  fill="#FBBC05"
+                  d="M5.6 14.8c-.2-.7-.4-1.5-.4-2.3s.1-1.6.4-2.3L1.9 7.3C.7 9.7 0 12 0 14.5s.7 4.8 1.9 7.2l3.7-2.9z"
+                />
+                <path
+                  fill="#34A853"
+                  d="M12 23.5c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3 0-5.5-2-6.4-4.8L1.9 17C3.7 20.7 7.5 23.5 12 23.5z"
+                />
+              </svg>
+            )}
+            <span>Continuar com o Google</span>
+          </button>
+
+          {/* Divisor Visual */}
+          <div className="flex items-center my-4 space-x-3">
+            <div className="flex-1 h-px bg-zinc-800"></div>
+            <span className="text-[11px] text-zinc-400 font-medium uppercase tracking-wider">ou com e-mail</span>
+            <div className="flex-1 h-px bg-zinc-800"></div>
+          </div>
+        </div>
+
         {/* Tabs de Modo */}
-        <div className="flex p-2 mx-6 mt-4 bg-zinc-900/60 rounded-xl border border-zinc-800/80">
+        <div className="flex p-2 mx-6 bg-zinc-900/60 rounded-xl border border-zinc-800/80">
           <button
             type="button"
             onClick={() => {
@@ -290,7 +364,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               </>
             ) : mode === 'signup' ? (
               <>
-                <span>Criar Conta & Iniciar Trial (7 Dias)</span>
+                <span>Criar Conta & Iniciar Trial (3 Dias)</span>
                 <Sparkles className="w-4 h-4" />
               </>
             ) : (

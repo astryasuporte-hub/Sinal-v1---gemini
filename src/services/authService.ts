@@ -116,6 +116,43 @@ export const authService = {
   },
 
   /**
+   * Login com Provedor OAuth (Google)
+   */
+  async signInWithOAuth(provider: 'google'): Promise<AuthResponse<{ url?: string }>> {
+    if (!isSupabaseConfigured) {
+      return {
+        success: false,
+        error: 'Supabase ainda não configurado.',
+      };
+    }
+
+    try {
+      const redirectUrl = typeof window !== 'undefined' ? `${window.location.origin}` : undefined;
+      const { data, error } = await supabase.auth.signInWithOAuth({
+        provider,
+        options: {
+          redirectTo: redirectUrl,
+          queryParams: {
+            access_type: 'offline',
+            prompt: 'consent',
+          },
+        },
+      });
+
+      if (error) {
+        return { success: false, error: error.message };
+      }
+
+      return { success: true, data: { url: data.url } };
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : 'Erro ao iniciar autenticação com o Google.',
+      };
+    }
+  },
+
+  /**
    * Logout do usuário
    */
   async signOut(): Promise<AuthResponse> {

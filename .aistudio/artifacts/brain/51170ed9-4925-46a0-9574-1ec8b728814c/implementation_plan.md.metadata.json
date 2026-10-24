@@ -1,6 +1,6 @@
 {
-  "summary":  "Plano detalhado para persistência do histórico de leitura (historyItems) no localStorage com limite de 50 itens e salvamento do Documento Mestre de Segurança em docs/SECURITY_MASTER.md.",
-  "updatedAt":  "2026-10-24T17:03:53.658873629Z",
+  "summary":  "Plano arquitetural e de implementação para versão mobile responsiva completa no fatosbr.com.br (correção de viewport, barra inferior nativa, safe areas, landing mobile) e autenticação com Email/Senha e Google OAuth.",
+  "updatedAt":  "2026-10-24T18:11:02.667980707Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

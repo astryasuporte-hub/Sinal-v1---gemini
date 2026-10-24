@@ -187,15 +187,16 @@ const LANDING_CSS = `
 
   @media (max-width:1000px){
     .nav-links{display:none}
-    .nav-cta .login{display:none}
+    .nav-cta .login{display:inline-flex;padding:7px 11px;font-size:12.5px}
     .burger{display:flex}
   }
   @media (max-width:600px){
-    .navbar-shell{top:10px;width:calc(100% - 24px)}
-    .navbar{height:58px;padding:6px 6px 6px 16px}
-    .brand{font-size:15px}
-    .brand-mark{width:24px;height:17px}
-    .nav-cta .btn{padding:9px 16px;font-size:13px;min-height:40px}
+    .navbar-shell{top:8px;width:calc(100% - 16px)}
+    .navbar{height:54px;padding:4px 6px 4px 12px}
+    .brand{font-size:14px}
+    .brand-mark{width:22px;height:16px}
+    .nav-cta .login{display:inline-flex;padding:6px 10px;font-size:12px}
+    .nav-cta .btn{padding:8px 12px;font-size:12px;min-height:36px}
   }
 
   /* Drawer */
@@ -1890,11 +1891,14 @@ export const LandingPage: React.FC<LandingPageProps> = ({
         </nav>
         <div className="drawer-cta">
           <button onClick={onStartFreeTrial} className="btn btn-primary btn-lg" style={{ width: '100%' }}>
-            Começar grátis
+            Começar 3 dias grátis
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M13 6l6 6-6 6" /></svg>
           </button>
+          <button onClick={onEnterApp} className="btn btn-ghost btn-lg" style={{ width: '100%' }}>
+            Acessar o App Agora
+          </button>
           <button onClick={onOpenAuth || onEnterApp} className="btn btn-ghost" style={{ width: '100%' }}>
-            Entrar
+            Fazer Login
           </button>
         </div>
       </div>
@@ -1922,10 +1926,20 @@ export const LandingPage: React.FC<LandingPageProps> = ({
               <p className="lead reveal d2">Acompanhe temas, pessoas e empresas que importam. Menos ruído, mais contexto.</p>
               <div className="hero-actions reveal d3">
                 <button onClick={onStartFreeTrial} className="btn btn-primary btn-lg magnetic">
-                  Começar grátis
+                  Começar 3 dias grátis
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M13 6l6 6-6 6" /></svg>
                 </button>
-                <a href="#demonstracao" className="btn btn-ghost btn-lg magnetic">Ver demo</a>
+                <button onClick={onEnterApp} className="btn btn-ghost btn-lg magnetic">
+                  Acessar o App
+                </button>
+              </div>
+              <div className="sm:hidden pt-1 pb-2">
+                <button
+                  onClick={onOpenAuth || onEnterApp}
+                  className="text-xs text-zinc-400 hover:text-white underline underline-offset-4 cursor-pointer"
+                >
+                  Já tem conta? Fazer Login
+                </button>
               </div>
               <div className="hero-proof reveal d3">
                 <div className="hero-avatars"><span>MR</span><span>AC</span><span>JP</span><span>+</span></div>

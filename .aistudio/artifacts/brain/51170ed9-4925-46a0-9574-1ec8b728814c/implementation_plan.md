@@ -1,113 +1,137 @@
-# Plano de Implementação: Persistência Local do Histórico e Documento Mestre de Segurança
+# Plano de Implementação: Versão Mobile Responsiva e Autenticação (Email/Senha & Google)
 
-Implementação da persistência resiliente do histórico de acontecimentos lidos (`historyItems`) no `localStorage` do navegador com limite de 50 itens e priorização no topo, acompanhado da criação do repositório documental de segurança `docs/SECURITY_MASTER.md`.
+Correção definitiva da renderização mobile no domínio de produção `fatosbr.com.br`, ativação de viewport nativo, refinamento da Landing Page para smartphones com acesso direto ao app, barra de navegação inferior fixa com safe areas e implementação completa do fluxo de autenticação com Email/Senha e Google OAuth.
 
 ---
 
-## 1. Visão Geral e Arquitetura
+## Revisão do Usuário & Decisões Críticas
 
-Atualmente, o histórico de matérias e acontecimentos abertos pelo leitor reside exclusivamente no estado React em memória (`App.tsx`), sendo perdido quando a página é atualizada ou fechada. Além disso, foi aprovada a inclusão do Documento Mestre de Segurança e Hardening da Sinal V1 na estrutura oficial do projeto.
+> [!IMPORTANT]
+> **Decisões confirmadas com o usuário no Turno 1:**
+> 1. **Tela inicial no celular**: Landing page mobile com botão direto para o app e acesso rápido à autenticação.
+> 2. **Métodos de autenticação**: E-mail com senha e Login social com Google (via Supabase OAuth com fallback seguro de demonstração).
+> 3. **Padrão de navegação mobile**: Barra de navegação fixa na parte inferior da tela (`Bottom Navigation Bar`) com safe area insets para iOS/Android.
 
-### Fluxo de Dados e Persistência
+---
+
+## 1. Visão Geral e Causa-Raiz do Problema Mobile
+
+### Diagnóstico Técnico no Vercel
+Ao acessar `fatosbr.com.br` por um smartphone real, o navegador móvil simulava uma tela desktop de 980px reduzida (zoom-out) porque o arquivo `index.html` **não continha a tag `<meta name="viewport">`**. 
+Sem essa tag essencial da especificação HTML5, os navegadores móveis (Safari iOS e Chrome Android) ignoram media queries responsivas (como `max-width`, `sm:` e `md:` do Tailwind), exibindo a versão desktop miniaturizada.
+
+### Objetivos desta Entrega
+1. **Ativação da Viewport Mobile Nativa**: Inserir `<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />` e meta tags de suporte PWA e entalhes (notch).
+2. **Landing Page Otimizada para Celular**:
+   - Cabeçalho mobile limpo com logotipo `FatosBR` e botão "Entrar".
+   - Hero impactante adaptado para telas verticais com CTA principal "Começar 3 dias grátis" e "Abrir o App".
+   - Eliminação de transbordamento horizontal e otimização do canvas 3D Three.js para baixo consumo de bateria em smartphones.
+3. **Barra de Navegação Inferior Fixa no App**:
+   - Ícones de alta legibilidade: Início, Explorar, Seguindo, Briefings e Perfil.
+   - Indicador de estado ativo e badges de contagem não lida.
+   - Suporte estrito a `padding-bottom: env(safe-area-inset-bottom)` para não colidir com o botão home/gesto de deslizar do iPhone e Android.
+4. **Sistema de Autenticação (Email/Senha e Google OAuth)**:
+   - Adicionar método `signInWithOAuth('google')` no `authService.ts`.
+   - Adicionar botão "Continuar com o Google" com logo oficial em `AuthModal.tsx`.
+   - Suporte a login e cadastro tradicional com Email e Senha.
+   - Modo de demonstração gracioso caso as variáveis de produção do Supabase ainda não tenham sido configuradas no painel da Vercel.
+
+---
+
+## 2. Experiência do Usuário & Design Visual
+
+### Fluxos do Usuário
 
 ```
-  [Ação do Leitor] (Clica em matéria no Feed / Busca / Explore)
-           │
-           ▼
-  [handleOpenEventDetail]
-           │
-           ├─► Verifica se o evento já existe no histórico
-           │     ├─ Se já existe: remove da posição antiga e move para o topo (índice 0)
-           │     └─ Se é novo: insere no topo (índice 0)
-           │
-           ├─► Atualiza timestamp atual (`Date.now()`) e rótulo temporal
-           ├─► Aplica corte FIFO de capacidade: `.slice(0, 50)`
-           │
-           ├─► Atualiza estado React: `setHistoryItems(nextItems)`
-           │
-           ▼
-  [Efeito de Sincronização / Storage Service]
-           │
-           ├─► Serialização segura (`try...catch`)
-           └─► `localStorage.setItem('sinal_history_items_v1', JSON.stringify(...))`
-                    │
-                    ▼
-           [Recarga de Página / Nova Sessão]
-                    │
-                    └─► Lazy Initializer recupera até 50 itens salvos
-                    └─► Marca `isViewed: true` nas notícias correspondentes do feed
+  [Acesso pelo Celular em fatosbr.com.br]
+                  │
+                  ▼
+   [Landing Page Mobile Otimizada]
+         │                 │
+         │ (Toca em "Entrar") │ (Toca em "Começar 3 dias grátis" / "Acessar App")
+         ▼                 ▼
+   [Modal de Auth]     [Feed do App no Mobile]
+   ├─ Continuar c/ Google  │
+   ├─ Email e Senha        ├─ Barra Superior: Logo FatosBR + Busca/Sincronização
+   └─ Modo Demo Seguro     │
+                           └─ Barra Inferior Fixa:
+                              [Início] [Explorar] [Seguindo] [Briefings] [Perfil]
 ```
 
----
-
-## 2. Decisões Confirmadas com o Usuário
-
-1. **Capacidade do Histórico**: Limite estrito de **50 itens** mais recentes para evitar degradação de desempenho e respeitar a cota do `localStorage`.
-2. **Reabertura de Notícias Existentes**: Se o usuário abrir novamente uma notícia já presente no histórico, o item é **movido para o topo** da lista com o horário de leitura atualizado.
-3. **Localização do Documento de Segurança**: Arquivo dedicado em `docs/SECURITY_MASTER.md` contendo todas as 20 seções do documento mestre de segurança da Sinal V1.
+### Detalhes de Interface Mobile
+- **Tipografia**: Escalas proporcionais em rem, títulos sem quebra órfã (`line-clamp-2`/`line-clamp-3`), padding horizontal de 16px nas laterais (`px-4`).
+- **Alvos de Toque (Touch Targets)**: Altura mínima de 44px para todos os botões e abas, garantindo toque ágil e sem cliques acidentais.
+- **Barra Inferior (`Bottom Nav`)**: Fundo com vidro fosco elegante (`bg-[#090a0d]/95 backdrop-blur-md`), borda superior sutil (`border-t border-[#1a1c23]`), ícones de 20px e legendas legíveis de 10px.
 
 ---
 
-## 3. Detalhamento das Alterações Técnicas
+## 3. Decisões de Produto & Arquitetura
 
-### A. Persistência de Histórico em `src/App.tsx`
-- **Inicialização Preguiçosa (`lazy initializer`)**:
-  - Chave: `'sinal_history_items_v1'`.
-  - Leitura segura com tratamento para JSON corrompido ou modo de navegação anônima sem acesso a storage.
-  - Carregamento de até 50 itens validados.
-- **Efeito de Gravação Automática (`useEffect`)**:
-  - Salva automaticamente as alterações de `historyItems` no `localStorage`.
-  - Tratamento para erro `QuotaExceededError` (se o armazenamento estiver cheio, trunca itens mais antigos).
-- **Repositório e Ordenação em `handleOpenEventDetail`**:
-  - Filtragem de duplicata anterior do mesmo `event.id`.
-  - Inserção no topo com timestamp atualizado (`timestamp: Date.now()`, `openedAt: 'Agora há pouco'`).
-  - Restrição aos últimos 50 registros (`.slice(0, 50)`).
-- **Sincronização de Remoção e Limpeza**:
-  - `handleRemoveFromHistory(eventId)` e `handleClearHistory()` sincronizados imediatamente com o storage.
-- **Hidratação de Notícias Lidas no Feed**:
-  - Ao carregar as notícias em tempo real, marcar com `isViewed: true` aquelas cujos IDs constem no histórico persistido.
-
-### B. Otimização de Exibição em `src/components/SavedHistoryView.tsx`
-- **Recálculo Dinâmico de Tempos Relativos**:
-  - Utilizar o `timestamp` numérico armazenado para calcular o rótulo ("Agora há pouco", "Há 15 min", "Há 2 horas", "Ontem às 14:30") em vez de manter uma string estática eternamente congelada em recargas futuras.
-- **Manutenção de Estado Vazio e Ações Rápidas**:
-  - Preservar botões de remover item individual, limpar todo o histórico e alternância entre as abas "Salvos" e "Histórico".
-
-### C. Criação do Arquivo `docs/SECURITY_MASTER.md`
-- Criar o arquivo no diretório `/docs/SECURITY_MASTER.md`.
-- Conter integralmente todas as 20 seções do documento mestre de segurança da Sinal V1:
-  1. Arquitetura de segurança
-  2. Painel Admin privado e isolado
-  3. APIs, credenciais e segredos
-  4. Proteção contra vulnerabilidades web
-  5. Camada de dados, Supabase e Postgres
-  6. Inteligência artificial e LLMs
-  7. Pagamentos, billing e Sharpify Gateway
-  8. Ingestão de notícias e integridade editorial
-  9. Autenticação, sessões e usuários
-  10. Borda, CDN, Cloudflare e rede
-  11. Auditoria, logs, rastreabilidade e monitoramento
-  12. Resposta a incidentes e contenção
-  13. CI/CD, deploy e pipeline seguro
-  14. Proteção contra scraping, bots e automação abusiva
-  15. Dependências, supply chain e pacotes
-  16. Governança, privacidade e conformidade (LGPD)
-  17. Backup, recuperação e continuidade
-  18. Postura de produto e engenharia
-  19. Checklist pré-produção
-  20. Estratégia de implementação recomendada
+1. **Tag de Viewport com `viewport-fit=cover`**:
+   - Permite que a interface ocupe a tela inteira em celulares modernos com cantos arredondados e entalhe/Dynamic Island, aplicando `safe-area-inset` onde necessário.
+2. **Fallback Inteligente para Autenticação Google**:
+   - Em produção na Vercel com chaves Supabase ativas, o clique dispara o redirecionamento OAuth real do Google (`supabase.auth.signInWithOAuth`).
+   - Se o projeto na Vercel ainda estiver aguardando as chaves no painel, o modal informa amigavelmente e oferece login em Modo Demonstração para que a navegação nunca trave.
+3. **Desempenho em Celulares**:
+   - Pausar ou suavizar animações Three.js pesadas quando em telas pequenas (`max-width: 768px`) para garantir 60 FPS e carregamento instantâneo no 4G/5G.
 
 ---
 
-## 4. Plano de Verificação e Testes
+## 4. Arquitetura Técnica & Componentes
 
-1. **Validação de Compilação e Linter**:
-   - Executar `compile_applet` para certificar que os tipos TypeScript estão estritamente válidos.
-   - Executar `lint_applet` para assegurar conformidade do código.
-2. **Teste de Persistência do Histórico**:
-   - Abrir matérias no feed e verificar o registro imediato na aba de Histórico.
-   - Recarregar a página e confirmar que os itens continuam salvos e ordenados.
-   - Abrir novamente uma matéria antiga e validar se ela migrou para o topo com horário atualizado.
-   - Excluir uma notícia do histórico e limpar todo o histórico, verificando que o `localStorage` reflete a ação.
-3. **Verificação do Documento de Segurança**:
-   - Conferir se o arquivo `/docs/SECURITY_MASTER.md` foi criado com sucesso com todas as seções e formatação intacta.
+```
+┌────────────────────────────────────────────────────────┐
+│                      index.html                        │
+│   meta viewport (device-width, initial-scale=1.0)      │
+│   theme-color, apple-touch-icon, safe-area config      │
+└───────────────────────────┬────────────────────────────┘
+                            │
+                            ▼
+┌────────────────────────────────────────────────────────┐
+│                        App.tsx                         │
+│  - Detecta viewport mobile / safe area                 │
+│  - Renderiza LandingPage ou Feed Principal             │
+│  - Renderiza Mobile Header no topo (sm:hidden)         │
+│  - Renderiza Mobile Bottom Navigation Bar (sm:hidden)  │
+│  - Gerencia estado de autenticação e modais            │
+└──────────────┬──────────────────────────┬──────────────┘
+               │                          │
+               ▼                          ▼
+┌─────────────────────────────┐ ┌────────────────────────┐
+│       LandingPage.tsx       │ │     AuthModal.tsx      │
+│ - Hero mobile responsivo    │ │ - Botão Google OAuth   │
+│ - Botão "Entrar" no topo    │ │ - Email e Senha        │
+│ - Botão direto p/ o App     │ │ - Feedback instantâneo │
+└─────────────────────────────┘ └────────────────────────┘
+```
+
+### Mapeamento de Arquivos e Alterações
+
+1. **`index.html`**:
+   - Inclusão da meta tag de viewport com escala inicial 1.0 e `viewport-fit=cover`.
+   - Inclusão de meta tags mobile para iOS (`apple-mobile-web-app-capable`, `apple-mobile-web-app-status-bar-style`).
+2. **`src/services/authService.ts`**:
+   - Adição do método `signInWithOAuth(provider: 'google')`.
+3. **`src/components/AuthModal.tsx`**:
+   - Adição do botão de autenticação social com Google (ícone oficial colorido SVG, estilo moderno e acessível).
+   - Abas claras: "Entrar" e "Criar Conta", com login por Google e Email/Senha.
+4. **`src/components/LandingPage.tsx`**:
+   - Ajustes responsivos nas media queries da Landing Page para renderizar perfeitamente no mobile.
+   - Botão de acesso direto ao aplicativo para visitantes no celular.
+5. **`src/App.tsx`**:
+   - Revisão e blindagem da barra de navegação inferior fixa para garantir visibilidade perfeita em todas as telas móveis.
+   - Sincronização do estado de login e perfil.
+
+---
+
+## 5. Plano de Verificação
+
+1. **Validação de Código e Tipos**:
+   - Executar `compile_applet` e `lint_applet` para assegurar conformidade total sem erros de compilação.
+2. **Verificação da Tag Viewport**:
+   - Inspecionar `index.html` para confirmar presença de `<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />`.
+3. **Teste Funcional de Autenticação**:
+   - Testar login com Email e Senha no modal.
+   - Testar chamada ao Google OAuth com tratamento de fallback.
+4. **Verificação de Responsividade**:
+   - Conferir que em resoluções mobile (< 768px) a barra inferior e a navegação fluem naturalmente.

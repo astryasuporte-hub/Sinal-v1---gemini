@@ -1003,7 +1003,7 @@ export default function App() {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -8 }}
             transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
-            className="flex-1 flex flex-col min-w-0"
+            className="flex-1 flex flex-col min-w-0 pb-20 md:pb-0"
           >
         {currentNav === 'control' ? (
           /* ================= FATOSBR CONTROL: OPERAÇÃO DO INSTAGRAM ================= */
@@ -1597,7 +1597,7 @@ export default function App() {
       </div>
 
       {/* ================= 5. BOTTOM NAVIGATION MOBILE (TOUCH TARGETS >= 44PX COM BRIEFINGS) ================= */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 backdrop-blur-lg border-t px-1.5 py-1.5 flex items-center justify-around shadow-2xl bg-[#08090b]/98 border-[#1a1c22]">
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 backdrop-blur-lg border-t px-1.5 pt-1.5 pb-[calc(0.375rem+env(safe-area-inset-bottom,0px))] flex items-center justify-around shadow-2xl bg-[#08090b]/98 border-[#1a1c22]">
         <button
           onClick={() => setCurrentNav('home')}
           className={`min-h-[48px] min-w-[42px] flex flex-col items-center justify-center py-1 px-1.5 text-[9px] sm:text-[10px] transition cursor-pointer active:scale-95 ${
