@@ -127,7 +127,12 @@ export const authService = {
     }
 
     try {
-      const redirectUrl = typeof window !== 'undefined' ? `${window.location.origin}` : undefined;
+      const redirectUrl =
+        typeof window !== 'undefined'
+          ? (window.location.hostname.includes('fatosbr.com.br')
+              ? 'https://fatosbr.com.br/oauth/consent'
+              : `${window.location.origin}`)
+          : undefined;
       const { data, error } = await supabase.auth.signInWithOAuth({
         provider,
         options: {

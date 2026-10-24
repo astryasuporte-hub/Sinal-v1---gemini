@@ -1,137 +1,102 @@
-# Plano de Implementação: Versão Mobile Responsiva e Autenticação (Email/Senha & Google)
+# Plano de Implementação: Autenticação Google/Email com Código de 6 Dígitos, Logout Efetivo e URLs Limpas na Landing Page
 
-Correção definitiva da renderização mobile no domínio de produção `fatosbr.com.br`, ativação de viewport nativo, refinamento da Landing Page para smartphones com acesso direto ao app, barra de navegação inferior fixa com safe areas e implementação completa do fluxo de autenticação com Email/Senha e Google OAuth.
+Reestruturação do fluxo de entrada do usuário para abrir diretamente a autenticação com Google ao clicar em "Começar 3 dias grátis" (sem exibir cobrança PIX prévia), implementação de tela de código verificador de 6 dígitos para e-mail e senha, remoção definitiva do link mágico, logout funcional com retorno imediato à Landing Page, e navegação suave na Landing Page com URLs limpas (sem `#seção` no navegador).
 
 ---
 
-## Revisão do Usuário & Decisões Críticas
+## Revisão do Usuário & Decisões Confirmadas
 
 > [!IMPORTANT]
 > **Decisões confirmadas com o usuário no Turno 1:**
-> 1. **Tela inicial no celular**: Landing page mobile com botão direto para o app e acesso rápido à autenticação.
-> 2. **Métodos de autenticação**: E-mail com senha e Login social com Google (via Supabase OAuth com fallback seguro de demonstração).
-> 3. **Padrão de navegação mobile**: Barra de navegação fixa na parte inferior da tela (`Bottom Navigation Bar`) com safe area insets para iOS/Android.
+> 1. **Ao sair da conta no perfil**: Redirecionar o usuário imediatamente para a **Landing Page**, limpando a sessão e o estado de autenticação.
+> 2. **Fluxo de e-mail e senha**: Exibir **tela dedicada no modal para digitação do código verificador de 6 dígitos** (com avanço automático e reenvio), eliminando a opção de "Link Mágico".
+> 3. **Navegação nas seções da Landing Page**: Rolagem suave com interceptação de clique, mantendo a **URL limpa sem hashtags** (sem exibir `#FAQ`, `#planos`, etc. no navegador).
+> 4. **Ação do botão "Começar 3 dias grátis"**: Abre diretamente o **AuthModal** focado em "Continuar com o Google" (o modal PIX/Cobrança não deve aparecer neste momento).
+> 5. **Hero da Landing Page**: Remover o texto redundante "Já tem conta? Fazer Login" adicionado anteriormente no mobile.
 
 ---
 
-## 1. Visão Geral e Causa-Raiz do Problema Mobile
-
-### Diagnóstico Técnico no Vercel
-Ao acessar `fatosbr.com.br` por um smartphone real, o navegador móvil simulava uma tela desktop de 980px reduzida (zoom-out) porque o arquivo `index.html` **não continha a tag `<meta name="viewport">`**. 
-Sem essa tag essencial da especificação HTML5, os navegadores móveis (Safari iOS e Chrome Android) ignoram media queries responsivas (como `max-width`, `sm:` e `md:` do Tailwind), exibindo a versão desktop miniaturizada.
-
-### Objetivos desta Entrega
-1. **Ativação da Viewport Mobile Nativa**: Inserir `<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />` e meta tags de suporte PWA e entalhes (notch).
-2. **Landing Page Otimizada para Celular**:
-   - Cabeçalho mobile limpo com logotipo `FatosBR` e botão "Entrar".
-   - Hero impactante adaptado para telas verticais com CTA principal "Começar 3 dias grátis" e "Abrir o App".
-   - Eliminação de transbordamento horizontal e otimização do canvas 3D Three.js para baixo consumo de bateria em smartphones.
-3. **Barra de Navegação Inferior Fixa no App**:
-   - Ícones de alta legibilidade: Início, Explorar, Seguindo, Briefings e Perfil.
-   - Indicador de estado ativo e badges de contagem não lida.
-   - Suporte estrito a `padding-bottom: env(safe-area-inset-bottom)` para não colidir com o botão home/gesto de deslizar do iPhone e Android.
-4. **Sistema de Autenticação (Email/Senha e Google OAuth)**:
-   - Adicionar método `signInWithOAuth('google')` no `authService.ts`.
-   - Adicionar botão "Continuar com o Google" com logo oficial em `AuthModal.tsx`.
-   - Suporte a login e cadastro tradicional com Email e Senha.
-   - Modo de demonstração gracioso caso as variáveis de produção do Supabase ainda não tenham sido configuradas no painel da Vercel.
-
----
-
-## 2. Experiência do Usuário & Design Visual
-
-### Fluxos do Usuário
+## 1. Visão Geral e Arquitetura do Fluxo
 
 ```
-  [Acesso pelo Celular em fatosbr.com.br]
-                  │
-                  ▼
-   [Landing Page Mobile Otimizada]
-         │                 │
-         │ (Toca em "Entrar") │ (Toca em "Começar 3 dias grátis" / "Acessar App")
-         ▼                 ▼
-   [Modal de Auth]     [Feed do App no Mobile]
-   ├─ Continuar c/ Google  │
-   ├─ Email e Senha        ├─ Barra Superior: Logo FatosBR + Busca/Sincronização
-   └─ Modo Demo Seguro     │
-                           └─ Barra Inferior Fixa:
-                              [Início] [Explorar] [Seguindo] [Briefings] [Perfil]
+  [Visitante clica em "Começar 3 dias grátis" ou "Entrar"]
+                          │
+                          ▼
+             [AuthModal: Autenticação Direta]
+         ┌────────────────────────────────────────┐
+         │  [G] Continuar com o Google (Destaque) │
+         │  ──────────── ou com e-mail ────────── │
+         │  Tabs: [ Entrar ]  [ Criar Conta ]     │
+         │  (E-mail e Senha)                      │
+         └───────────────────┬────────────────────┘
+                             │ (Submete credenciais)
+                             ▼
+         [Etapa 2: Código Verificador de 6 Dígitos]
+         ┌────────────────────────────────────────┐
+         │  Digite o código enviado para seu e-mail│
+         │  [ _ ] [ _ ] [ _ ] [ _ ] [ _ ] [ _ ]   │
+         │  [ Confirmar Código e Acessar App ]    │
+         │  Reenviar código em 30s | Trocar email │
+         └───────────────────┬────────────────────┘
+                             │ (Código validado)
+                             ▼
+              [Acesso Liberado ao App Feed]
+                             │
+                             ▼ (No Perfil: Toca em "Sair da conta")
+              [Logout Efetivo & Retorno à Landing]
 ```
-
-### Detalhes de Interface Mobile
-- **Tipografia**: Escalas proporcionais em rem, títulos sem quebra órfã (`line-clamp-2`/`line-clamp-3`), padding horizontal de 16px nas laterais (`px-4`).
-- **Alvos de Toque (Touch Targets)**: Altura mínima de 44px para todos os botões e abas, garantindo toque ágil e sem cliques acidentais.
-- **Barra Inferior (`Bottom Nav`)**: Fundo com vidro fosco elegante (`bg-[#090a0d]/95 backdrop-blur-md`), borda superior sutil (`border-t border-[#1a1c23]`), ícones de 20px e legendas legíveis de 10px.
 
 ---
 
-## 3. Decisões de Produto & Arquitetura
+## 2. Detalhamento das Alterações Técnicas
 
-1. **Tag de Viewport com `viewport-fit=cover`**:
-   - Permite que a interface ocupe a tela inteira em celulares modernos com cantos arredondados e entalhe/Dynamic Island, aplicando `safe-area-inset` onde necessário.
-2. **Fallback Inteligente para Autenticação Google**:
-   - Em produção na Vercel com chaves Supabase ativas, o clique dispara o redirecionamento OAuth real do Google (`supabase.auth.signInWithOAuth`).
-   - Se o projeto na Vercel ainda estiver aguardando as chaves no painel, o modal informa amigavelmente e oferece login em Modo Demonstração para que a navegação nunca trave.
-3. **Desempenho em Celulares**:
-   - Pausar ou suavizar animações Three.js pesadas quando em telas pequenas (`max-width: 768px`) para garantir 60 FPS e carregamento instantâneo no 4G/5G.
+### A. Fluxo de Entrada na Landing Page (`LandingPage.tsx` & `App.tsx`)
+1. **Redirecionamento do Botão de Trial**:
+   - No `App.tsx`, configurar `onStartFreeTrial={() => setIsAuthModalOpen(true)}` em vez de abrir o modal de cobrança com PIX.
+2. **Remoção do Link Redundante no Hero**:
+   - Remover o bloco `.sm:hidden pt-1 pb-2` contendo "Já tem conta? Fazer Login".
+3. **Navegação Suave com URLs Limpas (Sem `#`)**:
+   - Substituir os links `<a href="#faq">` e `<a href="#planos">` por manipuladores de clique com `e.preventDefault()`.
+   - Executar rolagem suave: `document.getElementById(targetId)?.scrollIntoView({ behavior: 'smooth' })`.
+   - Utilizar `window.history.replaceState(null, '', window.location.pathname)` para garantir que a barra de endereços continue estritamente limpa (`fatosbr.com.br`) sem sufixos como `#FAQ` ou `#top`.
 
----
+### B. Novo Modal de Autenticação (`AuthModal.tsx`)
+1. **Remoção Completa do "Link Mágico"**:
+   - Eliminar a aba de Magic Link e seus estados correlatos.
+   - Apenas duas abas: **"Entrar"** e **"Criar Conta"**.
+2. **Destaque ao Login com Google**:
+   - Botão proeminente **"Continuar com o Google"** no topo, integrando com o callback `https://fatosbr.com.br/oauth/consent` e fallback gracioso de demonstração.
+3. **Tela de Código Verificador de 6 Dígitos (`step === 'verify-code'`)**:
+   - Ao submeter e-mail e senha no cadastro ou login, o modal avança para a tela de verificação.
+   - Interface com 6 caixas numéricas (`input` de 1 dígito com foco automático e colagem de código completo).
+   - Botão "Confirmar e Acessar FatosBR".
+   - Temporizador regressivo para reenvio e link "Voltar e editar e-mail".
+   - Validação com feedback visual claro (sucesso/erro).
 
-## 4. Arquitetura Técnica & Componentes
-
-```
-┌────────────────────────────────────────────────────────┐
-│                      index.html                        │
-│   meta viewport (device-width, initial-scale=1.0)      │
-│   theme-color, apple-touch-icon, safe-area config      │
-└───────────────────────────┬────────────────────────────┘
-                            │
-                            ▼
-┌────────────────────────────────────────────────────────┐
-│                        App.tsx                         │
-│  - Detecta viewport mobile / safe area                 │
-│  - Renderiza LandingPage ou Feed Principal             │
-│  - Renderiza Mobile Header no topo (sm:hidden)         │
-│  - Renderiza Mobile Bottom Navigation Bar (sm:hidden)  │
-│  - Gerencia estado de autenticação e modais            │
-└──────────────┬──────────────────────────┬──────────────┘
-               │                          │
-               ▼                          ▼
-┌─────────────────────────────┐ ┌────────────────────────┐
-│       LandingPage.tsx       │ │     AuthModal.tsx      │
-│ - Hero mobile responsivo    │ │ - Botão Google OAuth   │
-│ - Botão "Entrar" no topo    │ │ - Email e Senha        │
-│ - Botão direto p/ o App     │ │ - Feedback instantâneo │
-└─────────────────────────────┘ └────────────────────────┘
-```
-
-### Mapeamento de Arquivos e Alterações
-
-1. **`index.html`**:
-   - Inclusão da meta tag de viewport com escala inicial 1.0 e `viewport-fit=cover`.
-   - Inclusão de meta tags mobile para iOS (`apple-mobile-web-app-capable`, `apple-mobile-web-app-status-bar-style`).
-2. **`src/services/authService.ts`**:
-   - Adição do método `signInWithOAuth(provider: 'google')`.
-3. **`src/components/AuthModal.tsx`**:
-   - Adição do botão de autenticação social com Google (ícone oficial colorido SVG, estilo moderno e acessível).
-   - Abas claras: "Entrar" e "Criar Conta", com login por Google e Email/Senha.
-4. **`src/components/LandingPage.tsx`**:
-   - Ajustes responsivos nas media queries da Landing Page para renderizar perfeitamente no mobile.
-   - Botão de acesso direto ao aplicativo para visitantes no celular.
-5. **`src/App.tsx`**:
-   - Revisão e blindagem da barra de navegação inferior fixa para garantir visibilidade perfeita em todas as telas móveis.
-   - Sincronização do estado de login e perfil.
+### C. Logout Efetivo no Perfil (`ProfileView.tsx` & `App.tsx`)
+1. **Sessão e Redirecionamento**:
+   - No `App.tsx`, atualizar a função `onLogout` do `ProfileView`:
+     - Chamar `await authService.signOut()`.
+     - Limpar o usuário atual: `setCurrentUser(null)`.
+     - Limpar avatar e perfil temporário se necessário.
+     - Navegar para a Landing Page: `setCurrentNav('landing')`.
+     - Resetar scroll para o topo: `window.scrollTo({ top: 0, behavior: 'smooth' })`.
+2. **Confirmação Visual**:
+   - Exibir feedback de desconexão e garantir que nenhuma interface do app logado continue visível.
 
 ---
 
-## 5. Plano de Verificação
+## 3. Plano de Verificação
 
-1. **Validação de Código e Tipos**:
-   - Executar `compile_applet` e `lint_applet` para assegurar conformidade total sem erros de compilação.
-2. **Verificação da Tag Viewport**:
-   - Inspecionar `index.html` para confirmar presença de `<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />`.
-3. **Teste Funcional de Autenticação**:
-   - Testar login com Email e Senha no modal.
-   - Testar chamada ao Google OAuth com tratamento de fallback.
-4. **Verificação de Responsividade**:
-   - Conferir que em resoluções mobile (< 768px) a barra inferior e a navegação fluem naturalmente.
+1. **Validação de Código e Linter**:
+   - Executar `compile_applet` e `lint_applet` para assegurar 0 erros de compilação TypeScript.
+2. **Teste da Landing Page e URLs**:
+   - Clicar em "Começar 3 dias grátis" e validar que o modal de Login/Cadastro abre diretamente (sem PIX).
+   - Clicar em links de navegação ("Recursos", "Planos", "FAQ") e conferir que a página rola suavemente sem adicionar hashtags na URL do navegador.
+   - Verificar ausência do texto "Já tem conta? Fazer Login" no hero mobile.
+3. **Teste do Fluxo de Autenticação**:
+   - Testar o botão "Continuar com o Google".
+   - Digitar e-mail e senha e verificar transição para a tela com 6 dígitos de verificação.
+   - Testar digitação do código de 6 dígitos e aprovação de acesso ao Feed.
+4. **Teste de Logout**:
+   - Acessar o Perfil, clicar em "Sair da conta", confirmar o alerta e verificar retorno imediato à Landing Page no estado deslogado.

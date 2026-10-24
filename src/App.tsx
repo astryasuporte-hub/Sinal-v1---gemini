@@ -652,7 +652,7 @@ export default function App() {
     return (
       <div className="min-h-screen bg-[#07080b] text-zinc-100 font-sans selection:bg-white selection:text-black">
         <LandingPage
-          onStartFreeTrial={() => setIsBillingModalOpen(true)}
+          onStartFreeTrial={() => setIsAuthModalOpen(true)}
           onEnterApp={() => setCurrentNav('home')}
           onOpenAuth={() => setIsAuthModalOpen(true)}
         />
@@ -673,6 +673,7 @@ export default function App() {
           onClose={() => setIsAuthModalOpen(false)}
           onAuthSuccess={(_email) => {
             setIsAuthModalOpen(false);
+            setCurrentNav('home');
           }}
         />
       </div>
@@ -1225,7 +1226,14 @@ export default function App() {
               onLogout={async () => {
                 await authService.signOut();
                 setCurrentUser(null);
-                setCurrentNav('home');
+                setCurrentUserAvatar(null);
+                try {
+                  localStorage.removeItem('sinal_user_profile');
+                } catch {}
+                setCurrentNav('landing');
+                if (typeof window !== 'undefined') {
+                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                }
               }}
             />
           </div>

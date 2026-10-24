@@ -1,6 +1,6 @@
 {
-  "summary":  "Plano arquitetural e de implementação para versão mobile responsiva completa no fatosbr.com.br (correção de viewport, barra inferior nativa, safe areas, landing mobile) e autenticação com Email/Senha e Google OAuth.",
-  "updatedAt":  "2026-10-24T18:11:02.667980707Z",
+  "summary":  "Plano de implementação completo para remoção de PIX no início do trial (abertura direta do login com Google), fluxo de email e senha com código de verificação de 6 dígitos (sem link mágico), logout funcional com retorno à landing page, URLs limpas sem hash # e remoção do link redundante no hero.",
+  "updatedAt":  "2026-10-24T19:14:34.805785626Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

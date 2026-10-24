@@ -1788,6 +1788,35 @@ export const LandingPage: React.FC<LandingPageProps> = ({
     } else {
       setTimeout(initGlobe, 60);
     }
+    // Interceptação de links com hash para rolagem suave sem alterar a URL no navegador (sem #FAQ, #planos, etc.)
+    const handleAnchorClick = (e: MouseEvent) => {
+      const target = (e.target as HTMLElement).closest('a[href^="#"]');
+      if (target) {
+        const href = target.getAttribute('href');
+        if (href && href.startsWith('#')) {
+          e.preventDefault();
+          const id = href.slice(1);
+          if (id === 'top' || id === '') {
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          } else {
+            const el = document.getElementById(id);
+            if (el) {
+              el.scrollIntoView({ behavior: 'smooth' });
+            }
+          }
+          if (typeof window !== 'undefined' && window.history) {
+            window.history.replaceState(null, '', window.location.pathname);
+          }
+          const drawer = document.getElementById('drawer');
+          if (drawer) drawer.classList.remove('open');
+        }
+      }
+    };
+    document.addEventListener('click', handleAnchorClick);
+
+    if (typeof window !== 'undefined' && window.location.hash) {
+      window.history.replaceState(null, '', window.location.pathname);
+    }
 
     return () => {
       if (cursorRaf) cancelAnimationFrame(cursorRaf);
@@ -1797,6 +1826,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
       window.removeEventListener('scroll', onScrollNav);
       window.removeEventListener('scroll', onScrollProgress);
       window.removeEventListener('scroll', updateSticky);
+      document.removeEventListener('click', handleAnchorClick);
     };
   }, []);
 
@@ -1931,14 +1961,6 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                 </button>
                 <button onClick={onEnterApp} className="btn btn-ghost btn-lg magnetic">
                   Acessar o App
-                </button>
-              </div>
-              <div className="sm:hidden pt-1 pb-2">
-                <button
-                  onClick={onOpenAuth || onEnterApp}
-                  className="text-xs text-zinc-400 hover:text-white underline underline-offset-4 cursor-pointer"
-                >
-                  Já tem conta? Fazer Login
                 </button>
               </div>
               <div className="hero-proof reveal d3">
