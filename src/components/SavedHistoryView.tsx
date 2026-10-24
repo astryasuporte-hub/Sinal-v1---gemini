@@ -36,6 +36,31 @@ export interface HistoryItem {
   timestamp: number;
 }
 
+export function formatHistoryRelativeTime(timestamp: number, fallbackText?: string): string {
+  if (!timestamp) return fallbackText || 'Recente';
+  const now = Date.now();
+  const diffMs = now - timestamp;
+  if (diffMs < 0) return 'Agora há pouco';
+  const diffSec = Math.floor(diffMs / 1000);
+  const diffMin = Math.floor(diffSec / 60);
+  const diffHour = Math.floor(diffMin / 60);
+  const diffDay = Math.floor(diffHour / 24);
+
+  if (diffMin < 2) return 'Agora há pouco';
+  if (diffMin < 60) return `Há ${diffMin} min`;
+  if (diffHour === 1) return 'Há 1 hora';
+  if (diffHour < 24) return `Há ${diffHour} horas`;
+  if (diffDay === 1) {
+    const d = new Date(timestamp);
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    return `Ontem às ${hh}:${mm}`;
+  }
+  if (diffDay < 7) return `Há ${diffDay} dias`;
+  const d = new Date(timestamp);
+  return d.toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' });
+}
+
 interface SavedHistoryViewProps {
   initialTab?: 'saved' | 'history';
   events: Event[];
@@ -234,7 +259,7 @@ export const SavedHistoryView: React.FC<SavedHistoryViewProps> = ({
 
       return result.map((item) => ({
         event: item.event,
-        metaText: `${item.event.category} · ${item.openedAt || item.event.relativeTime}`,
+        metaText: `${item.event.category} · ${formatHistoryRelativeTime(item.timestamp, item.openedAt || item.event.relativeTime)}`,
         timestamp: item.timestamp
       }));
     }

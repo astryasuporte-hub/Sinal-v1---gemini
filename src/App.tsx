@@ -91,6 +91,9 @@ import { motion, AnimatePresence } from 'motion/react';
 import { EditorialPushBanner, PushNotificationPayload } from './components/EditorialPushBanner';
 import { FatosBRControlView } from './components/FatosBRControlView';
 
+const HISTORY_STORAGE_KEY = 'sinal_history_items_v1';
+const MAX_HISTORY_ITEMS = 50;
+
 export default function App() {
   // Navigation & Subtabs
   const [currentNav, setCurrentNav] = useState<
@@ -167,8 +170,45 @@ export default function App() {
   const [hiddenEventIds, setHiddenEventIds] = useState<Set<string>>(new Set());
   const [savedEventIds, setSavedEventIds] = useState<Set<string>>(new Set());
 
-  // Histórico de Acontecimentos Abertos (Biblioteca Pessoal)
-  const [historyItems, setHistoryItems] = useState<HistoryItem[]>([]);
+  // Histórico de Acontecimentos Abertos (Biblioteca Pessoal) persistido no localStorage (máx 50 itens)
+  const [historyItems, setHistoryItems] = useState<HistoryItem[]>(() => {
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        const raw = localStorage.getItem(HISTORY_STORAGE_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) {
+            return parsed.slice(0, MAX_HISTORY_ITEMS);
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('Erro ao restaurar histórico de leitura do localStorage:', err);
+    }
+    return [];
+  });
+
+  // Sincronização persistente do histórico no localStorage com limite de 50 itens
+  useEffect(() => {
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        localStorage.setItem(
+          HISTORY_STORAGE_KEY,
+          JSON.stringify(historyItems.slice(0, MAX_HISTORY_ITEMS))
+        );
+      }
+    } catch (err) {
+      console.error('Falha ao persistir histórico no localStorage:', err);
+      try {
+        if (historyItems.length > 20) {
+          localStorage.setItem(
+            HISTORY_STORAGE_KEY,
+            JSON.stringify(historyItems.slice(0, 20))
+          );
+        }
+      } catch {}
+    }
+  }, [historyItems]);
 
   // Função para buscar notícias reais via provedores e alimentar o feed em tempo real (25 a 40 notícias)
   const loadRealTimeNews = async (isManualRefresh = false) => {
@@ -187,7 +227,12 @@ export default function App() {
       // Carregamento inicial / automático: verifica cache recente para economizar cotas de APIs
       const cached = rateLimitService.getCachedFeed();
       if (cached && cached.length >= 25) {
-        setEvents(cached);
+        const viewedIds = new Set(historyItems.map((h) => h.event.id));
+        const cachedWithViewed = cached.map((e) => ({
+          ...e,
+          isViewed: viewedIds.has(e.id) ? true : Boolean(e.isViewed),
+        }));
+        setEvents(cachedWithViewed);
         setLastSyncTime(
           new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
         );
@@ -203,8 +248,13 @@ export default function App() {
     try {
       const realEvents = await newsIngestionService.fetchRealTimeEventsFeed(savedEventIds);
       if (realEvents && realEvents.length > 0) {
-        setEvents(realEvents);
-        rateLimitService.saveCachedFeed(realEvents);
+        const viewedIds = new Set(historyItems.map((h) => h.event.id));
+        const eventsWithViewed = realEvents.map((e) => ({
+          ...e,
+          isViewed: viewedIds.has(e.id) ? true : Boolean(e.isViewed),
+        }));
+        setEvents(eventsWithViewed);
+        rateLimitService.saveCachedFeed(eventsWithViewed);
         setLastSyncTime(
           new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
         );
@@ -439,20 +489,23 @@ export default function App() {
   // Handler para abrir detalhe do evento e registrar no histórico real
   const handleOpenEventDetail = (event: Event) => {
     setActiveEventModal(event);
+    const now = Date.now();
+    const isoString = new Date(now).toISOString();
+
     setHistoryItems((prev) => {
+      // Reabertura: remove ocorrência anterior se já existia para reposicioná-la no topo com novo horário
       const filtered = prev.filter((item) => item.event.id !== event.id);
-      return [
-        {
-          event: { ...event, isViewed: true, viewedAt: new Date().toISOString() },
-          openedAt: 'Agora há pouco',
-          timestamp: Date.now()
-        },
-        ...filtered
-      ];
+      const updatedItem: HistoryItem = {
+        event: { ...event, isViewed: true, viewedAt: isoString },
+        openedAt: 'Agora há pouco',
+        timestamp: now
+      };
+      return [updatedItem, ...filtered].slice(0, MAX_HISTORY_ITEMS);
     });
+
     setEvents((prev) =>
       prev.map((e) =>
-        e.id === event.id ? { ...e, isViewed: true, viewedAt: new Date().toISOString() } : e
+        e.id === event.id ? { ...e, isViewed: true, viewedAt: isoString } : e
       )
     );
   };
