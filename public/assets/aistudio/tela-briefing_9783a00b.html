@@ -1,0 +1,717 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Briefings - FatosBR</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  
+  <style>
+    /* ================= VARIÁVEIS ================= */
+    :root {
+      --bg-page: #09090b;
+      --bg-card: #121215;
+      --bg-card-hover: #18181b;
+      --border-color: #27272a;
+      --border-light: #3f3f46;
+      --text-main: #f4f4f5;
+      --text-muted: #a1a1aa;
+      --text-dark: #52525b;
+      --radius-lg: 16px;
+      --radius-md: 12px;
+      --radius-sm: 8px;
+      --radius-pill: 999px;
+    }
+
+    /* ================= RESET ================= */
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    body {
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      background-color: var(--bg-page);
+      color: var(--text-main);
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+      padding: 40px 48px;
+      min-height: 100vh;
+    }
+
+    /* ================= HEADER (Título e Busca) ================= */
+    .page-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 32px;
+      flex-wrap: wrap;
+      gap: 20px;
+    }
+
+    .header-text h1 {
+      font-size: 32px;
+      font-weight: 700;
+      letter-spacing: -1px;
+      margin-bottom: 8px;
+    }
+
+    .header-text p {
+      font-size: 15px;
+      color: var(--text-muted);
+    }
+
+    .search-box {
+      position: relative;
+      width: 280px;
+    }
+
+    .search-box input {
+      width: 100%;
+      background-color: transparent;
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-pill);
+      padding: 10px 16px 10px 40px;
+      color: #fff;
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    .search-box input:focus { border-color: var(--border-light); }
+
+    .search-box svg {
+      position: absolute;
+      left: 14px;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 16px;
+      height: 16px;
+      color: var(--text-muted);
+    }
+
+    /* ================= FILTROS ================= */
+    .filters {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 40px;
+      overflow-x: auto;
+      padding-bottom: 4px;
+      scrollbar-width: none;
+    }
+    .filters::-webkit-scrollbar { display: none; }
+
+    .filter-btn {
+      background-color: transparent;
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-pill);
+      padding: 8px 18px;
+      color: var(--text-muted);
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+      white-space: nowrap;
+    }
+
+    .filter-btn:hover {
+      border-color: var(--border-light);
+      color: #fff;
+    }
+
+    .filter-btn.active {
+      background-color: #fff;
+      color: #000;
+      border-color: #fff;
+    }
+
+    /* ================= LAYOUT PRINCIPAL ================= */
+    .content-layout {
+      display: grid;
+      grid-template-columns: 1fr 320px;
+      gap: 48px;
+      align-items: start;
+      max-width: 1200px;
+    }
+
+    /* ================= FEED (Cards Principais) ================= */
+    .section-title {
+      font-size: 18px;
+      font-weight: 700;
+      margin-bottom: 20px;
+      color: #fff;
+    }
+
+    .card-hero {
+      position: relative;
+      border-radius: var(--radius-lg);
+      overflow: hidden;
+      margin-bottom: 20px;
+      border: 1px solid var(--border-color);
+      min-height: 220px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 24px;
+      background-color: var(--bg-card);
+      background-size: cover;
+      background-position: center;
+    }
+
+    /* Overlay escuro para o texto ficar legível */
+    .card-hero::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(180deg, rgba(9,9,11,0.3) 0%, rgba(9,9,11,0.8) 100%);
+      z-index: 1;
+    }
+
+    .card-content {
+      position: relative;
+      z-index: 2;
+    }
+
+    .card-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 20px;
+    }
+
+    .card-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      color: #e4e4e7;
+    }
+
+    .card-tag svg { width: 16px; height: 16px; }
+
+    .status-badge {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: var(--radius-sm);
+      background-color: rgba(9,9,11,0.6);
+      border: 1px solid var(--border-light);
+      color: #fff;
+      backdrop-filter: blur(4px);
+    }
+
+    .card-hero h3 {
+      font-size: 24px;
+      font-weight: 700;
+      line-height: 1.2;
+      letter-spacing: -0.5px;
+      margin-bottom: 8px;
+      max-width: 80%;
+    }
+
+    .card-hero p.desc {
+      font-size: 14px;
+      color: #d4d4d8;
+      margin-bottom: 24px;
+      max-width: 80%;
+    }
+
+    .card-bottom {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      margin-top: auto;
+    }
+
+    .card-meta {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 12px;
+      color: #a1a1aa;
+      font-weight: 500;
+    }
+
+    .card-meta span { display: inline-flex; align-items: center; gap: 5px; }
+    .card-meta svg { width: 14px; height: 14px; }
+
+    .btn-open {
+      background-color: #fff;
+      color: #000;
+      border: none;
+      border-radius: var(--radius-sm);
+      padding: 10px 16px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: background 0.2s;
+      text-decoration: none;
+    }
+
+    .btn-open:hover { background-color: #e4e4e7; }
+    .btn-open svg { width: 14px; height: 14px; }
+
+    /* ================= LISTA (Ontem e dias anteriores) ================= */
+    .list-date-group { margin-bottom: 32px; }
+    
+    .list-date-group-title {
+      font-size: 16px;
+      font-weight: 700;
+      margin-bottom: 16px;
+      color: #fff;
+    }
+
+    .list-group {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .list-item {
+      display: flex;
+      align-items: center;
+      background-color: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-md);
+      padding: 16px;
+      text-decoration: none;
+      color: inherit;
+      transition: background 0.2s;
+      cursor: pointer;
+    }
+
+    .list-item:hover { background-color: var(--bg-card-hover); }
+
+    .list-thumb {
+      width: 56px;
+      height: 56px;
+      border-radius: var(--radius-sm);
+      object-fit: cover;
+      margin-right: 16px;
+      flex-shrink: 0;
+    }
+
+    .list-info { flex: 1; }
+
+    .list-info h4 {
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 4px;
+      color: #fff;
+    }
+
+    .list-meta {
+      font-size: 12px;
+      color: var(--text-muted);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .list-meta span { display: inline-flex; align-items: center; gap: 4px; }
+    .list-meta .dot { width: 3px; height: 3px; border-radius: 50%; background: var(--border-light); }
+
+    .list-arrow { color: var(--border-light); margin-left: 16px; }
+    .list-arrow svg { width: 20px; height: 20px; }
+
+    /* ================= SIDEBAR DIREITA (Widgets) ================= */
+    .widget-card {
+      background-color: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-lg);
+      padding: 24px;
+      margin-bottom: 20px;
+    }
+
+    .widget-card h3 {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .widget-card p {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-bottom: 24px;
+      line-height: 1.5;
+    }
+
+    .toggle-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 16px 0;
+      border-bottom: 1px solid var(--border-color);
+    }
+    .toggle-row:last-of-type { border-bottom: none; }
+
+    .toggle-info {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .toggle-info svg { width: 18px; height: 18px; color: var(--text-muted); }
+    .toggle-text h4 { font-size: 14px; font-weight: 500; color: #fff; margin-bottom: 2px; }
+    .toggle-text p { font-size: 12px; color: var(--text-muted); margin: 0; }
+
+    /* Switch Toggle */
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 44px;
+      height: 24px;
+    }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background-color: #27272a;
+      transition: .3s;
+      border-radius: 34px;
+    }
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 18px;
+      width: 18px;
+      left: 3px;
+      bottom: 3px;
+      background-color: white;
+      transition: .3s;
+      border-radius: 50%;
+    }
+    input:checked + .slider { background-color: #fff; }
+    input:checked + .slider:before { transform: translateX(20px); background-color: #000; }
+
+    .widget-subtext {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 20px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border-color);
+      line-height: 1.5;
+    }
+
+    .config-btn {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background-color: transparent;
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-sm);
+      padding: 14px 16px;
+      color: #fff;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      margin-top: 20px;
+      width: 100%;
+      transition: background 0.2s;
+    }
+    .config-btn:hover { background-color: #18181b; }
+    .config-btn svg { width: 16px; height: 16px; color: var(--text-muted); }
+
+    /* Trial Info */
+    .trial-info {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 8px 4px;
+    }
+    .trial-badge {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      padding: 4px 8px;
+      background-color: #18181b;
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+      color: var(--text-muted);
+    }
+    .trial-text h4 { font-size: 13px; font-weight: 500; color: #fff; }
+    .trial-text p { font-size: 11px; color: var(--text-muted); margin: 0; }
+
+    /* ================= RESPONSIVIDADE (Mobile) ================= */
+    @media (max-width: 1024px) {
+      .content-layout {
+        grid-template-columns: 1fr;
+      }
+      .right-sidebar {
+        display: none; /* Oculta o painel de config no tablet/mobile */
+      }
+    }
+
+    @media (max-width: 768px) {
+      body {
+        padding: 24px 20px 80px 20px;
+      }
+      
+      .page-header { margin-bottom: 24px; }
+      .header-text h1 { font-size: 26px; }
+      .header-text p { font-size: 14px; }
+      
+      .search-box { display: none; } /* Esconde a busca no mobile */
+
+      /* Card Hero Mobile */
+      .card-hero {
+        min-height: 260px;
+        padding: 20px;
+      }
+      .card-hero h3 { font-size: 22px; max-width: 100%; }
+      .card-hero p.desc { display: none; } /* Esconde descrição no mobile */
+      
+      .btn-open {
+        width: 36px;
+        height: 36px;
+        border-radius: 50%;
+        padding: 0;
+        justify-content: center;
+      }
+      .btn-open .btn-text { display: none; } /* Vira só o ícone da seta */
+      
+      .card-top .card-tag { font-size: 12px; }
+      
+      /* Lista Mobile */
+      .list-meta .dot, .list-meta .meta-type { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- HEADER (Título e Busca) -->
+  <div class="page-header">
+    <div class="header-text">
+      <h1>Briefings</h1>
+      <p>Resumos do que realmente importa, direto no seu e-mail e aqui na FatosBR.</p>
+    </div>
+    
+    <div class="search-box">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="text" placeholder="Buscar briefings...">
+    </div>
+  </div>
+
+  <!-- FILTROS -->
+  <div class="filters">
+    <button class="filter-btn active">Mais recentes</button>
+    <button class="filter-btn">Manhã</button>
+    <button class="filter-btn">Noite</button>
+    <button class="filter-btn">Preferências</button>
+  </div>
+
+  <!-- GRID PRINCIPAL (Feed + Widgets) -->
+  <div class="content-layout">
+    
+    <!-- COLUNA ESQUERDA: Feed de Briefings -->
+    <div class="feed-column">
+      <h2 class="section-title">Hoje</h2>
+
+      <!-- CARD NOITE (Imagem escura) -->
+      <div class="card-hero" style="background-image: url('https://images.unsplash.com/photo-1477959858617-67f85cf4f1df?q=80&w=2000&auto=format&fit=crop');">
+        <div class="card-content card-top">
+          <span class="card-tag">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+            Resumo da noite
+          </span>
+          <span class="status-badge">Pronto</span>
+        </div>
+        <div class="card-content">
+          <h3>Seu briefing da noite está pronto.</h3>
+          <p class="desc">Veja o que realmente importou ao longo do dia e o que mudou.</p>
+          <div class="card-bottom">
+            <div class="card-meta">
+              <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>4 acontecimentos</span>
+              <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>2 min de leitura</span>
+              <span style="font-family: monospace;">07:08</span>
+            </div>
+            <a href="#" class="btn-open">
+              <span class="btn-text">Abrir briefing</span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+            </a>
+          </div>
+        </div>
+      </div>
+
+      <!-- CARD MANHÃ (Imagem clara) -->
+      <div class="card-hero" style="background-image: url('https://images.unsplash.com/photo-1496368077930-c1e31b4e5bda?q=80&w=2000&auto=format&fit=crop');">
+        <div class="card-content card-top">
+          <span class="card-tag">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+            Resumo da manhã
+          </span>
+          <span class="status-badge">Enviado</span>
+        </div>
+        <div class="card-content">
+          <h3>Seu briefing da manhã está pronto.</h3>
+          <p class="desc">Os principais acontecimentos das últimas horas, organizados e resumidos para você.</p>
+          <div class="card-bottom">
+            <div class="card-meta">
+              <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>6 acontecimentos</span>
+              <span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>3 min de leitura</span>
+              <span style="font-family: monospace;">07:03</span>
+            </div>
+            <a href="#" class="btn-open">
+              <span class="btn-text">Abrir briefing</span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+            </a>
+          </div>
+        </div>
+      </div>
+
+      <!-- SEÇÃO ONTEM -->
+      <div class="list-date-group">
+        <h2 class="list-date-group-title">Ontem</h2>
+        <div class="list-group">
+          
+          <div class="list-item">
+            <img src="https://images.unsplash.com/photo-1477959858617-67f85cf4f1df?q=80&w=200&auto=format&fit=crop" class="list-thumb" alt="Thumb">
+            <div class="list-info">
+              <h4>Resumo da noite</h4>
+              <div class="list-meta">
+                <span class="meta-type">4 acontecimentos</span>
+                <span class="dot"></span>
+                <span>2 min de leitura</span>
+                <span class="dot"></span>
+                <span>04 de out. de 2026 · 20:12 · Enviado</span>
+              </div>
+            </div>
+            <div class="list-arrow">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+            </div>
+          </div>
+
+          <div class="list-item">
+            <img src="https://images.unsplash.com/photo-1496368077930-c1e31b4e5bda?q=80&w=200&auto=format&fit=crop" class="list-thumb" alt="Thumb">
+            <div class="list-info">
+              <h4>Resumo da manhã</h4>
+              <div class="list-meta">
+                <span class="meta-type">6 acontecimentos</span>
+                <span class="dot"></span>
+                <span>3 min de leitura</span>
+                <span class="dot"></span>
+                <span>04 de out. de 2026 · 07:03 · Enviado</span>
+              </div>
+            </div>
+            <div class="list-arrow">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- SEÇÃO DIA 3 -->
+      <div class="list-date-group">
+        <h2 class="list-date-group-title">3 de outubro de 2026</h2>
+        <div class="list-group">
+          <div class="list-item">
+            <img src="https://images.unsplash.com/photo-1477959858617-67f85cf4f1df?q=80&w=200&auto=format&fit=crop" class="list-thumb" alt="Thumb">
+            <div class="list-info">
+              <h4>Resumo da noite</h4>
+              <div class="list-meta">
+                <span class="meta-type">4 acontecimentos</span>
+                <span class="dot"></span>
+                <span>2 min de leitura</span>
+                <span class="dot"></span>
+                <span>03 de out. de 2026 · 20:12 · Enviado</span>
+              </div>
+            </div>
+            <div class="list-arrow">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+            </div>
+          </div>
+          
+          <div class="list-item">
+            <img src="https://images.unsplash.com/photo-1496368077930-c1e31b4e5bda?q=80&w=200&auto=format&fit=crop" class="list-thumb" alt="Thumb">
+            <div class="list-info">
+              <h4>Resumo da manhã</h4>
+              <div class="list-meta">
+                <span class="meta-type">6 acontecimentos</span>
+                <span class="dot"></span>
+                <span>3 min de leitura</span>
+                <span class="dot"></span>
+                <span>03 de out. de 2026 · 07:03 · Enviado</span>
+              </div>
+            </div>
+            <div class="list-arrow">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- COLUNA DIREITA: Widgets de Configuração -->
+    <div class="right-sidebar">
+      
+      <div class="widget-card">
+        <h3>Seus briefings</h3>
+        <p>Escolha quando receber os resumos do que você acompanha.</p>
+
+        <div class="toggle-row">
+          <div class="toggle-info">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+            <div class="toggle-text">
+              <h4>Briefing da manhã</h4>
+              <p>07:00</p>
+            </div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div class="toggle-row">
+          <div class="toggle-info">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+            <div class="toggle-text">
+              <h4>Briefing da noite</h4>
+              <p>20:00</p>
+            </div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div class="widget-subtext">
+          America/Sao Paulo · e-mail e leitura na FatosBR.
+        </div>
+
+        <button class="config-btn">
+          <span style="display: flex; align-items: center; gap: 8px;">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            Configurar preferências
+          </span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
+      </div>
+
+      <div class="trial-info">
+        <span class="trial-badge">TRIAL</span>
+        <div class="trial-text">
+          <h4>Teste grátis</h4>
+          <p>Termina em 11 de out. de 2026</p>
+        </div>
+      </div>
+
+    </div>
+
+  </div>
+
+</body>
+</html>

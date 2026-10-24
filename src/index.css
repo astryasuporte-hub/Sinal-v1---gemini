@@ -1,0 +1,80 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+@import "tailwindcss";
+
+@keyframes eventCardSlideUp {
+  0% {
+    opacity: 0;
+    transform: translateY(18px) scale(0.995);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.animate-feed-card {
+  animation: eventCardSlideUp 0.42s cubic-bezier(0.22, 1, 0.36, 1) both;
+  will-change: transform, opacity;
+}
+
+@keyframes feedFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-feed-fade {
+  animation: feedFadeIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes indeterminateProgress {
+  0% {
+    transform: translateX(-100%);
+  }
+  50% {
+    transform: translateX(35%);
+  }
+  100% {
+    transform: translateX(110%);
+  }
+}
+
+.animate-indeterminate {
+  animation: indeterminateProgress 1.25s infinite cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes viewFadeIn {
+  0% {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-view-fade {
+  animation: viewFadeIn 0.22s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  will-change: opacity, transform;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-feed-card,
+  .animate-feed-fade,
+  .animate-indeterminate,
+  .animate-view-fade {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+}

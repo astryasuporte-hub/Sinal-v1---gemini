@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="x-apple-disable-message-reformatting">
+  <title>FatosBR • Teste de Conexão Resend</title>
+  <style>
+    /* Reset e blindagem */
+    body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+    table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+    img { border: 0; outline: none; text-decoration: none; display: block; max-width: 100% !important; height: auto !important; }
+    
+    body { 
+      margin: 0 !important; 
+      padding: 0 !important; 
+      width: 100% !important; 
+      background-color: #090a0d; 
+      color: #f4f4f5; 
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; 
+      overflow-x: hidden;
+    }
+
+    /* Classes de responsividade */
+    @media only screen and (max-width: 620px) {
+      .email-container {
+        width: 100% !important;
+        max-width: 100% !important;
+        border-radius: 0 !important;
+        border: none !important;
+      }
+      .mobile-padding {
+        padding-left: 20px !important;
+        padding-right: 20px !important;
+      }
+      /* Empilha a tabela de metadados no mobile */
+      .meta-table td {
+        display: block !important;
+        width: 100% !important;
+        text-align: left !important;
+        padding: 8px 16px !important;
+        border-bottom: none !important;
+      }
+      .meta-table td:first-child {
+        border-bottom: 1px solid #222533 !important;
+        padding-bottom: 4px !important;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+      .meta-table tr:last-child td:last-child {
+        padding-bottom: 12px !important;
+      }
+      .meta-table tr {
+        border-bottom: 1px solid #222533 !important;
+        display: block !important;
+      }
+      .meta-table tr:last-child { border-bottom: none !important; }
+    }
+  </style>
+</head>
+<body style="margin: 0; padding: 0; background-color: #090a0d; color: #f4f4f5;">
+  <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: #090a0d; table-layout: fixed;">
+    <tr>
+      <td align="center" style="padding: 32px 16px;">
+        <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" class="email-container" style="max-width: 560px; background-color: #111216; border: 1px solid #23252d; border-radius: 20px; overflow: hidden; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);">
+          
+          <!-- Top Header -->
+          <tr>
+            <td style="padding: 32px 32px 20px 32px; border-bottom: 1px solid #1f222b;" class="mobile-padding">
+              <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%">
+                <tr>
+                  <td valign="middle">
+                    <div style="font-size: 11px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; color: #34d399; margin-bottom: 4px;">
+                      ● Conexão Operacional Ativa
+                    </div>
+                    <h2 style="margin: 0; font-size: 20px; font-weight: 700; color: #ffffff;">
+                      Teste de Entrega Resend
+                    </h2>
+                  </td>
+                  <td align="right" valign="middle" style="padding-top: 8px;">
+                    <span style="font-family: monospace; font-size: 11px; color: #a1a1aa; background-color: #1a1d26; padding: 6px 12px; border-radius: 8px; border: 1px solid #2d3142;">
+                      {{latency}}
+                    </span>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Mensagem Central -->
+          <tr>
+            <td style="padding: 28px 32px;" class="mobile-padding">
+              <div style="font-size: 14px; line-height: 1.6; color: #d4d4d8; margin-bottom: 24px; word-wrap: break-word;">
+                {{message}}
+              </div>
+
+              <!-- Metadados da Conexão (Blindados) -->
+              <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" class="meta-table" style="background-color: #161820; border: 1px solid #262936; border-radius: 12px; font-size: 12px; color: #a1a1aa; border-collapse: separate;">
+                <tr>
+                  <td style="padding: 12px 16px; border-bottom: 1px solid #222533; width: 40%;">Destinatário:</td>
+                  <td align="right" style="padding: 12px 16px; border-bottom: 1px solid #222533; font-family: monospace; color: #ffffff; word-break: break-all;">{{recipient}}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 12px 16px; border-bottom: 1px solid #222533; width: 40%;">Remetente Oficial:</td>
+                  <td align="right" style="padding: 12px 16px; border-bottom: 1px solid #222533; font-family: monospace; color: #60a5fa; word-break: break-all;">{{sender}}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 12px 16px; width: 40%;">Hora do Disparo:</td>
+                  <td align="right" style="padding: 12px 16px; font-family: monospace; color: #ffffff;">{{timestamp}}</td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="background-color: #0d0e12; padding: 20px 32px; border-top: 1px solid #1f222b; text-align: center; font-size: 11px; color: #71717a;" class="mobile-padding">
+              FatosBR • Plataforma de Consumo e Inteligência Editorial<br>
+              Ambiente de validação da API do Resend.
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

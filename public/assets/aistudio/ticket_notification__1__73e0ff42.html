@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="x-apple-disable-message-reformatting">
+  <title>FatosBR Suporte • {{subject}}</title>
+  <style>
+    /* Reset e blindagem */
+    body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+    table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+    img { border: 0; outline: none; text-decoration: none; display: block; max-width: 100% !important; height: auto !important; }
+    
+    body { 
+      margin: 0 !important; 
+      padding: 0 !important; 
+      width: 100% !important; 
+      background-color: #090a0d; 
+      color: #f4f4f5; 
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; 
+      overflow-x: hidden;
+    }
+
+    /* Responsividade */
+    @media only screen and (max-width: 620px) {
+      .email-container {
+        width: 100% !important;
+        max-width: 100% !important;
+        border-radius: 0 !important;
+        border: none !important;
+      }
+      .mobile-padding {
+        padding-left: 20px !important;
+        padding-right: 20px !important;
+      }
+      /* Empilha cabeçalho e data */
+      .header-table td {
+        display: block !important;
+        width: 100% !important;
+        text-align: left !important;
+        padding-bottom: 8px !important;
+      }
+      .header-date {
+        text-align: left !important;
+        padding-left: 0 !important;
+        font-size: 12px !important;
+        color: #52525b !important;
+      }
+    }
+  </style>
+</head>
+<body style="margin: 0; padding: 0; background-color: #090a0d; color: #f4f4f5;">
+  <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: #090a0d; table-layout: fixed;">
+    <tr>
+      <td align="center" style="padding: 32px 16px;">
+        <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" class="email-container" style="max-width: 580px; background-color: #111216; border: 1px solid #23252d; border-radius: 20px; overflow: hidden; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);">
+          
+          <!-- Header -->
+          <tr>
+            <td style="padding: 32px 32px 20px 32px; border-bottom: 1px solid #1f222b;" class="mobile-padding">
+              <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" class="header-table">
+                <tr>
+                  <td valign="middle">
+                    <span style="display: inline-block; padding: 4px 10px; font-size: 10px; font-weight: 700; font-family: monospace; text-transform: uppercase; color: #60a5fa; background-color: rgba(30, 58, 138, 0.4); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 6px; margin-bottom: 10px;">
+                      Chamado {{ticket_id}}
+                    </span>
+                    <h2 style="margin: 0; font-size: 20px; font-weight: 700; color: #ffffff; line-height: 1.3;">
+                      {{subject}}
+                    </h2>
+                  </td>
+                  <td align="right" valign="top" class="header-date" style="padding-top: 4px;">
+                    <span style="font-size: 12px; font-family: monospace; color: #a1a1aa; background-color: #161820; padding: 4px 10px; border-radius: 6px; border: 1px solid #262936;">
+                      {{date}}
+                    </span>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Mensagem -->
+          <tr>
+            <td style="padding: 28px 32px;" class="mobile-padding">
+              <div style="font-size: 14px; color: #a1a1aa; margin-bottom: 16px;">
+                Olá, <strong style="color: #ffffff;">{{user_name}}</strong>. Há uma nova atualização em seu atendimento:
+              </div>
+
+              <!-- Caixa de Mensagem -->
+              <div style="background-color: #161820; border-left: 4px solid #3b82f6; border-radius: 0 12px 12px 0; padding: 20px; font-size: 14.5px; line-height: 1.65; color: #e4e4e7; margin-bottom: 28px; word-wrap: break-word;">
+                {{message}}
+              </div>
+
+              <p style="font-size: 12.5px; color: #71717a; line-height: 1.6; margin: 0; border-top: 1px solid #1f222b; padding-top: 20px;">
+                Se precisar de esclarecimentos adicionais, você pode responder diretamente a este chamado ou acessar o painel de suporte.
+              </p>
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="background-color: #0d0e12; padding: 24px 32px; border-top: 1px solid #1f222b; text-align: center; font-size: 11px; color: #71717a; line-height: 1.6;" class="mobile-padding">
+              <strong style="color: #a1a1aa;">FatosBR</strong> • Atendimento e Suporte Técnico ao Assinante<br>
+              Notificação gerada automaticamente via <strong>Resend API</strong>.
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

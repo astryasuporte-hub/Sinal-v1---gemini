@@ -1,0 +1,6 @@
+{
+  "name": "FatosBR",
+  "description": "Você escolhe. O FatosBR observa. Acompanhe temas, pessoas e empresas. Menos ruído, mais contexto.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

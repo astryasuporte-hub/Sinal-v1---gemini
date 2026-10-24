@@ -1,0 +1,6 @@
+{
+  "summary":  "Plano detalhado para persistência do histórico de leitura (historyItems) no localStorage com limite de 50 itens e salvamento do Documento Mestre de Segurança em docs/SECURITY_MASTER.md.",
+  "updatedAt":  "2026-10-24T17:03:53.658873629Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

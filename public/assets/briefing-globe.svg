@@ -1,0 +1,135 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500" width="100%" height="100%">
+  <defs>
+    <!-- Gradiente de Esfera do Globo -->
+    <radialGradient id="globeSphere" cx="45%" cy="40%" r="65%">
+      <stop offset="0%" stop-color="#2a2e38" />
+      <stop offset="35%" stop-color="#141720" />
+      <stop offset="70%" stop-color="#0a0c10" />
+      <stop offset="100%" stop-color="#040507" />
+    </radialGradient>
+
+    <!-- Brilho Atmosférico na Borda -->
+    <radialGradient id="atmosphereGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="85%" stop-color="#ffffff" stop-opacity="0" />
+      <stop offset="97%" stop-color="#ffffff" stop-opacity="0.35" />
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.6" />
+    </radialGradient>
+
+    <!-- Halo Externo -->
+    <filter id="softGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <linearGradient id="arcGrad1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.8" />
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.1" />
+    </linearGradient>
+
+    <linearGradient id="arcGrad2" x1="100%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.9" />
+      <stop offset="100%" stop-color="#71717a" stop-opacity="0.2" />
+    </linearGradient>
+  </defs>
+
+  <!-- Campo de estrelas de fundo -->
+  <g opacity="0.4">
+    <circle cx="35" cy="45" r="1" fill="#fff" />
+    <circle cx="95" cy="85" r="1.5" fill="#fff" />
+    <circle cx="140" cy="25" r="0.8" fill="#fff" />
+    <circle cx="420" cy="50" r="1.2" fill="#fff" />
+    <circle cx="470" cy="110" r="0.8" fill="#fff" />
+    <circle cx="450" cy="380" r="1" fill="#fff" />
+    <circle cx="30" cy="420" r="1.4" fill="#fff" />
+    <circle cx="80" cy="350" r="0.8" fill="#fff" />
+  </g>
+
+  <!-- Esfera Base da Terra -->
+  <circle cx="250" cy="250" r="210" fill="url(#globeSphere)" />
+
+  <!-- Continentes / Formações Terrestres Noturnas em Tons Escuros e Luzes -->
+  <g opacity="0.85">
+    <!-- América do Norte & Atlântico -->
+    <path d="M 120 160 Q 150 140 180 150 Q 210 165 240 150 Q 260 170 250 200 Q 230 220 200 210 Q 160 230 130 190 Z" fill="#1b202c" opacity="0.7" />
+    <!-- Europa & África do Norte -->
+    <path d="M 270 140 Q 310 130 350 150 Q 380 170 370 210 Q 340 240 310 230 Q 280 200 270 170 Z" fill="#1e2433" opacity="0.8" />
+    <!-- América do Sul / Costas -->
+    <path d="M 160 240 Q 190 250 210 290 Q 220 340 190 380 Q 170 370 160 320 Z" fill="#181c26" opacity="0.75" />
+    <!-- Linhas de Latitude / Longitude Sutis -->
+    <ellipse cx="250" cy="250" rx="210" ry="120" fill="none" stroke="#ffffff" stroke-opacity="0.07" stroke-width="0.8" stroke-dasharray="4 4" />
+    <ellipse cx="250" cy="250" rx="210" ry="60" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="0.8" />
+    <ellipse cx="250" cy="250" rx="120" ry="210" fill="none" stroke="#ffffff" stroke-opacity="0.07" stroke-width="0.8" stroke-dasharray="5 5" />
+    <line x1="250" y1="40" x2="250" y2="460" stroke="#ffffff" stroke-opacity="0.1" stroke-width="0.8" />
+    <line x1="40" y1="250" x2="460" y2="250" stroke="#ffffff" stroke-opacity="0.1" stroke-width="0.8" />
+  </g>
+
+  <!-- Clusters de Luzes Noturnas das Cidades (City Lights) -->
+  <g fill="#ffffff">
+    <!-- Hub Nova York / Costa Leste -->
+    <circle cx="185" cy="180" r="3" opacity="0.95" />
+    <circle cx="190" cy="183" r="1.5" opacity="0.8" />
+    <circle cx="178" cy="186" r="1.8" opacity="0.7" />
+    
+    <!-- Hub Londres / Paris / Berlim -->
+    <circle cx="310" cy="165" r="3.2" opacity="0.95" />
+    <circle cx="318" cy="168" r="2" opacity="0.85" />
+    <circle cx="328" cy="162" r="2.2" opacity="0.8" />
+    <circle cx="305" cy="175" r="1.8" opacity="0.7" />
+
+    <!-- Hub Tóquio / Ásia -->
+    <circle cx="400" cy="210" r="3" opacity="0.9" />
+    <circle cx="408" cy="215" r="1.8" opacity="0.7" />
+
+    <!-- Hub São Paulo / Brasil -->
+    <circle cx="195" cy="330" r="2.8" opacity="0.95" />
+    <circle cx="188" cy="325" r="1.6" opacity="0.7" />
+    <circle cx="205" cy="338" r="1.4" opacity="0.6" />
+
+    <!-- Hub Vale do Silício -->
+    <circle cx="130" cy="185" r="2.5" opacity="0.85" />
+
+    <!-- Hub Oriente Médio / Dubai -->
+    <circle cx="355" cy="215" r="2.5" opacity="0.85" />
+  </g>
+
+  <!-- Arcos Orbitais / Linhas de Dados Interconectando Cidades -->
+  <g fill="none" stroke-linecap="round">
+    <!-- NY -> Londres -->
+    <path d="M 185 180 Q 240 120 310 165" stroke="url(#arcGrad1)" stroke-width="1.8" />
+    <!-- Londres -> Tóquio -->
+    <path d="M 310 165 Q 360 150 400 210" stroke="url(#arcGrad2)" stroke-width="1.6" />
+    <!-- NY -> São Paulo -->
+    <path d="M 185 180 Q 170 250 195 330" stroke="url(#arcGrad1)" stroke-width="1.6" stroke-dasharray="2 3" />
+    <!-- São Paulo -> Londres -->
+    <path d="M 195 330 Q 270 270 310 165" stroke="url(#arcGrad2)" stroke-width="1.5" />
+    <!-- SF -> NY -->
+    <path d="M 130 185 Q 155 170 185 180" stroke="#ffffff" stroke-opacity="0.6" stroke-width="1.2" />
+    <!-- Londres -> Dubai -->
+    <path d="M 310 165 Q 340 185 355 215" stroke="#ffffff" stroke-opacity="0.5" stroke-width="1.2" />
+  </g>
+
+  <!-- Nós de Conexão com Halos Luminosos -->
+  <g>
+    <!-- Halo NY -->
+    <circle cx="185" cy="180" r="8" fill="#ffffff" fill-opacity="0.15" />
+    <circle cx="185" cy="180" r="4.5" fill="#ffffff" fill-opacity="0.3" />
+    <circle cx="185" cy="180" r="2.2" fill="#ffffff" />
+
+    <!-- Halo Londres -->
+    <circle cx="310" cy="165" r="9" fill="#ffffff" fill-opacity="0.18" />
+    <circle cx="310" cy="165" r="5" fill="#ffffff" fill-opacity="0.35" />
+    <circle cx="310" cy="165" r="2.5" fill="#ffffff" />
+
+    <!-- Halo Tóquio -->
+    <circle cx="400" cy="210" r="7" fill="#ffffff" fill-opacity="0.15" />
+    <circle cx="400" cy="210" r="2" fill="#ffffff" />
+
+    <!-- Halo São Paulo -->
+    <circle cx="195" cy="330" r="8" fill="#ffffff" fill-opacity="0.18" />
+    <circle cx="195" cy="330" r="4.5" fill="#ffffff" fill-opacity="0.35" />
+    <circle cx="195" cy="330" r="2.2" fill="#ffffff" />
+  </g>
+
+  <!-- Brilho Atmosférico na Margem da Terra -->
+  <circle cx="250" cy="250" r="210" fill="url(#atmosphereGlow)" pointer-events="none" />
+</svg>

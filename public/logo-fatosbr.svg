@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 340 80" fill="none">
+  <defs>
+    <filter id="luminous-glow" x="-10%" y="-10%" width="120%" height="120%" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="0" stdDeviation="3" flood-color="#ffffff" flood-opacity="0.35"/>
+    </filter>
+    <linearGradient id="white-sheen" x1="0" y1="0" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="100%" stop-color="#e2e8f0" />
+    </linearGradient>
+  </defs>
+
+  <!-- Símbolo FatosBR: Linhas convergentes para o vértice central -->
+  <g filter="url(#luminous-glow)" fill="url(#white-sheen)">
+    <!-- Barra Superior 1 -->
+    <path d="M 8 18 H 36 C 40 18 44 20 47 23 L 64 38 H 70 C 72 38 73 39 74 40 L 70 41 H 63 L 45 25 C 43 23 40 22 36 22 H 8 C 6.5 22 5 20.5 5 19 C 5 17.5 6.5 18 8 18 Z" />
+    
+    <!-- Barra Superior 2 -->
+    <path d="M 8 32 H 30 C 33 32 36 33.5 38 35.5 L 53 47 C 55 48.5 57 49 59 49 H 75 L 82 40 L 75 31 H 59 C 57 31 55 31.5 53 33 L 38 44.5 C 36 46.5 33 48 30 48 H 8 C 6.5 48 5 46.5 5 45 C 5 43.5 6.5 44 8 44 Z" />
+    
+    <!-- Linhas horizontais nítidas do emblema FatosBR -->
+    <!-- Barra 1 -->
+    <rect x="6" y="16" width="32" height="6.5" rx="3.25" />
+    <path d="M 34 16 L 68 37 L 64 42 L 30 22.5 Z" />
+
+    <!-- Barra 2 -->
+    <rect x="6" y="29" width="26" height="6.5" rx="3.25" />
+    <path d="M 28 29 L 58 38 L 56 42.5 L 26 35.5 Z" />
+
+    <!-- Barra 3 -->
+    <rect x="6" y="44.5" width="26" height="6.5" rx="3.25" />
+    <path d="M 26 44.5 L 56 37.5 L 58 42 L 28 51 Z" />
+
+    <!-- Barra 4 -->
+    <rect x="6" y="57.5" width="32" height="6.5" rx="3.25" />
+    <path d="M 30 57.5 L 64 38 L 68 43 L 34 64 Z" />
+
+    <!-- Ponteira central / Pen nib -->
+    <polygon points="62,40 76,33 90,40 76,47" />
+    <polygon points="86,40 74,35 74,45" opacity="0.3" fill="#000000" />
+  </g>
+
+  <!-- Tipografia FatosBR de Alto Contraste -->
+  <text x="108" y="53" font-family="-apple-system, BlinkMacSystemFont, 'Plus Jakarta Sans', 'Inter', sans-serif" font-size="44" font-weight="700" letter-spacing="-1.2px" fill="url(#white-sheen)" filter="url(#luminous-glow)">
+    Fatos<tspan font-weight="900" letter-spacing="-0.5px">BR</tspan>
+  </text>
+</svg>
