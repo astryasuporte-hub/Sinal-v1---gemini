@@ -1,6 +1,6 @@
 {
-  "summary":  "Plano detalhado para resolver a mensagem verde de status, corrigir logout definitivo, isolar perfis comuns de admin, tratar redirect do Google OAuth (/oauth/consent), sincronizar dados dinâmicos do usuário, acionar onboarding no primeiro login e limpar botões redundantes na Landing Page.",
-  "updatedAt":  "2026-10-24T22:22:35.988362099Z",
+  "summary":  "Plano de implementação para a página dedicada de login em tela cheia e o novo fluxo completo de Onboarding em 7 etapas adaptado para Mobile e PC, incorporando o protótipo do Figma e as imagens de alta resolução do Globo Terrestre e do Selo Luminoso de Conclusão.",
+  "updatedAt":  "2026-10-25T01:41:50.614675791Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

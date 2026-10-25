@@ -64,6 +64,7 @@ interface ProfileViewProps {
   onOpenLanding?: () => void;
   onOpenAuth?: () => void;
   onOpenAdmin?: () => void;
+  onOpenOnboarding?: () => void;
   isSuperAdmin?: boolean;
   onLogout?: () => void;
   onProfileUpdated?: (updatedProfile: UserProfileData) => void;
@@ -91,6 +92,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   onOpenLanding,
   onOpenAuth,
   onOpenAdmin,
+  onOpenOnboarding,
   isSuperAdmin = false,
   onLogout,
   onProfileUpdated
@@ -740,6 +742,22 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                 </div>
                 <ChevronRight className="w-4 h-4 text-zinc-500 group-hover:text-white transition" />
               </div>
+
+              {onOpenOnboarding && (
+                <div
+                  onClick={onOpenOnboarding}
+                  className="p-3 rounded-xl hover:bg-[#16181f] transition cursor-pointer flex items-center justify-between group border-t border-zinc-800/60 mt-1"
+                >
+                  <div className="flex items-center gap-3">
+                    <Sparkles className="w-4 h-4 text-zinc-300 group-hover:text-white" />
+                    <div>
+                      <div className="font-semibold text-white">Calibrar interesses</div>
+                      <div className="text-[11px] text-zinc-400">Refazer o onboarding de temas e preferências</div>
+                    </div>
+                  </div>
+                  <ChevronRight className="w-4 h-4 text-zinc-500 group-hover:text-white transition" />
+                </div>
+              )}
             </div>
           </div>
 

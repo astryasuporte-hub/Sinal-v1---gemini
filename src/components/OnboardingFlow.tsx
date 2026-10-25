@@ -1,0 +1,803 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import React, { useState, useMemo } from 'react';
+import {
+  ChevronLeft,
+  Search,
+  Check,
+  Plus,
+  Bell,
+  Mail,
+  Calendar,
+  MessageSquare,
+  MapPin,
+  Globe,
+  Sliders,
+  Sparkles,
+  Layers,
+  ArrowRight,
+  TrendingUp,
+  Cpu,
+  Building2,
+  Landmark,
+  Scale,
+  Atom,
+  HeartPulse,
+  Trophy,
+  Palette,
+  Film,
+  Leaf,
+  GraduationCap,
+  X
+} from 'lucide-react';
+import { Entity, Topic, Source } from '../types/sinal';
+
+interface OnboardingFlowProps {
+  onComplete: () => void;
+  onOpenLogin?: () => void;
+  entities?: Entity[];
+  topics?: Topic[];
+  sources?: Source[];
+}
+
+export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
+  onComplete,
+  onOpenLogin,
+  entities = [],
+  topics = [],
+  sources = []
+}) => {
+  const [step, setStep] = useState<number>(1);
+
+  // Tela 2: Temas selecionados
+  const ALL_THEMES = useMemo(
+    () => [
+      { id: 'tech', label: 'Tecnologia', icon: Cpu },
+      { id: 'business', label: 'Negócios', icon: Building2 },
+      { id: 'politics', label: 'Política', icon: Landmark },
+      { id: 'economy', label: 'Economia', icon: TrendingUp },
+      { id: 'world', label: 'Mundo', icon: Globe },
+      { id: 'science', label: 'Ciência', icon: Atom },
+      { id: 'health', label: 'Saúde', icon: HeartPulse },
+      { id: 'sports', label: 'Esportes', icon: Trophy },
+      { id: 'culture', label: 'Cultura', icon: Palette },
+      { id: 'entertainment', label: 'Entretenimento', icon: Film },
+      { id: 'environment', label: 'Meio Ambiente', icon: Leaf },
+      { id: 'education', label: 'Educação', icon: GraduationCap }
+    ],
+    []
+  );
+
+  const [selectedThemes, setSelectedThemes] = useState<Set<string>>(
+    new Set(['tech', 'business', 'politics', 'economy', 'science'])
+  );
+  const [themeSearch, setThemeSearch] = useState('');
+
+  const toggleTheme = (id: string) => {
+    setSelectedThemes((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  // Tela 3: Seguir Pessoas, Empresas e Organizações
+  const [activeFollowTab, setActiveFollowTab] = useState<'people' | 'companies' | 'organizations'>('people');
+  const [entitySearch, setEntitySearch] = useState('');
+
+  const PEOPLE_LIST = useMemo(
+    () => [
+      { id: 'p1', name: 'Elon Musk', handle: '@elonmusk', role: 'CEO Tesla / X', emoji: '👨‍💼', color: '#1e293b' },
+      { id: 'p2', name: 'Sam Altman', handle: '@sama', role: 'CEO OpenAI', emoji: '🚀', color: '#0f172a' },
+      { id: 'p3', name: 'Sundar Pichai', handle: '@sundarpichai', role: 'CEO Google', emoji: '🌐', color: '#172554' },
+      { id: 'p4', name: 'Satya Nadella', handle: '@satyanadella', role: 'CEO Microsoft', emoji: '💻', color: '#1e1b4b' },
+      { id: 'p5', name: 'Jair Bolsonaro', handle: '@jairbolsonaro', role: 'Político', emoji: '🇧🇷', color: '#14532d' },
+      { id: 'p6', name: 'Fernando Haddad', handle: '@fernandohaddad', role: 'Ministro da Fazenda', emoji: '📊', color: '#7f1d1d' }
+    ],
+    []
+  );
+
+  const COMPANIES_LIST = useMemo(
+    () => [
+      { id: 'c1', name: 'NVIDIA', handle: '@nvidia', role: 'Semicondutores & IA', badge: 'NVDA', color: '#76b900' },
+      { id: 'c2', name: 'X (Twitter)', handle: '@X', role: 'Plataforma Global', badge: 'X', color: '#000000' },
+      { id: 'c3', name: 'Apple', handle: '@apple', role: 'Tecnologia & Hardware', badge: 'AAPL', color: '#27272a' },
+      { id: 'c4', name: 'Microsoft', handle: '@microsoft', role: 'Cloud & Software', badge: 'MSFT', color: '#0284c7' },
+      { id: 'c5', name: 'Google', handle: '@google', role: 'Search & IA', badge: 'GOOG', color: '#ea4335' },
+      { id: 'c6', name: 'Petrobras', handle: '@petrobras', role: 'Energia & Petróleo', badge: 'PETR4', color: '#16a34a' }
+    ],
+    []
+  );
+
+  const ORGANIZATIONS_LIST = useMemo(
+    () => [
+      { id: 'o1', name: 'BBC News Brasil', handle: '@bbcbrasil', role: 'Veículo Internacional', badge: 'BBC', color: '#b91c1c' },
+      { id: 'o2', name: 'Banco Central do Brasil', handle: '@bancocentralbr', role: 'Autoridade Monetária', badge: 'BACEN', color: '#1e3a8a' },
+      { id: 'o3', name: 'The Verge', handle: '@verge', role: 'Tecnologia & Inovação', badge: 'VERGE', color: '#9333ea' },
+      { id: 'o4', name: 'Reuters', handle: '@reuters', role: 'Agência de Notícias', badge: 'RT', color: '#ea580c' },
+      { id: 'o5', name: 'Supremo Tribunal Federal', handle: '@stf_oficial', role: 'Poder Judiciário', badge: 'STF', color: '#334155' }
+    ],
+    []
+  );
+
+  const [followedEntities, setFollowedEntities] = useState<Set<string>>(
+    new Set(['p1', 'c1', 'o1'])
+  );
+
+  const toggleFollow = (id: string) => {
+    setFollowedEntities((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  // Tela 4: Notificações
+  const [notificationsPreferences, setNotificationsPreferences] = useState<Set<string>>(
+    new Set(['app_realtime', 'daily_email'])
+  );
+
+  const toggleNotification = (id: string) => {
+    setNotificationsPreferences((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  // Tela 5: Personalize seu Feed
+  const [feedPreferences, setFeedPreferences] = useState<Set<string>>(
+    new Set(['realtime_news', 'analyses_context', 'trusted_sources'])
+  );
+
+  const toggleFeedPref = (id: string) => {
+    setFeedPreferences((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  // Tela 6: Localização
+  const [userLocation, setUserLocation] = useState('São Paulo, SP');
+  const [userLanguage, setUserLanguage] = useState('Português (Brasil)');
+
+  // Progresso global
+  const progressPercent = Math.round((step / 7) * 100);
+
+  const nextStep = () => {
+    if (step < 7) {
+      setStep(step + 1);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } else {
+      onComplete();
+    }
+  };
+
+  const prevStep = () => {
+    if (step > 1) {
+      setStep(step - 1);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  };
+
+  return (
+    <div className="min-h-screen w-full bg-[#000000] text-zinc-100 flex flex-col items-center justify-between font-sans selection:bg-white selection:text-black relative overflow-x-hidden">
+      {/* Background glow sutil para desktop */}
+      <div
+        className="fixed inset-0 pointer-events-none opacity-30 z-0"
+        style={{
+          background: 'radial-gradient(circle at 50% 10%, rgba(255,255,255,0.08) 0%, rgba(0,0,0,0.98) 75%)'
+        }}
+      />
+
+      {/* Top Bar Fixa com Indicador e Botão Voltar */}
+      <div className="relative z-20 w-full max-w-lg lg:max-w-xl mx-auto px-5 pt-4 pb-2 flex items-center justify-between">
+        {step > 1 ? (
+          <button
+            onClick={prevStep}
+            className="p-2 -ml-2 text-zinc-400 hover:text-white rounded-xl transition cursor-pointer flex items-center gap-1.5 text-xs font-medium"
+            aria-label="Voltar etapa"
+          >
+            <ChevronLeft className="w-5 h-5" />
+            <span className="hidden sm:inline">Voltar</span>
+          </button>
+        ) : (
+          <div className="w-8" />
+        )}
+
+        {/* Logo Central Minimalista */}
+        <div className="flex items-center gap-2">
+          <div className="w-6 h-6 rounded-md bg-zinc-900 border border-zinc-800 flex items-center justify-center">
+            <svg
+              className="w-3.5 h-3.5 text-white"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <polyline points="2 12 6 12 9 3 13 21 16 12 22 12" />
+            </svg>
+          </div>
+          <span className="font-bold text-xs tracking-tight text-white">FatosBR</span>
+        </div>
+
+        {/* Indicador de Etapa Numérica */}
+        <div className="font-mono text-xs text-zinc-400 font-semibold px-2.5 py-1 rounded-full bg-zinc-900 border border-zinc-800">
+          {step}/7
+        </div>
+      </div>
+
+      {/* Container Principal Centralizado (Otimizado para Mobile e PC) */}
+      <main className="relative z-10 w-full max-w-lg lg:max-w-xl mx-auto flex-1 flex flex-col justify-between px-4 sm:px-6 py-2 sm:py-4">
+        {/* ========================================================================= */}
+        {/* ETAPA 1: HERO BOAS-VINDAS COM IMAGEM DO GLOBO */}
+        {/* ========================================================================= */}
+        {step === 1 && (
+          <div className="flex-1 flex flex-col justify-between animate-fadeIn py-2 sm:py-4">
+            {/* Imagem de Alta Resolução do Globo Terrestre */}
+            <div className="relative w-full aspect-[4/3] sm:aspect-[16/10] rounded-3xl overflow-hidden border border-zinc-800/80 shadow-2xl bg-black">
+              <img
+                src="/assets/aistudio/file_00000000d9dc820eb1300938edc857d3_8a6e1430.png"
+                alt="FatosBR - Observatório Global de Notícias"
+                className="w-full h-full object-cover object-center scale-[1.03] transition duration-700 hover:scale-105"
+              />
+              <div className="absolute inset-0 bg-gradient-to-t from-black via-black/30 to-transparent" />
+            </div>
+
+            {/* Texto de Apresentação Hero */}
+            <div className="text-center px-2 pt-6 sm:pt-8 space-y-3.5">
+              <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight leading-tight">
+                O que importa para você, sempre à frente.
+              </h1>
+              <p className="text-xs sm:text-sm text-zinc-400 max-w-md mx-auto leading-relaxed">
+                A FatosBR observa o mundo por você, reunindo os acontecimentos mais relevantes em um só lugar.
+              </p>
+            </div>
+
+            {/* Ações Inferiores Etapa 1 */}
+            <div className="pt-8 sm:pt-10 pb-6 space-y-3 text-center">
+              <button
+                onClick={nextStep}
+                className="w-full py-4 px-6 bg-white text-black hover:bg-zinc-200 font-bold text-sm sm:text-base rounded-full transition cursor-pointer active:scale-[0.99] shadow-lg shadow-white/5"
+              >
+                Começar
+              </button>
+
+              {onOpenLogin && (
+                <button
+                  onClick={onOpenLogin}
+                  className="text-xs text-zinc-400 hover:text-white transition cursor-pointer pt-1"
+                >
+                  Já tem uma conta? <span className="underline font-semibold text-zinc-200">Entrar</span>
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ========================================================================= */}
+        {/* ETAPA 2: INTERESSES (TEMAS) */}
+        {/* ========================================================================= */}
+        {step === 2 && (
+          <div className="flex-1 flex flex-col animate-fadeIn py-2">
+            <div>
+              <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+                O que te interessa?
+              </h1>
+              <p className="text-xs sm:text-sm text-zinc-400 mt-1.5 mb-5">
+                Escolha pelo menos 5 temas para começar a personalizar seu feed.
+              </p>
+
+              {/* Barra de Busca de Temas */}
+              <div className="relative mb-5">
+                <Search className="w-4 h-4 text-zinc-500 absolute left-3.5 top-3.5" />
+                <input
+                  type="text"
+                  value={themeSearch}
+                  onChange={(e) => setThemeSearch(e.target.value)}
+                  placeholder="Buscar temas..."
+                  className="w-full bg-[#12141a] border border-zinc-800 focus:border-zinc-600 rounded-xl pl-10 pr-4 py-2.5 text-xs sm:text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none transition"
+                />
+              </div>
+
+              {/* Grid de Cards de Temas */}
+              <div className="grid grid-cols-2 gap-2.5 sm:gap-3 max-h-[50vh] overflow-y-auto pr-1">
+                {ALL_THEMES.filter((t) => t.label.toLowerCase().includes(themeSearch.toLowerCase())).map((theme) => {
+                  const Icon = theme.icon;
+                  const isSelected = selectedThemes.has(theme.id);
+                  return (
+                    <div
+                      key={theme.id}
+                      onClick={() => toggleTheme(theme.id)}
+                      className={`relative p-3.5 sm:p-4 rounded-2xl border transition-all cursor-pointer flex flex-col justify-between gap-3 active:scale-[0.98] ${
+                        isSelected
+                          ? 'bg-[#181a20] border-white shadow-md'
+                          : 'bg-[#0f1116] border-zinc-800 hover:border-zinc-700'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <Icon className={`w-5 h-5 ${isSelected ? 'text-white' : 'text-zinc-400'}`} />
+                        <div
+                          className={`w-5 h-5 rounded-full border flex items-center justify-center transition-all ${
+                            isSelected ? 'bg-white border-white' : 'border-zinc-700 bg-transparent'
+                          }`}
+                        >
+                          {isSelected && <Check className="w-3 h-3 text-black stroke-[3]" />}
+                        </div>
+                      </div>
+                      <span className="text-xs sm:text-sm font-semibold text-zinc-100">{theme.label}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Ações Inferiores Etapa 2 */}
+            <div className="pt-6 pb-4">
+              <button
+                onClick={nextStep}
+                disabled={selectedThemes.size === 0}
+                className="w-full py-4 px-6 bg-white text-black hover:bg-zinc-200 font-bold text-sm sm:text-base rounded-full transition cursor-pointer active:scale-[0.99] disabled:opacity-50"
+              >
+                Continuar ({selectedThemes.size} selecionados)
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ========================================================================= */}
+        {/* ETAPA 3: QUEM VOCÊ QUER SEGUIR */}
+        {/* ========================================================================= */}
+        {step === 3 && (
+          <div className="flex-1 flex flex-col animate-fadeIn py-2">
+            <div>
+              <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+                Quem você quer seguir?
+              </h1>
+              <p className="text-xs sm:text-sm text-zinc-400 mt-1.5 mb-4">
+                Escolha pessoas, empresas e organizações para acompanhar.
+              </p>
+
+              {/* Barra de Busca de Entidades */}
+              <div className="relative mb-4">
+                <Search className="w-4 h-4 text-zinc-500 absolute left-3.5 top-3.5" />
+                <input
+                  type="text"
+                  value={entitySearch}
+                  onChange={(e) => setEntitySearch(e.target.value)}
+                  placeholder="Buscar pessoas, empresas..."
+                  className="w-full bg-[#12141a] border border-zinc-800 focus:border-zinc-600 rounded-xl pl-10 pr-4 py-2.5 text-xs sm:text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none transition"
+                />
+              </div>
+
+              {/* Tabs de Seleção */}
+              <div className="flex p-1 bg-[#12141a] border border-zinc-800 rounded-full mb-4">
+                {(['people', 'companies', 'organizations'] as const).map((tab) => (
+                  <button
+                    key={tab}
+                    onClick={() => setActiveFollowTab(tab)}
+                    className={`flex-1 py-1.5 text-xs font-semibold rounded-full transition cursor-pointer ${
+                      activeFollowTab === tab ? 'bg-white text-black' : 'text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    {tab === 'people' ? 'Pessoas' : tab === 'companies' ? 'Empresas' : 'Organizações'}
+                  </button>
+                ))}
+              </div>
+
+              {/* Lista com Follow Toggles */}
+              <div className="space-y-2 max-h-[48vh] overflow-y-auto pr-1">
+                {(activeFollowTab === 'people'
+                  ? PEOPLE_LIST
+                  : activeFollowTab === 'companies'
+                  ? COMPANIES_LIST
+                  : ORGANIZATIONS_LIST
+                )
+                  .filter((item) => item.name.toLowerCase().includes(entitySearch.toLowerCase()))
+                  .map((item) => {
+                    const isFollowed = followedEntities.has(item.id);
+                    return (
+                      <div
+                        key={item.id}
+                        className="flex items-center justify-between p-3 rounded-2xl bg-[#0f1116] border border-zinc-800 hover:border-zinc-700 transition"
+                      >
+                        <div className="flex items-center gap-3">
+                          <div
+                            className="w-10 h-10 rounded-xl flex items-center justify-center text-xs font-bold shrink-0 border border-zinc-700/60"
+                            style={{ backgroundColor: item.color, color: '#fff' }}
+                          >
+                            <span>{'badge' in item ? item.badge : item.emoji}</span>
+                          </div>
+                          <div>
+                            <div className="text-xs sm:text-sm font-semibold text-white">{item.name}</div>
+                            <div className="text-[11px] text-zinc-400">
+                              {item.handle} · <span className="text-zinc-500">{item.role}</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <button
+                          onClick={() => toggleFollow(item.id)}
+                          className={`w-8 h-8 rounded-full flex items-center justify-center transition cursor-pointer shrink-0 border ${
+                            isFollowed
+                              ? 'bg-white text-black border-white'
+                              : 'bg-zinc-900 text-zinc-300 border-zinc-700 hover:text-white'
+                          }`}
+                        >
+                          {isFollowed ? <Check className="w-4 h-4 stroke-[3]" /> : <Plus className="w-4 h-4" />}
+                        </button>
+                      </div>
+                    );
+                  })}
+              </div>
+            </div>
+
+            {/* Ações Inferiores Etapa 3 */}
+            <div className="pt-6 pb-4">
+              <button
+                onClick={nextStep}
+                className="w-full py-4 px-6 bg-white text-black hover:bg-zinc-200 font-bold text-sm sm:text-base rounded-full transition cursor-pointer active:scale-[0.99]"
+              >
+                Continuar
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ========================================================================= */}
+        {/* ETAPA 4: NOTIFICAÇÕES */}
+        {/* ========================================================================= */}
+        {step === 4 && (
+          <div className="flex-1 flex flex-col animate-fadeIn py-2">
+            <div>
+              <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+                Como você quer receber as atualizações?
+              </h1>
+              <p className="text-xs sm:text-sm text-zinc-400 mt-1.5 mb-5">
+                Escolha como prefere acompanhar os principais acontecimentos.
+              </p>
+
+              <div className="space-y-3">
+                {[
+                  {
+                    id: 'app_realtime',
+                    title: 'Notificações no app',
+                    desc: 'Em tempo real, direto no seu celular.',
+                    icon: Bell
+                  },
+                  {
+                    id: 'daily_email',
+                    title: 'E-mail diário',
+                    desc: 'Resumo dos principais eventos matinais.',
+                    icon: Mail
+                  },
+                  {
+                    id: 'weekly_email',
+                    title: 'E-mail semanal',
+                    desc: 'Uma visão geral analítica da semana.',
+                    icon: Calendar
+                  },
+                  {
+                    id: 'whatsapp_digest',
+                    title: 'Resumo por WhatsApp',
+                    desc: 'Em breve para assinantes FatosBR Pro.',
+                    icon: MessageSquare,
+                    badge: 'Em breve'
+                  }
+                ].map((item) => {
+                  const Icon = item.icon;
+                  const isSelected = notificationsPreferences.has(item.id);
+                  return (
+                    <div
+                      key={item.id}
+                      onClick={() => toggleNotification(item.id)}
+                      className={`p-4 rounded-2xl border transition-all cursor-pointer flex items-start justify-between gap-3 ${
+                        isSelected
+                          ? 'bg-[#181a20] border-white'
+                          : 'bg-[#0f1116] border-zinc-800 hover:border-zinc-700'
+                      }`}
+                    >
+                      <div className="flex items-start gap-3.5">
+                        <Icon className={`w-5 h-5 shrink-0 mt-0.5 ${isSelected ? 'text-white' : 'text-zinc-400'}`} />
+                        <div>
+                          <div className="text-xs sm:text-sm font-semibold text-white flex items-center gap-2">
+                            <span>{item.title}</span>
+                            {item.badge && (
+                              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-400 border border-zinc-700">
+                                {item.badge}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-xs text-zinc-400 mt-0.5 leading-relaxed">{item.desc}</p>
+                        </div>
+                      </div>
+
+                      <div
+                        className={`w-5 h-5 rounded-full border flex items-center justify-center shrink-0 transition-all ${
+                          isSelected ? 'bg-white border-white' : 'border-zinc-700 bg-transparent'
+                        }`}
+                      >
+                        {isSelected && <Check className="w-3 h-3 text-black stroke-[3]" />}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Ações Inferiores Etapa 4 */}
+            <div className="pt-6 pb-4">
+              <button
+                onClick={nextStep}
+                className="w-full py-4 px-6 bg-white text-black hover:bg-zinc-200 font-bold text-sm sm:text-base rounded-full transition cursor-pointer active:scale-[0.99]"
+              >
+                Continuar
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ========================================================================= */}
+        {/* ETAPA 5: PERSONALIZE SEU FEED */}
+        {/* ========================================================================= */}
+        {step === 5 && (
+          <div className="flex-1 flex flex-col animate-fadeIn py-2">
+            <div>
+              <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+                Personalize seu feed
+              </h1>
+              <p className="text-xs sm:text-sm text-zinc-400 mt-1.5 mb-5">
+                Escolha o que mais te interessa para que a FatosBR priorize os eventos certos.
+              </p>
+
+              <div className="space-y-2.5 max-h-[50vh] overflow-y-auto pr-1">
+                {[
+                  {
+                    id: 'realtime_news',
+                    title: 'Notícias em tempo real',
+                    desc: 'Acontecimentos do momento com consolidação contínua.'
+                  },
+                  {
+                    id: 'analyses_context',
+                    title: 'Análises e contextos',
+                    desc: 'Entenda o porquê de tudo e impactos estratégicos.'
+                  },
+                  {
+                    id: 'trusted_sources',
+                    title: 'Fontes confiáveis',
+                    desc: 'Veículos consagrados e jornalismo investigativo verificado.'
+                  },
+                  {
+                    id: 'events_trends',
+                    title: 'Eventos e tendências',
+                    desc: 'O que está ganhando tração e discussões em alta.'
+                  },
+                  {
+                    id: 'markets_investments',
+                    title: 'Mercado e investimentos',
+                    desc: 'Bolsas, balanços, câmbio e movimentos financeiros.'
+                  },
+                  {
+                    id: 'innovation_ai',
+                    title: 'Inovação e tecnologia',
+                    desc: 'Inteligência Artificial, ciência aplicada e futuro digital.'
+                  }
+                ].map((item) => {
+                  const isSelected = feedPreferences.has(item.id);
+                  return (
+                    <div
+                      key={item.id}
+                      onClick={() => toggleFeedPref(item.id)}
+                      className={`p-3.5 sm:p-4 rounded-2xl border transition-all cursor-pointer flex items-center justify-between gap-3 ${
+                        isSelected
+                          ? 'bg-[#181a20] border-white'
+                          : 'bg-[#0f1116] border-zinc-800 hover:border-zinc-700'
+                      }`}
+                    >
+                      <div>
+                        <div className="text-xs sm:text-sm font-semibold text-white">{item.title}</div>
+                        <p className="text-[11px] sm:text-xs text-zinc-400 mt-0.5">{item.desc}</p>
+                      </div>
+
+                      <div
+                        className={`w-5 h-5 rounded-full border flex items-center justify-center shrink-0 transition-all ${
+                          isSelected ? 'bg-white border-white' : 'border-zinc-700 bg-transparent'
+                        }`}
+                      >
+                        {isSelected && <Check className="w-3 h-3 text-black stroke-[3]" />}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Ações Inferiores Etapa 5 */}
+            <div className="pt-6 pb-4">
+              <button
+                onClick={nextStep}
+                className="w-full py-4 px-6 bg-white text-black hover:bg-zinc-200 font-bold text-sm sm:text-base rounded-full transition cursor-pointer active:scale-[0.99]"
+              >
+                Continuar
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ========================================================================= */}
+        {/* ETAPA 6: ONDE VOCÊ ESTÁ */}
+        {/* ========================================================================= */}
+        {step === 6 && (
+          <div className="flex-1 flex flex-col animate-fadeIn py-2">
+            <div>
+              <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+                Onde você está?
+              </h1>
+              <p className="text-xs sm:text-sm text-zinc-400 mt-1.5 mb-6">
+                Isso ajuda a mostrar notícias e eventos mais relevantes para a sua região.
+              </p>
+
+              <div className="space-y-5">
+                <div>
+                  <label className="block text-xs font-semibold text-zinc-300 mb-2">
+                    Sua cidade ou país
+                  </label>
+                  <div className="relative">
+                    <MapPin className="w-4 h-4 text-zinc-500 absolute left-3.5 top-3.5" />
+                    <input
+                      type="text"
+                      value={userLocation}
+                      onChange={(e) => setUserLocation(e.target.value)}
+                      placeholder="Ex: São Paulo, SP ou Brasil"
+                      className="w-full bg-[#12141a] border border-zinc-800 focus:border-zinc-600 rounded-xl pl-10 pr-10 py-3 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none transition"
+                    />
+                    {userLocation && (
+                      <button
+                        type="button"
+                        onClick={() => setUserLocation('')}
+                        className="absolute right-3.5 top-3.5 text-zinc-500 hover:text-zinc-300 cursor-pointer"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-zinc-300 mb-2">
+                    Idioma principal
+                  </label>
+                  <div className="relative">
+                    <Globe className="w-4 h-4 text-zinc-500 absolute left-3.5 top-3.5" />
+                    <input
+                      type="text"
+                      readOnly
+                      value={userLanguage}
+                      className="w-full bg-[#12141a] border border-zinc-800 rounded-xl pl-10 pr-4 py-3 text-sm text-zinc-300 cursor-not-allowed select-none"
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Ações Inferiores Etapa 6 */}
+            <div className="pt-6 pb-4">
+              <button
+                onClick={nextStep}
+                className="w-full py-4 px-6 bg-white text-black hover:bg-zinc-200 font-bold text-sm sm:text-base rounded-full transition cursor-pointer active:scale-[0.99]"
+              >
+                Continuar
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ========================================================================= */}
+        {/* ETAPA 7: TUDO PRONTO COM SELO LUMINOSO E RESUMO */}
+        {/* ========================================================================= */}
+        {step === 7 && (
+          <div className="flex-1 flex flex-col justify-between animate-fadeIn py-2">
+            <div>
+              <div className="text-center pt-2 pb-4">
+                <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+                  Tudo pronto!
+                </h1>
+                <p className="text-xs sm:text-sm text-zinc-400 mt-1.5 max-w-sm mx-auto">
+                  Agora é só explorar. Seu feed já está personalizado com base nas suas escolhas.
+                </p>
+              </div>
+
+              {/* Imagem de Alta Resolução do Selo Luminoso */}
+              <div className="relative w-full aspect-[21/9] sm:aspect-[2.4/1] rounded-3xl overflow-hidden border border-zinc-800 shadow-2xl bg-black my-3 flex items-center justify-center">
+                <img
+                  src="/assets/aistudio/file_00000000f254820eb392affea4aaa51a_376a3222.png"
+                  alt="FatosBR - Conclusão e Calibragem Pronta"
+                  className="w-full h-full object-cover object-center scale-[1.02]"
+                />
+                <div className="absolute inset-0 bg-radial-gradient from-transparent via-transparent to-black/60 pointer-events-none" />
+              </div>
+
+              {/* Box com Resumo Dinâmico */}
+              <div className="mt-4 p-4 sm:p-5 rounded-2xl bg-[#0e1015] border border-zinc-800/80 space-y-3">
+                <div className="flex items-center justify-between text-xs sm:text-sm border-b border-zinc-800/60 pb-2.5">
+                  <div className="flex items-center gap-2.5 text-zinc-400">
+                    <Sliders className="w-4 h-4 text-zinc-400" />
+                    <span>Temas selecionados</span>
+                  </div>
+                  <span className="font-bold font-mono text-zinc-200">+{selectedThemes.size}</span>
+                </div>
+
+                <div className="flex items-center justify-between text-xs sm:text-sm border-b border-zinc-800/60 pb-2.5">
+                  <div className="flex items-center gap-2.5 text-zinc-400">
+                    <Layers className="w-4 h-4 text-zinc-400" />
+                    <span>Pessoas e empresas</span>
+                  </div>
+                  <span className="font-bold font-mono text-zinc-200">+{followedEntities.size}</span>
+                </div>
+
+                <div className="flex items-center justify-between text-xs sm:text-sm border-b border-zinc-800/60 pb-2.5">
+                  <div className="flex items-center gap-2.5 text-zinc-400">
+                    <Bell className="w-4 h-4 text-zinc-400" />
+                    <span>Notificações ativas</span>
+                  </div>
+                  <span className="font-bold font-mono text-zinc-200">+{notificationsPreferences.size}</span>
+                </div>
+
+                <div className="flex items-center justify-between text-xs sm:text-sm">
+                  <div className="flex items-center gap-2.5 text-zinc-400">
+                    <MapPin className="w-4 h-4 text-zinc-400" />
+                    <span>Localização definida</span>
+                  </div>
+                  <span className="font-semibold text-zinc-200">{userLocation || 'Brasil'}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Ações Inferiores Etapa 7 */}
+            <div className="pt-6 pb-4">
+              <button
+                onClick={onComplete}
+                className="w-full py-4 px-6 bg-white text-black hover:bg-zinc-200 font-bold text-sm sm:text-base rounded-full transition cursor-pointer active:scale-[0.99] shadow-lg shadow-white/5 flex items-center justify-center gap-2"
+              >
+                <span>Acessar a FatosBR</span>
+                <ArrowRight className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        )}
+      </main>
+
+      {/* Barra de Progresso Global no Rodapé */}
+      <footer className="relative z-20 w-full max-w-lg lg:max-w-xl mx-auto px-5 pb-5 pt-1">
+        <div className="w-full h-1 bg-zinc-900 rounded-full overflow-hidden border border-zinc-800/50">
+          <div
+            className="h-full bg-white transition-all duration-300 ease-out rounded-full"
+            style={{ width: `${progressPercent}%` }}
+          />
+        </div>
+      </footer>
+    </div>
+  );
+};

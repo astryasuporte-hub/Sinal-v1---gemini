@@ -90,6 +90,8 @@ import { notificationService } from './services/notificationService';
 import { motion, AnimatePresence } from 'motion/react';
 import { EditorialPushBanner, PushNotificationPayload } from './components/EditorialPushBanner';
 import { FatosBRControlView } from './components/FatosBRControlView';
+import { LoginPage } from './components/LoginPage';
+import { OnboardingFlow } from './components/OnboardingFlow';
 
 const HISTORY_STORAGE_KEY = 'sinal_history_items_v1';
 const MAX_HISTORY_ITEMS = 50;
@@ -97,11 +99,16 @@ const MAX_HISTORY_ITEMS = 50;
 export default function App() {
   // Navigation & Subtabs
   const [currentNav, setCurrentNav] = useState<
-    'landing' | 'home' | 'explore' | 'following' | 'notifications' | 'briefings' | 'profile' | 'saved' | 'history' | 'admin' | 'control'
+    'landing' | 'login' | 'onboarding' | 'home' | 'explore' | 'following' | 'notifications' | 'briefings' | 'profile' | 'saved' | 'history' | 'admin' | 'control'
   >(() => {
     if (typeof window !== 'undefined') {
+      const pathname = window.location.pathname;
+      if (pathname === '/login' || pathname.startsWith('/login')) return 'login';
+      if (pathname === '/onboarding' || pathname.startsWith('/onboarding')) return 'onboarding';
       const params = new URLSearchParams(window.location.search);
       const view = params.get('view') || params.get('page');
+      if (view === 'login') return 'login';
+      if (view === 'onboarding') return 'onboarding';
       if (view === 'app' || view === 'home') return 'home';
       if (view === 'admin') return 'admin';
       if (view === 'control' || view === 'instagram') return 'control';
@@ -406,6 +413,46 @@ export default function App() {
   const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
 
+  const handleUserSession = (user: SupabaseUser | null) => {
+    setCurrentUser(user);
+    if (user) {
+      const metaName =
+        user.user_metadata?.full_name ||
+        user.user_metadata?.name ||
+        (user.email ? user.email.split('@')[0] : 'Leitor');
+      const metaAvatar = user.user_metadata?.avatar_url || null;
+      if (metaAvatar) {
+        setCurrentUserAvatar(metaAvatar);
+      }
+
+      try {
+        localStorage.setItem(
+          'sinal_user_profile',
+          JSON.stringify({
+            name: metaName,
+            displayName: metaName,
+            email: user.email,
+            avatarUrl: metaAvatar,
+            timezone: 'America/Sao_Paulo'
+          })
+        );
+      } catch {}
+
+      // Sincronizar itens salvos do usuário
+      userService.getSavedEventIds(user.id).then((savedIds) => {
+        if (savedIds && savedIds.length > 0) {
+          setSavedEventIds(new Set(savedIds));
+          setEvents((prev) =>
+            prev.map((e) => ({
+              ...e,
+              isSaved: savedIds.includes(e.id),
+            }))
+          );
+        }
+      });
+    }
+  };
+
   // Supabase Auth & Dados Reais Listener
   useEffect(() => {
     if (!isSupabaseConfigured) return;
@@ -435,52 +482,6 @@ export default function App() {
       }
     });
 
-    const handleUserSession = (user: SupabaseUser | null) => {
-      setCurrentUser(user);
-      if (user) {
-        const metaName =
-          user.user_metadata?.full_name ||
-          user.user_metadata?.name ||
-          (user.email ? user.email.split('@')[0] : 'Leitor');
-        const metaAvatar = user.user_metadata?.avatar_url || null;
-        if (metaAvatar) {
-          setCurrentUserAvatar(metaAvatar);
-        }
-
-        try {
-          localStorage.setItem(
-            'sinal_user_profile',
-            JSON.stringify({
-              name: metaName,
-              displayName: metaName,
-              email: user.email,
-              avatarUrl: metaAvatar,
-              timezone: 'America/Sao_Paulo'
-            })
-          );
-        } catch {}
-
-        // Sincronizar itens salvos do usuário
-        userService.getSavedEventIds(user.id).then((savedIds) => {
-          if (savedIds && savedIds.length > 0) {
-            setSavedEventIds(new Set(savedIds));
-            setEvents((prev) =>
-              prev.map((e) => ({
-                ...e,
-                isSaved: savedIds.includes(e.id),
-              }))
-            );
-          }
-        });
-
-        // Verificar se precisa de Onboarding no primeiro acesso
-        const hasOnboarded = localStorage.getItem('sinal_onboarded_' + user.id) === 'true';
-        if (!hasOnboarded) {
-          setIsOnboardingOpen(true);
-        }
-      }
-    };
-
     // Verificar sessão existente
     authService.getCurrentUser().then((user) => {
       if (user) {
@@ -504,7 +505,12 @@ export default function App() {
         authService.getCurrentUser().then((user) => {
           if (user) {
             handleUserSession(user);
-            setCurrentNav('home');
+            const hasOnboarded = localStorage.getItem('sinal_onboarded_' + user.id) === 'true';
+            if (!hasOnboarded) {
+              setCurrentNav('onboarding');
+            } else {
+              setCurrentNav('home');
+            }
           }
           // Limpa a barra de navegação para a raiz sem deixar preso em /oauth/consent
           window.history.replaceState(null, '', '/');
@@ -705,14 +711,14 @@ export default function App() {
     ? currentUser.email.toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase()
     : false; // NUNCA deve ser true para usuários comuns ou deslogados
 
-  // Renderização de Telas Especiais: Landing Page ou Admin Panel
+  // Renderização de Telas Especiais: Landing Page, Login, Onboarding ou Admin Panel
   if (currentNav === 'landing') {
     return (
       <div className="min-h-screen bg-[#07080b] text-zinc-100 font-sans selection:bg-white selection:text-black">
         <LandingPage
-          onStartFreeTrial={() => setIsAuthModalOpen(true)}
-          onEnterApp={() => setCurrentNav('home')}
-          onOpenAuth={() => setIsAuthModalOpen(true)}
+          onStartFreeTrial={() => setCurrentNav('login')}
+          onEnterApp={() => setCurrentNav(currentUser ? 'home' : 'login')}
+          onOpenAuth={() => setCurrentNav('login')}
         />
         <BillingModal
           isOpen={isBillingModalOpen}
@@ -726,21 +732,51 @@ export default function App() {
             }));
           }}
         />
-        <AuthModal
-          isOpen={isAuthModalOpen}
-          onClose={() => setIsAuthModalOpen(false)}
-          onAuthSuccess={(_email) => {
-            setIsAuthModalOpen(false);
-            const user = currentUser;
-            const key = user?.id ? user.id : _email;
-            const hasOnboarded = localStorage.getItem('sinal_onboarded_' + key) === 'true';
-            if (!hasOnboarded) {
-              setIsOnboardingOpen(true);
-            }
-            setCurrentNav('home');
-          }}
-        />
       </div>
+    );
+  }
+
+  if (currentNav === 'login') {
+    return (
+      <LoginPage
+        onBackToLanding={() => setCurrentNav('landing')}
+        onAuthSuccess={(_email) => {
+          authService.getCurrentUser().then((user) => {
+            if (user) {
+              handleUserSession(user);
+              const hasOnboarded = localStorage.getItem('sinal_onboarded_' + user.id) === 'true';
+              if (!hasOnboarded) {
+                setCurrentNav('onboarding');
+              } else {
+                setCurrentNav('home');
+              }
+            } else {
+              const hasOnboarded = localStorage.getItem('sinal_onboarded_' + _email) === 'true';
+              if (!hasOnboarded) {
+                setCurrentNav('onboarding');
+              } else {
+                setCurrentNav('home');
+              }
+            }
+          });
+        }}
+      />
+    );
+  }
+
+  if (currentNav === 'onboarding') {
+    return (
+      <OnboardingFlow
+        entities={entities}
+        topics={topics}
+        sources={sources}
+        onOpenLogin={() => setCurrentNav('login')}
+        onComplete={() => {
+          const userKey = currentUser?.id || currentUser?.email || 'guest';
+          localStorage.setItem('sinal_onboarded_' + userKey, 'true');
+          setCurrentNav('home');
+        }}
+      />
     );
   }
 
@@ -1284,8 +1320,9 @@ export default function App() {
               onNavigateSaved={() => setCurrentNav('saved')}
               onOpenBilling={() => setIsBillingModalOpen(true)}
               onOpenLanding={() => setCurrentNav('landing')}
-              onOpenAuth={() => setIsAuthModalOpen(true)}
+              onOpenAuth={() => setCurrentNav('login')}
               onOpenAdmin={() => setCurrentNav('admin')}
+              onOpenOnboarding={() => setCurrentNav('onboarding')}
               isSuperAdmin={isSuperAdmin}
               onProfileUpdated={(updated) => setCurrentUserAvatar(updated.avatarUrl)}
               onLogout={async () => {
