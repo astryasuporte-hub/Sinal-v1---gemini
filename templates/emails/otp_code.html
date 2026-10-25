@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="x-apple-disable-message-reformatting">
+  <title>FatosBR • Código de Acesso</title>
+  <style>
+    /* Resets rigorosos para e-mail */
+    body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+    table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+    img { border: 0; outline: none; text-decoration: none; display: block; max-width: 100% !important; height: auto !important; }
+    
+    body { 
+      margin: 0 !important; 
+      padding: 0 !important; 
+      width: 100% !important; 
+      background-color: #030304; 
+      color: #f4f4f5; 
+      font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; 
+      overflow-x: hidden;
+    }
+
+    /* Responsividade Mobile */
+    @media only screen and (max-width: 600px) {
+      .email-container { 
+        width: 100% !important; 
+        max-width: 100% !important; 
+        border-radius: 0 !important; 
+        border-left: none !important;
+        border-right: none !important;
+      }
+      .mobile-padding { 
+        padding-left: 20px !important; 
+        padding-right: 20px !important; 
+      }
+      .otp-box {
+        font-size: 32px !important;
+        letter-spacing: 6px !important;
+      }
+      /* Empilha os metadados no mobile */
+      .meta-table td {
+        display: block !important;
+        width: 100% !important;
+        text-align: left !important;
+        padding: 8px 16px !important;
+        border-bottom: none !important;
+      }
+      .meta-table td:first-child {
+        border-bottom: 1px solid #222533 !important;
+        padding-bottom: 4px !important;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+      .meta-table tr {
+        border-bottom: 1px solid #222533 !important;
+        display: block !important;
+      }
+      .meta-table tr:last-child { border-bottom: none !important; }
+    }
+  </style>
+</head>
+<body style="margin: 0; padding: 0; background-color: #030304; color: #f4f4f5;">
+  <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: #030304; table-layout: fixed;">
+    <tr>
+      <td align="center" style="padding: 40px 16px;">
+        <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" class="email-container" style="max-width: 540px; background-color: #0a0a0c; border: 1px solid #1c1c20; border-radius: 24px; overflow: hidden; box-shadow: 0 20px 50px rgba(0, 0, 0, 0.7);">
+          
+          <!-- Brand Header -->
+          <tr>
+            <td style="padding: 32px 32px 24px 32px; border-bottom: 1px solid #1c1c20;" class="mobile-padding">
+              <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%">
+                <tr>
+                  <td valign="middle">
+                    <div style="font-size: 11px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; color: #a1a1aa; margin-bottom: 6px; font-family: monospace;">
+                      Autenticação Segura
+                    </div>
+                    <h1 style="margin: 0; font-size: 22px; font-weight: 700; color: #ffffff; letter-spacing: -0.5px;">
+                      FatosBR
+                    </h1>
+                  </td>
+                  <td align="right" valign="middle">
+                    <span style="font-family: monospace; font-size: 11px; color: #a1a1aa; background-color: #121215; padding: 6px 12px; border-radius: 999px; border: 1px solid #27272a;">
+                      Código OTP
+                    </span>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Main Body -->
+          <tr>
+            <td style="padding: 36px 32px;" class="mobile-padding">
+              <p style="margin: 0 0 16px 0; font-size: 15px; color: #e4e4e7; line-height: 1.6;">
+                Olá,
+              </p>
+              <p style="margin: 0 0 28px 0; font-size: 14px; color: #a1a1aa; line-height: 1.6;">
+                Você solicitou acesso à sua conta na <strong>FatosBR</strong>. Utilize o código de verificação abaixo para confirmar sua identidade:
+              </p>
+
+              <!-- OTP Code Display Card -->
+              <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: #111114; border: 1px solid #27272a; border-radius: 16px; margin-bottom: 28px;">
+                <tr>
+                  <td align="center" style="padding: 32px 16px;">
+                    <div style="font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 1.5px; color: #71717a; margin-bottom: 16px; font-family: monospace;">
+                      Seu código de confirmação
+                    </div>
+                    <div class="otp-box" style="font-family: 'SF Mono', Menlo, Consolas, Monaco, monospace; font-size: 40px; font-weight: 800; letter-spacing: 10px; color: #ffffff; text-shadow: 0 0 24px rgba(255, 255, 255, 0.2);">
+                      {{otp_code}}
+                    </div>
+                    <div style="font-size: 12px; color: #71717a; margin-top: 16px;">
+                      Válido por <strong>10 minutos</strong>. Não compartilhe.
+                    </div>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Security Information -->
+              <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" class="meta-table" style="background-color: #0a0a0c; border: 1px solid #1c1c20; border-radius: 12px; font-size: 12px; color: #a1a1aa; border-collapse: separate;">
+                <tr>
+                  <td style="padding: 12px 16px; border-bottom: 1px solid #1c1c20; width: 40%;">Destinatário:</td>
+                  <td align="right" style="padding: 12px 16px; border-bottom: 1px solid #1c1c20; color: #ffffff; font-family: monospace;">{{recipient}}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 12px 16px; border-bottom: 1px solid #1c1c20; width: 40%;">Horário:</td>
+                  <td align="right" style="padding: 12px 16px; border-bottom: 1px solid #1c1c20; color: #ffffff; font-family: monospace;">{{timestamp}}</td>
+                </tr>
+                <tr>
+                  <td style="padding: 12px 16px; width: 40%;">Status:</td>
+                  <td align="right" style="padding: 12px 16px; color: #34d399; font-weight: 600;">Aguardando confirmação</td>
+                </tr>
+              </table>
+
+              <p style="margin: 24px 0 0 0; font-size: 12px; color: #71717a; line-height: 1.6;">
+                Se você não solicitou este código, desconsidere esta mensagem ou altere suas credenciais preventivamente.
+              </p>
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="background-color: #0a0a0c; padding: 24px 32px; border-top: 1px solid #1c1c20; text-align: center; font-size: 11px; color: #52525b; line-height: 1.6;" class="mobile-padding">
+              <strong style="color: #71717a;">FatosBR</strong> • Plataforma de Consumo e Inteligência Editorial.<br>
+              © {{year}} Todos os direitos reservados.
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>

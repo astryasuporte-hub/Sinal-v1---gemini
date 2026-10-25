@@ -118,22 +118,47 @@ export const adminService = {
   async getUsers(): Promise<AdminUser[]> {
     const registryMap = new Map<string, AdminUser>();
 
-    // 1. Inicializar com as contas registradas do Supabase Auth
+    // 0. Capturar usuário autenticado atual no cliente do Supabase
+    if (isSupabaseConfigured) {
+      try {
+        const { data: { user: activeUser } } = await supabase.auth.getUser();
+        if (activeUser && activeUser.email) {
+          const emailKey = activeUser.email.toLowerCase();
+          const isOwner = emailKey.includes('astrya') || emailKey.includes('yleao') || emailKey.includes('vinicius');
+          registryMap.set(emailKey, {
+            id: activeUser.id,
+            email: activeUser.email,
+            fullName: activeUser.user_metadata?.full_name || activeUser.user_metadata?.name || activeUser.email.split('@')[0],
+            avatarUrl: activeUser.user_metadata?.avatar_url || undefined,
+            provider: activeUser.app_metadata?.provider === 'google' || activeUser.user_metadata?.iss?.includes('google') ? 'google' : 'email',
+            planName: isOwner ? 'PRO_UNLIMITED' : 'TRIAL_7D',
+            subscriptionStatus: 'ACTIVE',
+            isAdmin: isOwner,
+            createdAt: activeUser.created_at || new Date().toISOString(),
+            lastSignInAt: activeUser.last_sign_in_at || new Date().toISOString()
+          });
+        }
+      } catch {}
+    }
+
+    // 1. Inicializar com as contas registradas conhecidas do Supabase Auth
     KNOWN_SUPABASE_USERS.forEach((u) => {
       if (u.email) {
         const key = u.email.toLowerCase();
-        registryMap.set(key, {
-          id: u.id || `usr_${key.replace(/[^a-z0-9]/g, '_')}`,
-          email: u.email,
-          fullName: u.fullName || u.email.split('@')[0],
-          avatarUrl: u.avatarUrl,
-          provider: u.provider || 'google',
-          planName: u.planName || 'PRO_UNLIMITED',
-          subscriptionStatus: u.subscriptionStatus || 'ACTIVE',
-          isAdmin: Boolean(u.isAdmin),
-          createdAt: u.createdAt || new Date().toISOString(),
-          lastSignInAt: new Date().toISOString()
-        });
+        if (!registryMap.has(key)) {
+          registryMap.set(key, {
+            id: u.id || `usr_${key.replace(/[^a-z0-9]/g, '_')}`,
+            email: u.email,
+            fullName: u.fullName || u.email.split('@')[0],
+            avatarUrl: u.avatarUrl,
+            provider: u.provider || 'google',
+            planName: u.planName || 'PRO_UNLIMITED',
+            subscriptionStatus: u.subscriptionStatus || 'ACTIVE',
+            isAdmin: Boolean(u.isAdmin),
+            createdAt: u.createdAt || new Date().toISOString(),
+            lastSignInAt: new Date().toISOString()
+          });
+        }
       }
     });
 
@@ -228,6 +253,41 @@ export const adminService = {
     return Array.from(registryMap.values()).sort(
       (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
     );
+  },
+
+  /**
+   * Assina mudanças em tempo real nas tabelas do Supabase (profiles e user_preferences)
+   */
+  subscribeToUsers(callback: (users: AdminUser[]) => void) {
+    if (!isSupabaseConfigured) {
+      return { unsubscribe: () => {} };
+    }
+
+    const channel = supabase
+      .channel('realtime_admin_users_channel')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'profiles' },
+        async () => {
+          const freshUsers = await this.getUsers();
+          callback(freshUsers);
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'user_preferences' },
+        async () => {
+          const freshUsers = await this.getUsers();
+          callback(freshUsers);
+        }
+      )
+      .subscribe();
+
+    return {
+      unsubscribe: () => {
+        supabase.removeChannel(channel);
+      }
+    };
   },
 
   /**

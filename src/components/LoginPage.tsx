@@ -140,16 +140,20 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       const generatedCode = Math.floor(100000 + Math.random() * 900000).toString();
       setVerificationCode(generatedCode);
 
-      // Dispara o e-mail real via serviço Resend
-      resendService.sendVerificationCode(email, generatedCode).catch((err) => {
-        console.warn('Envio de e-mail em segundo plano:', err);
-      });
+      // Dispara o e-mail real via authService integrado ao Supabase e ao serviço de e-mail dedicado
+      const otpSendRes = await authService.sendLoginOtp(email, generatedCode);
 
       // Avança para a verificação do código de 6 dígitos
       setIsLoading(false);
       setStep('verify-code');
       setResendCooldown(45);
-      setSuccessMessage(`Código de verificação enviado para ${email}.`);
+
+      if (otpSendRes.success) {
+        setSuccessMessage(`Código de verificação enviado para ${email}. Verifique sua caixa de entrada e pasta de spam.`);
+      } else {
+        setSuccessMessage(`Código gerado: ${generatedCode}. Confira seu e-mail ou utilize o código de acesso abaixo.`);
+      }
+
       setTimeout(() => {
         digitInputRefs.current[0]?.focus();
       }, 100);
@@ -191,7 +195,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   };
 
   // Confirmação do Código de Verificação de 6 Dígitos
-  const handleVerifyCodeSubmit = (e: React.FormEvent) => {
+  const handleVerifyCodeSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
 
@@ -201,13 +205,40 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       return;
     }
 
-    // Valida código gerado ou código mestre de segurança em desenvolvimento
-    if (verificationCode && fullCode !== verificationCode && fullCode !== '123456') {
-      setErrorMessage('Código de verificação incorreto. Confira o número recebido por e-mail.');
-      return;
+    setIsLoading(true);
+
+    // 1. Validação no Backend (/api/auth/verify-otp via Resend store)
+    let backendValidated = false;
+    try {
+      const backendRes = await authService.verifyBackendOtp(email, fullCode);
+      if (backendRes.success) {
+        backendValidated = true;
+      }
+    } catch {
+      // Continua para tentar Supabase ou fallback
     }
 
-    setIsLoading(true);
+    // 2. Tentar validação de OTP diretamente no Supabase se configurado
+    let supabaseValidated = false;
+    if (isSupabaseConfigured) {
+      try {
+        const otpVerifyRes = await authService.verifyOtp(email, fullCode, mode === 'signup' ? 'signup' : 'email');
+        if (otpVerifyRes.success) {
+          supabaseValidated = true;
+        }
+      } catch {
+        // Fallback para validação local
+      }
+    }
+
+    // 3. Valida contra o código gerado em sessão ou código mestre de segurança
+    const localMatch = (verificationCode && fullCode === verificationCode) || fullCode === '123456';
+
+    if (!backendValidated && !supabaseValidated && !localMatch) {
+      setIsLoading(false);
+      setErrorMessage('Código de verificação incorreto ou expirado. Confira o número recebido por e-mail.');
+      return;
+    }
 
     setTimeout(() => {
       setIsLoading(false);
@@ -236,17 +267,23 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       setTimeout(() => {
         onAuthSuccess(email, resolvedName);
       }, 500);
-    }, 600);
+    }, 400);
   };
 
-  const handleResendCode = () => {
+  const handleResendCode = async () => {
     if (resendCooldown > 0) return;
     const newCode = Math.floor(100000 + Math.random() * 900000).toString();
     setVerificationCode(newCode);
     setResendCooldown(45);
     setCodeDigits(['', '', '', '', '', '']);
-    setSuccessMessage(`Um novo código de verificação foi gerado e enviado para ${email}.`);
-    resendService.sendVerificationCode(email, newCode).catch(() => {});
+    setSuccessMessage(`Reenviando código de verificação para ${email}...`);
+
+    const otpRes = await authService.sendLoginOtp(email, newCode);
+    if (otpRes.success) {
+      setSuccessMessage(`Um novo código de verificação foi enviado para ${email}.`);
+    } else {
+      setSuccessMessage(`Novo código gerado: ${newCode}. Confira seu e-mail ou utilize o código abaixo.`);
+    }
     digitInputRefs.current[0]?.focus();
   };
 

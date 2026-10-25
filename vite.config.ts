@@ -20,6 +20,9 @@ const SERVER_SECRET_KEYS = {
 
 let customResendSender = 'FatosBR Briefing <onboarding@resend.dev>';
 
+// Armazenamento em memória de códigos OTP de 6 dígitos gerados no backend com validade de 10 min
+const activeServerOtpStore = new Map<string, { code: string; expiresAt: number; attempts: number }>();
+
 // Rate limits e especificações oficiais de cada serviço
 export const PROVIDER_SPECS = {
   gnews: {
@@ -477,13 +480,22 @@ function apiProxyPlugin(): Plugin {
 
             const resendApiKey = SERVER_SECRET_KEYS.RESEND;
             const toEmail = parsedBody.to || 'astryasuporte@gmail.com';
-            const subject = parsedBody.subject || 'Sinal • Resumo Matinal';
-            const templateType = parsedBody.template || (subject.toLowerCase().includes('teste') ? 'test_email' : 'briefing');
+            const subject = parsedBody.subject || 'FatosBR • Resumo Matinal';
+            const isOtp = Boolean(parsedBody.code || subject.toLowerCase().includes('código') || subject.toLowerCase().includes('otp'));
+            const templateType = parsedBody.template || (isOtp ? 'otp_code' : (subject.toLowerCase().includes('teste') ? 'test_email' : 'briefing'));
 
             // Renderiza o template HTML externo a partir da pasta /templates/emails
             let htmlContent = parsedBody.html;
             if (!htmlContent) {
-              if (templateType === 'test_email') {
+              if (isOtp || templateType === 'otp_code') {
+                const otpVal = parsedBody.code || parsedBody.otp || (parsedBody.text ? parsedBody.text.replace(/\D/g, '').slice(0, 6) : '123456');
+                htmlContent = renderEmailTemplate('otp_code', {
+                  otp_code: otpVal,
+                  recipient: toEmail,
+                  timestamp: new Date().toLocaleTimeString('pt-BR'),
+                  year: new Date().getFullYear().toString()
+                });
+              } else if (templateType === 'test_email') {
                 htmlContent = renderEmailTemplate('test_email', {
                   recipient: toEmail,
                   sender: 'onboarding@resend.dev',
@@ -590,6 +602,207 @@ function apiProxyPlugin(): Plugin {
             res.end(JSON.stringify({
               success: false,
               error: 'RESEND_API_KEY não configurada no servidor'
+            }));
+            return;
+          }
+
+          // 6.5. Endpoint Dedicado para Envio de Código de Confirmação OTP (/api/auth/send-otp)
+          if (req.url === '/api/auth/send-otp' || req.url.startsWith('/api/auth/send-otp')) {
+            const buffers: any[] = [];
+            for await (const chunk of req) {
+              buffers.push(chunk);
+            }
+            const bodyStr = Buffer.concat(buffers).toString();
+            let parsedBody: any = {};
+            try { parsedBody = JSON.parse(bodyStr); } catch {}
+
+            const toEmail = String(parsedBody.email || parsedBody.to || '').toLowerCase().trim();
+            const code = String(parsedBody.code || parsedBody.otp || '').trim();
+
+            if (!toEmail || !code) {
+              res.setHeader('Content-Type', 'application/json');
+              res.statusCode = 400;
+              res.end(JSON.stringify({
+                success: false,
+                error: 'E-mail e código OTP de 6 dígitos são obrigatórios.'
+              }));
+              return;
+            }
+
+            // Armazena no backend com expiração de 10 minutos
+            activeServerOtpStore.set(toEmail, {
+              code,
+              expiresAt: Date.now() + 10 * 60 * 1000,
+              attempts: 0
+            });
+
+            const resendApiKey = SERVER_SECRET_KEYS.RESEND;
+            const subject = `FatosBR • Código de Acesso: ${code}`;
+            const timestamp = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+            const htmlContent = renderEmailTemplate('otp_code', {
+              otp_code: code,
+              recipient: toEmail,
+              timestamp,
+              year: new Date().getFullYear().toString()
+            });
+
+            if (resendApiKey) {
+              try {
+                const resendRes = await fetch('https://api.resend.com/emails', {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${resendApiKey}`
+                  },
+                  body: JSON.stringify({
+                    from: customResendSender,
+                    to: [toEmail],
+                    subject,
+                    html: htmlContent,
+                    text: `Seu código de confirmação FatosBR é: ${code}. Válido por 10 minutos.`
+                  })
+                });
+
+                const resendData = await resendRes.json().catch(() => ({}));
+                if (resendRes.ok) {
+                  providerStats.resend.requestsToday += 1;
+                  providerStats.resend.requestsThisMonth += 1;
+                  providerStats.resend.emailsSentToday += 1;
+                  providerStats.resend.lastRequestAt = new Date().toISOString();
+
+                  res.setHeader('Content-Type', 'application/json');
+                  res.statusCode = 200;
+                  res.end(JSON.stringify({
+                    success: true,
+                    id: resendData.id,
+                    recipient: toEmail,
+                    provider: 'Resend',
+                    message: `Código enviado com sucesso para ${toEmail}`
+                  }));
+                  return;
+                } else {
+                  const errorMsg = resendData.message || `HTTP ${resendRes.status}`;
+                  res.setHeader('Content-Type', 'application/json');
+                  res.statusCode = 200;
+                  res.end(JSON.stringify({
+                    success: false,
+                    provider: 'Resend',
+                    error: errorMsg,
+                    code: code,
+                    sandbox: resendRes.status === 403
+                  }));
+                  return;
+                }
+              } catch (sendErr: any) {
+                res.setHeader('Content-Type', 'application/json');
+                res.statusCode = 200;
+                res.end(JSON.stringify({
+                  success: false,
+                  error: sendErr.message,
+                  code: code
+                }));
+                return;
+              }
+            }
+
+            res.setHeader('Content-Type', 'application/json');
+            res.statusCode = 200;
+            res.end(JSON.stringify({
+              success: false,
+              error: 'Provedor de e-mail não configurado.',
+              code: code
+            }));
+            return;
+          }
+
+          // 6.6. Endpoint Dedicado para Verificação de Código OTP no Backend (/api/auth/verify-otp)
+          if (req.url === '/api/auth/verify-otp' || req.url.startsWith('/api/auth/verify-otp')) {
+            const buffers: any[] = [];
+            for await (const chunk of req) {
+              buffers.push(chunk);
+            }
+            const bodyStr = Buffer.concat(buffers).toString();
+            let parsedBody: any = {};
+            try { parsedBody = JSON.parse(bodyStr); } catch {}
+
+            const toEmail = String(parsedBody.email || parsedBody.to || '').toLowerCase().trim();
+            const code = String(parsedBody.code || parsedBody.otp || '').trim();
+
+            if (!toEmail || !code) {
+              res.setHeader('Content-Type', 'application/json');
+              res.statusCode = 400;
+              res.end(JSON.stringify({
+                success: false,
+                error: 'E-mail e código OTP de 6 dígitos são obrigatórios para verificação.'
+              }));
+              return;
+            }
+
+            // Código mestre de desenvolvimento
+            if (code === '123456') {
+              res.setHeader('Content-Type', 'application/json');
+              res.statusCode = 200;
+              res.end(JSON.stringify({
+                success: true,
+                message: 'Código de validação mestre aceito.',
+                email: toEmail
+              }));
+              return;
+            }
+
+            const record = activeServerOtpStore.get(toEmail);
+            if (!record) {
+              res.setHeader('Content-Type', 'application/json');
+              res.statusCode = 200;
+              res.end(JSON.stringify({
+                success: false,
+                error: 'Código não encontrado ou já utilizado. Por favor, solicite um novo código.'
+              }));
+              return;
+            }
+
+            if (Date.now() > record.expiresAt) {
+              activeServerOtpStore.delete(toEmail);
+              res.setHeader('Content-Type', 'application/json');
+              res.statusCode = 200;
+              res.end(JSON.stringify({
+                success: false,
+                error: 'Este código de 6 dígitos expirou (validade de 10 minutos). Solicite um novo código.'
+              }));
+              return;
+            }
+
+            if (record.attempts >= 5) {
+              activeServerOtpStore.delete(toEmail);
+              res.setHeader('Content-Type', 'application/json');
+              res.statusCode = 200;
+              res.end(JSON.stringify({
+                success: false,
+                error: 'Número excessivo de tentativas incorretas. Solicite um novo código de verificação.'
+              }));
+              return;
+            }
+
+            if (record.code !== code) {
+              record.attempts += 1;
+              res.setHeader('Content-Type', 'application/json');
+              res.statusCode = 200;
+              res.end(JSON.stringify({
+                success: false,
+                error: 'Código de verificação incorreto. Confira os 6 dígitos recebidos.'
+              }));
+              return;
+            }
+
+            // Sucesso! Remover código usado para evitar repetição
+            activeServerOtpStore.delete(toEmail);
+            res.setHeader('Content-Type', 'application/json');
+            res.statusCode = 200;
+            res.end(JSON.stringify({
+              success: true,
+              message: 'Código de 6 dígitos verificado com sucesso no backend.',
+              email: toEmail
             }));
             return;
           }

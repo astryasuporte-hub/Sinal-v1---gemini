@@ -117,10 +117,15 @@ export default function App() {
       if (window.location.hash === '#app' || window.location.hash === '#home') return 'home';
       if (window.location.hash === '#control') return 'control';
 
-      // Persistência de sessão: se o usuário já fez login ou tem perfil ativo, permanece logado
+      // Persistência de sessão: se o usuário já fez login ou tem perfil ativo, permanece logado na última tela
       const isSessionActive = localStorage.getItem('fatosbr_session_active') === 'true';
       const hasSavedProfile = Boolean(localStorage.getItem('sinal_user_profile'));
+      const lastNav = localStorage.getItem('fatosbr_last_nav') as any;
+
       if (isSessionActive || hasSavedProfile) {
+        if (lastNav && lastNav !== 'landing' && lastNav !== 'login') {
+          return lastNav;
+        }
         return 'home';
       }
     }
@@ -131,6 +136,8 @@ export default function App() {
   const [feedAnimationKey, setFeedAnimationKey] = useState<number>(0);
   const [currentUserAvatar, setCurrentUserAvatar] = useState<string | null>(() => {
     try {
+      const dedicated = localStorage.getItem('fatosbr_user_avatar');
+      if (dedicated) return dedicated;
       const saved = localStorage.getItem('sinal_user_profile');
       if (saved) return JSON.parse(saved).avatarUrl;
     } catch {}
@@ -419,19 +426,30 @@ export default function App() {
   const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
 
+  // Salva última rota visitada para persistência consistente
+  useEffect(() => {
+    if (currentNav !== 'landing' && currentNav !== 'login') {
+      try {
+        localStorage.setItem('fatosbr_last_nav', currentNav);
+      } catch {}
+    }
+  }, [currentNav]);
+
   const handleUserSession = (user: SupabaseUser | null) => {
     setCurrentUser(user);
     if (user) {
+      const dedicatedAvatar = typeof window !== 'undefined' ? localStorage.getItem('fatosbr_user_avatar') : null;
       const metaName =
         user.user_metadata?.full_name ||
         user.user_metadata?.name ||
         (user.email ? user.email.split('@')[0] : 'Leitor');
-      const metaAvatar = user.user_metadata?.avatar_url || null;
+      const metaAvatar = dedicatedAvatar || user.user_metadata?.avatar_url || null;
       if (metaAvatar) {
         setCurrentUserAvatar(metaAvatar);
       }
 
       try {
+        localStorage.setItem('fatosbr_session_active', 'true');
         localStorage.setItem(
           'sinal_user_profile',
           JSON.stringify({
@@ -491,16 +509,35 @@ export default function App() {
       }
     });
 
-    // Verificar sessão existente
-    authService.getCurrentUser().then((user) => {
-      if (user) {
-        handleUserSession(user);
-        const params = new URLSearchParams(window.location.search);
-        if (params.get('view') !== 'landing' && window.location.pathname !== '/landing') {
-          setCurrentNav((prev) => (prev === 'landing' ? 'home' : prev));
+    // Validação assíncrona da sessão no Supabase antes de qualquer redirecionamento
+    const restoreSessionAsync = async () => {
+      try {
+        const session = await authService.getSession();
+        const user = session?.user || (await authService.getCurrentUser());
+
+        if (user) {
+          handleUserSession(user);
+          localStorage.setItem('fatosbr_session_active', 'true');
+
+          const params = new URLSearchParams(window.location.search);
+          const explicitView = params.get('view') || params.get('page');
+          const lastNav = localStorage.getItem('fatosbr_last_nav') as any;
+
+          if (!explicitView && (window.location.pathname === '/' || window.location.pathname === '')) {
+            setCurrentNav((prev) => {
+              if (prev === 'landing' || prev === 'login') {
+                return lastNav && lastNav !== 'landing' && lastNav !== 'login' ? lastNav : 'home';
+              }
+              return prev;
+            });
+          }
         }
+      } catch (err) {
+        console.warn('Erro ao validar sessão assíncrona:', err);
       }
-    });
+    };
+
+    restoreSessionAsync();
 
     // Detectar retorno de OAuth (/oauth/consent ou query/hash com tokens)
     if (typeof window !== 'undefined') {

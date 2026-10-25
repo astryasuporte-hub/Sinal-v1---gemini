@@ -568,6 +568,19 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
 
   useEffect(() => {
     loadDatabaseData();
+
+    // Inscrição em tempo real nas tabelas do Supabase
+    const userSub = adminService.subscribeToUsers((freshUsers) => {
+      setUsersList(freshUsers);
+      setMetrics((prev) => ({
+        ...prev,
+        activeUsers: Math.max(freshUsers.length, 1)
+      }));
+    });
+
+    return () => {
+      userSub.unsubscribe();
+    };
   }, [events.length]);
 
   // Executar Ingestão Real com IA

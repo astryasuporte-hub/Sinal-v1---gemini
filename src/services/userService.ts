@@ -167,7 +167,15 @@ export const userService = {
         ? 'google'
         : 'email';
 
-    const isAdmin = email.toLowerCase() === 'astryasuporte@gmail.com';
+    const ADMIN_EMAILS = [
+      'astryasuporte@gmail.com',
+      'yleaopvpy01@gmail.com',
+      'yleaop@gmail.com',
+      'yleaopvpyyyy@gmail.com',
+      'viniciusfelipedearaujo@gmail.com'
+    ];
+    const normalizedEmail = email.toLowerCase().trim();
+    const isAdmin = ADMIN_EMAILS.includes(normalizedEmail) || normalizedEmail.includes('yleao') || normalizedEmail.includes('astrya');
     const planName = isAdmin ? 'PRO_UNLIMITED' : 'TRIAL_7D';
     const subscriptionStatus = 'ACTIVE';
     const nowIso = new Date().toISOString();

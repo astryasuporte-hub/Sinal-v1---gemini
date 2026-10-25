@@ -56,6 +56,7 @@ import { User as SupabaseUser } from '@supabase/supabase-js';
 import { avatarProcessing } from '../services/avatarProcessing';
 import { validateImageFile } from '../utils/imageValidation';
 import { usePWAInstall } from '../hooks/usePWAInstall';
+import { userService } from '../services/userService';
 
 interface ProfileViewProps {
   currentUser?: SupabaseUser | null;
@@ -105,12 +106,13 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
 }) => {
   // Sincronização Dinâmica do Perfil com o Usuário Autenticado
   const [profile, setProfile] = useState<UserProfileData>(() => {
+    const dedicatedAvatar = typeof window !== 'undefined' ? localStorage.getItem('fatosbr_user_avatar') : null;
     if (currentUser) {
       const metaName =
         currentUser.user_metadata?.full_name ||
         currentUser.user_metadata?.name ||
         (currentUser.email ? currentUser.email.split('@')[0] : 'Leitor');
-      const metaAvatar = currentUser.user_metadata?.avatar_url || null;
+      const metaAvatar = dedicatedAvatar || currentUser.user_metadata?.avatar_url || null;
       return {
         name: metaName,
         displayName: metaName,
@@ -122,13 +124,17 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
     }
     try {
       const saved = localStorage.getItem('sinal_user_profile');
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (dedicatedAvatar) parsed.avatarUrl = dedicatedAvatar;
+        return parsed;
+      }
     } catch {}
     return {
       name: 'Leitor',
       displayName: 'Leitor',
       email: 'leitor@fatosbr.com.br',
-      avatarUrl: null,
+      avatarUrl: dedicatedAvatar || null,
       bio: 'Leitor FatosBR',
       timezone: 'America/Sao_Paulo (UTC-3)'
     };
@@ -136,19 +142,22 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
 
   // Atualizar perfil reativamente quando currentUser mudar (ex: login com outra conta)
   React.useEffect(() => {
+    const dedicatedAvatar = localStorage.getItem('fatosbr_user_avatar');
     if (currentUser) {
       const metaName =
         currentUser.user_metadata?.full_name ||
         currentUser.user_metadata?.name ||
         (currentUser.email ? currentUser.email.split('@')[0] : 'Leitor');
-      const metaAvatar = currentUser.user_metadata?.avatar_url || null;
+      const metaAvatar = dedicatedAvatar || currentUser.user_metadata?.avatar_url || null;
       setProfile((prev) => ({
         ...prev,
         name: prev.name === 'Astrya Suporte' && currentUser.email?.toLowerCase() !== 'astryasuporte@gmail.com' ? metaName : (prev.name || metaName),
         email: currentUser.email || prev.email,
-        avatarUrl: prev.avatarUrl || metaAvatar,
+        avatarUrl: dedicatedAvatar || prev.avatarUrl || metaAvatar,
         bio: currentUser.email?.toLowerCase() === 'astryasuporte@gmail.com' ? 'Super Administrador — FatosBR' : 'Leitor FatosBR'
       }));
+    } else if (dedicatedAvatar) {
+      setProfile((prev) => ({ ...prev, avatarUrl: dedicatedAvatar }));
     }
   }, [currentUser]);
 
@@ -328,12 +337,38 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
         cropZoom,
         cropOffsetX,
         cropOffsetY,
-        512
+        384
       );
       setEditAvatarInput(croppedUrl);
       setIsCropModalOpen(false);
       setCropRawUrl(null);
-      showToast('Foto processada, recortada e metadados GPS removidos!');
+
+      // SALVAMENTO IMEDIATO NO LOCALSTORAGE & ESTADO
+      const updatedProfile: UserProfileData = {
+        ...profile,
+        avatarUrl: croppedUrl
+      };
+      setProfile(updatedProfile);
+
+      try {
+        localStorage.setItem('fatosbr_user_avatar', croppedUrl);
+        localStorage.setItem('sinal_user_profile', JSON.stringify(updatedProfile));
+      } catch (err) {
+        console.warn('Erro ao salvar avatar no localStorage:', err);
+      }
+
+      if (onProfileUpdated) {
+        onProfileUpdated(updatedProfile);
+      }
+
+      if (currentUser) {
+        userService.syncUserProfile({
+          ...currentUser,
+          avatar_url: croppedUrl
+        });
+      }
+
+      showToast('Foto de perfil recortada e salva com sucesso!');
     } catch {
       showToast('Erro ao aplicar corte na imagem.');
     } finally {
@@ -367,7 +402,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
 
   // Commit da alteração de perfil
   const commitProfileUpdate = (name: string, avatarUrl: string | null, consumedNameChange = false) => {
-    const updated = {
+    const updated: UserProfileData = {
       ...profile,
       name,
       avatarUrl
@@ -375,6 +410,9 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
     setProfile(updated);
     try {
       localStorage.setItem('sinal_user_profile', JSON.stringify(updated));
+      if (avatarUrl) {
+        localStorage.setItem('fatosbr_user_avatar', avatarUrl);
+      }
       if (consumedNameChange) {
         localStorage.setItem(getNameChangeKey(profile.email), 'true');
         setHasChangedName(true);
@@ -384,6 +422,13 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
     }
     if (onProfileUpdated) {
       onProfileUpdated(updated);
+    }
+    if (currentUser) {
+      userService.syncUserProfile({
+        ...currentUser,
+        full_name: name,
+        avatar_url: avatarUrl
+      });
     }
     setIsConfirmingNameChange(false);
     setActiveModal(null);

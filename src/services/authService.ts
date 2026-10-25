@@ -116,6 +116,187 @@ export const authService = {
   },
 
   /**
+   * Dispara autenticação via código OTP oficial do Supabase Auth
+   */
+  async signInWithOtp(
+    email: string,
+    options?: { shouldCreateUser?: boolean; emailRedirectTo?: string }
+  ): Promise<AuthResponse> {
+    if (!isSupabaseConfigured) {
+      return {
+        success: false,
+        error: 'Supabase ainda não configurado.',
+      };
+    }
+
+    try {
+      const { data, error } = await supabase.auth.signInWithOtp({
+        email,
+        options: {
+          shouldCreateUser: options?.shouldCreateUser ?? true,
+          emailRedirectTo: options?.emailRedirectTo,
+        },
+      });
+
+      if (error) {
+        return { success: false, error: error.message };
+      }
+
+      return { success: true, data };
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : 'Erro ao disparar OTP via Supabase.',
+      };
+    }
+  },
+
+  /**
+   * Valida o código OTP de 6 dígitos no backend via /api/auth/verify-otp (Resend/Backend)
+   */
+  async verifyBackendOtp(
+    email: string,
+    code: string
+  ): Promise<{ success: boolean; error?: string; message?: string }> {
+    try {
+      const res = await fetch('/api/auth/verify-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, code: code.trim() })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success) {
+        return { success: true, message: data.message };
+      }
+      return { success: false, error: data.error || 'Código de verificação incorreto.' };
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : 'Falha de comunicação com o servidor de autenticação.'
+      };
+    }
+  },
+
+  /**
+   * Valida o token numérico (OTP) informado pelo usuário junto ao Supabase Auth
+   * com verificação complementar no backend
+   */
+  async verifyOtp(
+    email: string,
+    token: string,
+    type: 'email' | 'signup' | 'magiclink' = 'email'
+  ): Promise<AuthResponse<{ user: User | null; session: Session | null }>> {
+    const cleanToken = token.trim();
+
+    // 1. Tentar validação no Supabase Auth se configurado
+    if (isSupabaseConfigured) {
+      try {
+        const { data, error } = await supabase.auth.verifyOtp({
+          email,
+          token: cleanToken,
+          type,
+        });
+
+        if (!error && data?.session) {
+          return { success: true, data: { user: data.user, session: data.session } };
+        }
+      } catch (err) {
+        console.warn('[authService] Supabase verifyOtp tentou e falhou, tentando backend:', err);
+      }
+    }
+
+    // 2. Validação no backend via /api/auth/verify-otp
+    const backendRes = await this.verifyBackendOtp(email, cleanToken);
+    if (backendRes.success) {
+      return { success: true };
+    }
+
+    return {
+      success: false,
+      error: backendRes.error || 'Código de verificação incorreto ou expirado.',
+    };
+  },
+
+  /**
+   * Orquestra o envio do e-mail com código de confirmação (OTP) durante o login:
+   * 1. Aciona o Supabase Auth (supabase.auth.signInWithOtp) para disparo oficial do provedor
+   * 2. Aciona o endpoint /api/auth/send-otp com template dedicado e remetente do FatosBR
+   */
+  async sendLoginOtp(
+    email: string,
+    code: string
+  ): Promise<{
+    success: boolean;
+    supabaseSent: boolean;
+    resendSent: boolean;
+    error?: string;
+    details?: string;
+  }> {
+    let supabaseSent = false;
+    let resendSent = false;
+    let supabaseError: string | undefined;
+    let resendError: string | undefined;
+
+    // 1. Tentar envio via Supabase Auth se configurado
+    if (isSupabaseConfigured) {
+      try {
+        const { error } = await supabase.auth.signInWithOtp({
+          email,
+          options: {
+            shouldCreateUser: true,
+          },
+        });
+
+        if (!error) {
+          supabaseSent = true;
+          console.info('[authService] Código OTP disparado com sucesso via Supabase Auth.');
+        } else {
+          supabaseError = error.message;
+          console.warn('[authService] Supabase signInWithOtp aviso/erro:', error.message);
+        }
+      } catch (err) {
+        supabaseError = err instanceof Error ? err.message : 'Falha na conexão Supabase';
+        console.warn('[authService] Erro ao disparar OTP via Supabase:', err);
+      }
+    }
+
+    // 2. Disparar via endpoint de entrega direta /api/auth/send-otp
+    try {
+      const res = await fetch('/api/auth/send-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, code }),
+      });
+
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        if (data.success) {
+          resendSent = true;
+          console.info('[authService] Código OTP entregue com sucesso via /api/auth/send-otp.');
+        } else {
+          resendError = data.error || 'Falha no envio de e-mail secundário';
+        }
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        resendError = errData.error || `HTTP ${res.status}`;
+      }
+    } catch (err) {
+      resendError = err instanceof Error ? err.message : 'Falha na requisição de e-mail';
+      console.warn('[authService] Falha ao chamar /api/auth/send-otp:', err);
+    }
+
+    const anySent = supabaseSent || resendSent;
+
+    return {
+      success: anySent,
+      supabaseSent,
+      resendSent,
+      error: !anySent ? (supabaseError || resendError || 'Não foi possível despachar o código por e-mail.') : undefined,
+      details: `Supabase: ${supabaseSent ? 'Enviado' : (supabaseError || 'Inativo')}; E-mail direto: ${resendSent ? 'Enviado' : (resendError || 'Inativo')}`,
+    };
+  },
+
+  /**
    * Login com Provedor OAuth (Google)
    */
   async signInWithOAuth(provider: 'google'): Promise<AuthResponse<{ url?: string }>> {
