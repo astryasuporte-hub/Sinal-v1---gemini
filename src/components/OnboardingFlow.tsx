@@ -38,6 +38,7 @@ import {
 } from 'lucide-react';
 import { Entity, Topic, Source } from '../types/sinal';
 import { usePWAInstall } from '../hooks/usePWAInstall';
+import { searchBrazilLocations, BrazilLocation } from '../data/brazilLocations';
 
 interface OnboardingFlowProps {
   onComplete: () => void;
@@ -57,6 +58,10 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
   const [step, setStep] = useState<number>(1);
   const pwa = usePWAInstall();
   const [showIosGuide, setShowIosGuide] = useState<boolean>(false);
+
+  // Autocomplete de Municípios e Estados do Brasil
+  const [locationSuggestions, setLocationSuggestions] = useState<BrazilLocation[]>([]);
+  const [isLocationDropdownOpen, setIsLocationDropdownOpen] = useState(false);
 
   // Tela 2: Temas selecionados
   const ALL_THEMES = useMemo(
@@ -195,6 +200,10 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
       setStep(step + 1);
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } else {
+      try {
+        localStorage.setItem('fatosbr_session_active', 'true');
+        localStorage.setItem('fatosbr_user_region', userLocation);
+      } catch {}
       onComplete();
     }
   };
@@ -255,39 +264,50 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
 
       {/* Container Principal Centralizado (Otimizado para Mobile e PC) */}
       <main className="relative z-10 w-full max-w-lg lg:max-w-xl mx-auto flex-1 flex flex-col justify-between px-4 sm:px-6 py-2 sm:py-3">
-        {/* Banner Deslizante Discreto de Instalação do PWA FatosBR */}
+        {/* Notificação Deslizante (Toast Premium) de Instalação do PWA FatosBR */}
         {!pwa.isInstalled && !pwa.isDismissed && (
-          <div className="w-full mb-3 px-3.5 py-2.5 rounded-2xl bg-[#12141a]/95 border border-zinc-800 backdrop-blur-md flex items-center justify-between gap-3 shadow-xl animate-fadeIn">
-            <div className="flex items-center gap-2.5 min-w-0">
-              <div className="w-8 h-8 rounded-xl bg-white/10 flex items-center justify-center shrink-0 border border-white/10 text-white">
-                <Smartphone className="w-4 h-4" />
+          <div className="w-full mb-3 p-3 sm:p-3.5 rounded-2xl bg-gradient-to-r from-[#12141c]/95 via-[#181a24]/95 to-[#12141c]/95 border border-zinc-700/80 backdrop-blur-md flex items-center justify-between gap-3 shadow-2xl animate-fadeIn transition-all">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="w-9 h-9 rounded-xl bg-black flex items-center justify-center shrink-0 border border-zinc-700 overflow-hidden shadow-sm">
+                <img
+                  src="/pwa-icon-192.png"
+                  alt="FatosBR"
+                  className="w-full h-full object-contain"
+                />
               </div>
               <div className="min-w-0">
-                <div className="text-xs font-semibold text-white truncate">Instalar FatosBR</div>
-                <div className="text-[11px] text-zinc-400 truncate">App direto no celular ou PC</div>
+                <div className="text-xs sm:text-sm font-bold text-white truncate flex items-center gap-1.5">
+                  <span>Instalar FatosBR</span>
+                  <span className="text-[9px] px-1.5 py-0.2 rounded bg-white/10 text-zinc-300 font-mono font-medium">App</span>
+                </div>
+                <div className="text-[11px] text-zinc-400 truncate">Instale direto pelo navegador sem ocupar espaço</div>
               </div>
             </div>
-            <div className="flex items-center gap-1.5 shrink-0">
+            <div className="flex items-center gap-2 shrink-0">
               <button
                 type="button"
-                onClick={() => {
+                onClick={async () => {
                   if (pwa.isIOS) {
                     setShowIosGuide(true);
-                  } else {
-                    pwa.install();
+                    return;
                   }
+                  if (pwa.isInstallable) {
+                    const res = await pwa.install();
+                    if (res) return;
+                  }
+                  setShowIosGuide(true);
                 }}
-                className="px-3 py-1.5 bg-white text-black text-xs font-bold rounded-lg hover:bg-zinc-200 transition cursor-pointer"
+                className="px-3.5 py-1.5 bg-white text-black text-xs font-bold rounded-xl hover:bg-zinc-200 transition cursor-pointer active:scale-95 shadow-sm"
               >
-                Instalar
+                Instalar Agora
               </button>
               <button
                 type="button"
                 onClick={pwa.dismiss}
                 className="p-1.5 text-zinc-400 hover:text-white rounded-lg transition cursor-pointer"
-                title="Dispensar"
+                title="Agora não"
               >
-                <X className="w-3.5 h-3.5" />
+                <X className="w-4 h-4" />
               </button>
             </div>
           </div>
@@ -729,32 +749,110 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
                 Onde você está?
               </h1>
               <p className="text-xs sm:text-sm text-zinc-400 mt-1.5 mb-6">
-                Isso ajuda a mostrar notícias e eventos mais relevantes para a sua região.
+                Isso ajuda a mostrar notícias e acontecimentos mais relevantes para a sua região.
               </p>
 
               <div className="space-y-5">
-                <div>
+                <div className="relative">
                   <label className="block text-xs font-semibold text-zinc-300 mb-2">
-                    Sua cidade ou país
+                    Sua cidade ou estado no Brasil
                   </label>
                   <div className="relative">
                     <MapPin className="w-4 h-4 text-zinc-500 absolute left-3.5 top-3.5" />
                     <input
                       type="text"
                       value={userLocation}
-                      onChange={(e) => setUserLocation(e.target.value)}
-                      placeholder="Ex: São Paulo, SP ou Brasil"
-                      className="w-full bg-[#12141a] border border-zinc-800 focus:border-zinc-600 rounded-xl pl-10 pr-10 py-3 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none transition"
+                      onFocus={() => {
+                        const results = searchBrazilLocations(userLocation || 'g', 10);
+                        setLocationSuggestions(results);
+                        setIsLocationDropdownOpen(true);
+                      }}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setUserLocation(val);
+                        if (val.trim().length > 0) {
+                          const results = searchBrazilLocations(val, 12);
+                          setLocationSuggestions(results);
+                          setIsLocationDropdownOpen(true);
+                        } else {
+                          const results = searchBrazilLocations('g', 10);
+                          setLocationSuggestions(results);
+                          setIsLocationDropdownOpen(true);
+                        }
+                      }}
+                      placeholder="Comece a digitar (ex: Goiânia, Goiás, Guarulhos...)"
+                      className="w-full bg-[#12141a] border border-zinc-800 focus:border-zinc-500 rounded-xl pl-10 pr-10 py-3 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none transition shadow-sm"
                     />
                     {userLocation && (
                       <button
                         type="button"
-                        onClick={() => setUserLocation('')}
+                        onClick={() => {
+                          setUserLocation('');
+                          setLocationSuggestions(searchBrazilLocations('g', 8));
+                          setIsLocationDropdownOpen(true);
+                        }}
                         className="absolute right-3.5 top-3.5 text-zinc-500 hover:text-zinc-300 cursor-pointer"
                       >
                         <X className="w-4 h-4" />
                       </button>
                     )}
+                  </div>
+
+                  {/* Dropdown de sugestões dinâmicas de estados e municípios */}
+                  {isLocationDropdownOpen && locationSuggestions.length > 0 && (
+                    <div className="absolute left-0 right-0 top-full mt-1.5 z-30 max-h-56 overflow-y-auto rounded-xl bg-[#0e1015] border border-zinc-700/80 shadow-2xl p-1.5 space-y-1">
+                      <div className="px-2.5 py-1 text-[10px] font-mono uppercase tracking-wider text-zinc-500 flex items-center justify-between">
+                        <span>Resultados Encontrados</span>
+                        <span>{locationSuggestions.length} locais</span>
+                      </div>
+                      {locationSuggestions.map((loc, idx) => (
+                        <div
+                          key={`${loc.name}-${loc.uf}-${idx}`}
+                          onClick={() => {
+                            setUserLocation(loc.displayName);
+                            setIsLocationDropdownOpen(false);
+                          }}
+                          className="px-3 py-2 rounded-lg hover:bg-zinc-800/80 cursor-pointer flex items-center justify-between text-xs text-zinc-200 hover:text-white transition group"
+                        >
+                          <div className="flex items-center gap-2">
+                            <MapPin className="w-3.5 h-3.5 text-zinc-400 group-hover:text-white shrink-0" />
+                            <span className="font-medium">{loc.displayName}</span>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 group-hover:text-zinc-200">
+                              {loc.uf}
+                            </span>
+                            <span className="text-[9px] px-1.5 py-0.5 rounded uppercase font-semibold bg-white/10 text-zinc-300">
+                              {loc.type}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Sugestões rápidas de capitais brasileiras */}
+                  <div className="pt-2">
+                    <span className="text-[11px] text-zinc-500 mr-2">Sugestões rápidas:</span>
+                    <div className="flex flex-wrap gap-1.5 mt-1.5">
+                      {['São Paulo, SP', 'Rio de Janeiro, RJ', 'Goiânia, GO', 'Brasília, DF', 'Belo Horizonte, MG', 'Curitiba, PR'].map((cap) => (
+                        <button
+                          key={cap}
+                          type="button"
+                          onClick={() => {
+                            setUserLocation(cap);
+                            setIsLocationDropdownOpen(false);
+                          }}
+                          className={`text-[11px] px-2.5 py-1 rounded-lg border transition cursor-pointer ${
+                            userLocation === cap
+                              ? 'bg-white text-black border-white font-semibold'
+                              : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white hover:border-zinc-700'
+                          }`}
+                        >
+                          {cap}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </div>
 

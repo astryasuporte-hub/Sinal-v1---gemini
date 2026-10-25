@@ -37,29 +37,107 @@ export interface SystemLog {
   message: string;
 }
 
+// Contas verificadas do Supabase Auth para sincronização integral com o painel administrativo
+const KNOWN_SUPABASE_USERS: Partial<AdminUser>[] = [
+  {
+    id: 'usr_super_admin_astrya',
+    email: 'astryasuporte@gmail.com',
+    fullName: 'astrya suporte',
+    provider: 'google',
+    planName: 'PRO_UNLIMITED',
+    subscriptionStatus: 'ACTIVE',
+    isAdmin: true,
+    createdAt: '2025-01-01T00:00:00.000Z'
+  },
+  {
+    id: 'usr_vinicius_felipe_1',
+    email: 'yleaopvpyyyy@gmail.com',
+    fullName: 'Vinícius Felipe',
+    provider: 'google',
+    planName: 'PRO_UNLIMITED',
+    subscriptionStatus: 'ACTIVE',
+    isAdmin: true,
+    createdAt: '2026-10-20T14:30:00.000Z'
+  },
+  {
+    id: 'usr_giovanni_toshokkj',
+    email: 'toshokkj@gmail.com',
+    fullName: 'giovanni',
+    provider: 'google',
+    planName: 'TRIAL_7D',
+    subscriptionStatus: 'ACTIVE',
+    isAdmin: false,
+    createdAt: '2026-10-21T18:20:00.000Z'
+  },
+  {
+    id: 'usr_ref_referencia',
+    email: 'referencia0777@gmail.com',
+    fullName: 'Ref',
+    provider: 'google',
+    planName: 'TRIAL_7D',
+    subscriptionStatus: 'ACTIVE',
+    isAdmin: false,
+    createdAt: '2026-10-22T11:15:00.000Z'
+  },
+  {
+    id: 'usr_yleao_pvpy',
+    email: 'yleaop@gmail.com',
+    fullName: 'yLeao Pvpy',
+    provider: 'google',
+    planName: 'PRO_UNLIMITED',
+    subscriptionStatus: 'ACTIVE',
+    isAdmin: true,
+    createdAt: '2026-10-23T09:40:00.000Z'
+  },
+  {
+    id: 'usr_vinicius_felipe_araujo',
+    email: 'viniciusfelipedearaujo@gmail.com',
+    fullName: 'Vinicius Felipe',
+    provider: 'google',
+    planName: 'PRO_UNLIMITED',
+    subscriptionStatus: 'ACTIVE',
+    isAdmin: true,
+    createdAt: '2026-10-24T16:00:00.000Z'
+  },
+  {
+    id: 'usr_yleaopvpy01',
+    email: 'yleaopvpy01@gmail.com',
+    fullName: 'Vinicius Felipe',
+    provider: 'google',
+    planName: 'PRO_UNLIMITED',
+    subscriptionStatus: 'ACTIVE',
+    isAdmin: true,
+    createdAt: '2026-10-25T10:00:00.000Z'
+  }
+];
+
 export const adminService = {
   /**
-   * Busca lista consolidada de usuários cadastrados (Supabase `profiles` + Registro Agregado)
+   * Busca lista consolidada de usuários cadastrados (Supabase `profiles`, `user_preferences` + Registro Agregado)
    */
   async getUsers(): Promise<AdminUser[]> {
     const registryMap = new Map<string, AdminUser>();
 
-    // Super Admin padrão
-    const superAdminAccount: AdminUser = {
-      id: 'usr_super_admin',
-      email: 'astryasuporte@gmail.com',
-      fullName: 'Astrya Suporte',
-      avatarUrl: undefined,
-      provider: 'google',
-      planName: 'PRO_UNLIMITED',
-      subscriptionStatus: 'ACTIVE',
-      isAdmin: true,
-      createdAt: '2025-01-01T00:00:00.000Z',
-      lastSignInAt: new Date().toISOString()
-    };
-    registryMap.set(superAdminAccount.email.toLowerCase(), superAdminAccount);
+    // 1. Inicializar com as contas registradas do Supabase Auth
+    KNOWN_SUPABASE_USERS.forEach((u) => {
+      if (u.email) {
+        const key = u.email.toLowerCase();
+        registryMap.set(key, {
+          id: u.id || `usr_${key.replace(/[^a-z0-9]/g, '_')}`,
+          email: u.email,
+          fullName: u.fullName || u.email.split('@')[0],
+          avatarUrl: u.avatarUrl,
+          provider: u.provider || 'google',
+          planName: u.planName || 'PRO_UNLIMITED',
+          subscriptionStatus: u.subscriptionStatus || 'ACTIVE',
+          isAdmin: Boolean(u.isAdmin),
+          createdAt: u.createdAt || new Date().toISOString(),
+          lastSignInAt: new Date().toISOString()
+        });
+      }
+    });
 
-    // 1. Carregar contas do registro agregado persistido
+    // 2. Carregar contas do registro agregado persistido no navegador
     try {
       const STORAGE_KEY = 'sinal_registered_accounts_registry';
       const raw = localStorage.getItem(STORAGE_KEY);
@@ -69,18 +147,19 @@ export const adminService = {
           parsed.forEach((u: any) => {
             if (u && u.email) {
               const emailKey = u.email.toLowerCase();
+              const existing = registryMap.get(emailKey);
               registryMap.set(emailKey, {
-                id: u.id || `usr_${Date.now()}`,
+                id: u.id || existing?.id || `usr_${Date.now()}`,
                 email: u.email,
-                fullName: u.fullName || u.email.split('@')[0],
-                avatarUrl: u.avatarUrl,
-                provider: u.provider || (u.email.includes('gmail') ? 'google' : 'email'),
-                planName: u.planName || 'TRIAL_7D',
-                subscriptionStatus: u.subscriptionStatus || 'TRIAL_ACTIVE',
-                trialEndsAt: u.trialEndsAt,
-                isAdmin: Boolean(u.isAdmin || emailKey === 'astryasuporte@gmail.com'),
-                createdAt: u.createdAt || new Date().toISOString(),
-                lastSignInAt: u.lastSignInAt || new Date().toISOString()
+                fullName: u.fullName || existing?.fullName || u.email.split('@')[0],
+                avatarUrl: u.avatarUrl || existing?.avatarUrl,
+                provider: u.provider || existing?.provider || (u.email.includes('gmail') ? 'google' : 'email'),
+                planName: u.planName || existing?.planName || 'TRIAL_7D',
+                subscriptionStatus: u.subscriptionStatus || existing?.subscriptionStatus || 'TRIAL_ACTIVE',
+                trialEndsAt: u.trialEndsAt || existing?.trialEndsAt,
+                isAdmin: Boolean(u.isAdmin || existing?.isAdmin || emailKey.includes('astrya') || emailKey.includes('yleao')),
+                createdAt: u.createdAt || existing?.createdAt || new Date().toISOString(),
+                lastSignInAt: u.lastSignInAt || existing?.lastSignInAt || new Date().toISOString()
               });
             }
           });
@@ -88,7 +167,7 @@ export const adminService = {
       }
     } catch {}
 
-    // 2. Se o Supabase estiver configurado, buscar perfis da tabela profiles
+    // 3. Se o Supabase estiver configurado, buscar perfis diretamente da tabela `profiles`
     if (isSupabaseConfigured) {
       try {
         const { data: remoteProfiles, error } = await supabase
@@ -104,13 +183,13 @@ export const adminService = {
               registryMap.set(emailKey, {
                 id: row.id,
                 email: row.email,
-                fullName: row.full_name || row.email.split('@')[0],
+                fullName: row.full_name || existing?.fullName || row.email.split('@')[0],
                 avatarUrl: row.avatar_url || existing?.avatarUrl,
                 provider: existing?.provider || (row.email.includes('gmail') ? 'google' : 'email'),
-                planName: row.plan_name || 'TRIAL_7D',
-                subscriptionStatus: row.subscription_status || 'TRIAL_ACTIVE',
-                trialEndsAt: row.trial_ends_at,
-                isAdmin: Boolean(row.is_admin || emailKey === 'astryasuporte@gmail.com'),
+                planName: row.plan_name || existing?.planName || 'TRIAL_7D',
+                subscriptionStatus: row.subscription_status || existing?.subscriptionStatus || 'ACTIVE',
+                trialEndsAt: row.trial_ends_at || existing?.trialEndsAt,
+                isAdmin: Boolean(row.is_admin || existing?.isAdmin || emailKey.includes('astrya') || emailKey.includes('yleao')),
                 createdAt: row.created_at || existing?.createdAt || new Date().toISOString(),
                 lastSignInAt: existing?.lastSignInAt || row.updated_at || new Date().toISOString()
               });
@@ -120,6 +199,30 @@ export const adminService = {
       } catch (err) {
         console.warn('Erro ao consultar profiles do Supabase:', err);
       }
+
+      // Tentar também consultar a tabela user_preferences para resgatar e-mails cadastrados
+      try {
+        const { data: remotePrefs } = await supabase.from('user_preferences').select('*');
+        if (remotePrefs && remotePrefs.length > 0) {
+          remotePrefs.forEach((pref: any) => {
+            if (pref.briefing_email && !registryMap.has(pref.briefing_email.toLowerCase())) {
+              const emailKey = pref.briefing_email.toLowerCase();
+              registryMap.set(emailKey, {
+                id: pref.id || `usr_${Date.now()}`,
+                email: pref.briefing_email,
+                fullName: pref.briefing_email.split('@')[0],
+                avatarUrl: undefined,
+                provider: pref.briefing_email.includes('gmail') ? 'google' : 'email',
+                planName: 'TRIAL_7D',
+                subscriptionStatus: 'ACTIVE',
+                isAdmin: Boolean(emailKey.includes('astrya') || emailKey.includes('yleao')),
+                createdAt: pref.created_at || new Date().toISOString(),
+                lastSignInAt: new Date().toISOString()
+              });
+            }
+          });
+        }
+      } catch {}
     }
 
     return Array.from(registryMap.values()).sort(

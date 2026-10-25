@@ -430,12 +430,12 @@ export async function verifyAndSanitizeAvatarUpload(payload: {
     };
   }
 
-  // 3. Verificação de Tamanho Máximo (5 MB)
-  const MAX_SIZE_BYTES = 5 * 1024 * 1024;
+  // 3. Verificação de Tamanho Máximo (6 MB)
+  const MAX_SIZE_BYTES = 6 * 1024 * 1024;
   if (rawBuffer.length > MAX_SIZE_BYTES) {
     return {
       success: false,
-      error: `A imagem enviada possui ${(rawBuffer.length / (1024 * 1024)).toFixed(2)} MB, excedendo o limite permitido de 5 MB.`,
+      error: `A imagem enviada possui ${(rawBuffer.length / (1024 * 1024)).toFixed(2)} MB, excedendo o limite permitido de 6 MB.`,
       reason: 'PAYLOAD_TOO_LARGE'
     };
   }

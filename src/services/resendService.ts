@@ -207,6 +207,46 @@ class ResendService {
   }
 
   /**
+   * Dispara o código de verificação (OTP 6 dígitos) para autenticação do usuário
+   */
+  async sendVerificationCode(toEmail: string, code: string): Promise<ResendSendResult> {
+    try {
+      const res = await fetch('/api/resend/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to: toEmail,
+          template: 'test_email',
+          subject: `FatosBR • Código de Acesso: ${code}`,
+          summary: `Seu código de acesso único é ${code}`,
+          text: `Seu código de confirmação FatosBR é: ${code}\n\nUtilize este código de 6 dígitos para autenticar seu acesso à plataforma com segurança. Não compartilhe este código com terceiros.`
+        })
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success) {
+        return {
+          success: true,
+          id: data.id,
+          recipient: toEmail,
+          message: `Código enviado para ${toEmail}`
+        };
+      }
+      return {
+        success: false,
+        recipient: toEmail,
+        error: data.error || data.message || `Falha no envio (HTTP ${res.status})`
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        recipient: toEmail,
+        error: err.message || 'Falha de comunicação com o servidor de e-mail'
+      };
+    }
+  }
+
+  /**
    * Obtém o HTML compilado da publicação editorial (Resumo Matinal ou Noturno) com os eventos reais
    */
   async getEditorialPreview(type: 'morning' | 'evening' = 'morning', events?: any[]): Promise<string> {

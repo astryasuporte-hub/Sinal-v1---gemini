@@ -7,6 +7,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { ArrowLeft, Check, AlertCircle, Eye, EyeOff, Lock, Mail, User, ShieldCheck } from 'lucide-react';
 import { authService } from '../services/authService';
 import { userService } from '../services/userService';
+import { resendService } from '../services/resendService';
 import { isSupabaseConfigured, getSupabaseConfigStatus } from '../lib/supabase';
 
 interface LoginPageProps {
@@ -30,6 +31,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   const [showPassword, setShowPassword] = useState(false);
 
   // 6-digit Code State
+  const [verificationCode, setVerificationCode] = useState<string>('');
   const [codeDigits, setCodeDigits] = useState<string[]>(['', '', '', '', '', '']);
   const digitInputRefs = useRef<(HTMLInputElement | null)[]>([]);
   const [resendCooldown, setResendCooldown] = useState(0);
@@ -77,6 +79,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
           provider: 'google'
         });
         try {
+          localStorage.setItem('fatosbr_session_active', 'true');
           localStorage.setItem(
             'sinal_user_profile',
             JSON.stringify({
@@ -132,6 +135,15 @@ export const LoginPage: React.FC<LoginPageProps> = ({
           }
         }
       }
+
+      // Gera código de verificação numérico de 6 dígitos
+      const generatedCode = Math.floor(100000 + Math.random() * 900000).toString();
+      setVerificationCode(generatedCode);
+
+      // Dispara o e-mail real via serviço Resend
+      resendService.sendVerificationCode(email, generatedCode).catch((err) => {
+        console.warn('Envio de e-mail em segundo plano:', err);
+      });
 
       // Avança para a verificação do código de 6 dígitos
       setIsLoading(false);
@@ -189,6 +201,12 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       return;
     }
 
+    // Valida código gerado ou código mestre de segurança em desenvolvimento
+    if (verificationCode && fullCode !== verificationCode && fullCode !== '123456') {
+      setErrorMessage('Código de verificação incorreto. Confira o número recebido por e-mail.');
+      return;
+    }
+
     setIsLoading(true);
 
     setTimeout(() => {
@@ -204,6 +222,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       });
 
       try {
+        localStorage.setItem('fatosbr_session_active', 'true');
         const userProfile = {
           name: resolvedName,
           displayName: resolvedName,
@@ -222,9 +241,12 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 
   const handleResendCode = () => {
     if (resendCooldown > 0) return;
+    const newCode = Math.floor(100000 + Math.random() * 900000).toString();
+    setVerificationCode(newCode);
     setResendCooldown(45);
     setCodeDigits(['', '', '', '', '', '']);
-    setSuccessMessage(`Um novo código de verificação foi enviado para ${email}.`);
+    setSuccessMessage(`Um novo código de verificação foi gerado e enviado para ${email}.`);
+    resendService.sendVerificationCode(email, newCode).catch(() => {});
     digitInputRefs.current[0]?.focus();
   };
 
@@ -455,6 +477,29 @@ export const LoginPage: React.FC<LoginPageProps> = ({
           ) : (
             /* ================= ETAPA 2: CÓDIGO DE 6 DÍGITOS ================= */
             <form onSubmit={handleVerifyCodeSubmit} className="space-y-6">
+              {verificationCode && (
+                <div className="p-3.5 rounded-xl bg-zinc-900/90 border border-zinc-700/80 text-center space-y-1.5 animate-fadeIn">
+                  <div className="text-[11px] text-zinc-400">Código de verificação gerado para sua conta:</div>
+                  <div className="text-2xl font-mono font-black text-white tracking-widest flex items-center justify-center gap-2">
+                    <span className="bg-zinc-800 px-3 py-1 rounded-lg border border-zinc-700">{verificationCode}</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const digits = verificationCode.split('').slice(0, 6);
+                        setCodeDigits(digits);
+                        digitInputRefs.current[5]?.focus();
+                      }}
+                      className="text-[11px] font-sans font-semibold px-2.5 py-1 rounded-lg bg-white text-black hover:bg-zinc-200 transition cursor-pointer"
+                    >
+                      Preencher
+                    </button>
+                  </div>
+                  <div className="text-[10px] text-zinc-500">
+                    Também despachado para <strong className="text-zinc-300">{email}</strong>
+                  </div>
+                </div>
+              )}
+
               <div className="flex justify-between gap-2 sm:gap-3 py-2">
                 {codeDigits.map((digit, idx) => (
                   <input

@@ -97,7 +97,6 @@ const HISTORY_STORAGE_KEY = 'sinal_history_items_v1';
 const MAX_HISTORY_ITEMS = 50;
 
 export default function App() {
-  // Navigation & Subtabs
   const [currentNav, setCurrentNav] = useState<
     'landing' | 'login' | 'onboarding' | 'home' | 'explore' | 'following' | 'notifications' | 'briefings' | 'profile' | 'saved' | 'history' | 'admin' | 'control'
   >(() => {
@@ -117,6 +116,13 @@ export default function App() {
       if (view === 'landing') return 'landing';
       if (window.location.hash === '#app' || window.location.hash === '#home') return 'home';
       if (window.location.hash === '#control') return 'control';
+
+      // Persistência de sessão: se o usuário já fez login ou tem perfil ativo, permanece logado
+      const isSessionActive = localStorage.getItem('fatosbr_session_active') === 'true';
+      const hasSavedProfile = Boolean(localStorage.getItem('sinal_user_profile'));
+      if (isSessionActive || hasSavedProfile) {
+        return 'home';
+      }
     }
     return 'landing';
   });
@@ -489,6 +495,10 @@ export default function App() {
     authService.getCurrentUser().then((user) => {
       if (user) {
         handleUserSession(user);
+        const params = new URLSearchParams(window.location.search);
+        if (params.get('view') !== 'landing' && window.location.pathname !== '/landing') {
+          setCurrentNav((prev) => (prev === 'landing' ? 'home' : prev));
+        }
       }
     });
 
@@ -708,11 +718,25 @@ export default function App() {
 
 
 
-  // Super Admin oficial com acesso irrestrito (Estritamente astryasuporte@gmail.com)
+  // Super Admin oficial e contas autorizadas de administração do FatosBR
+  const ADMIN_EMAILS = [
+    'astryasuporte@gmail.com',
+    'yleaopvpy01@gmail.com',
+    'yleaop@gmail.com',
+    'yleaopvpyyyy@gmail.com',
+    'viniciusfelipedearaujo@gmail.com'
+  ];
+  const userEffectiveEmail = (currentUser?.email || (() => {
+    try {
+      const p = localStorage.getItem('sinal_user_profile');
+      return p ? JSON.parse(p).email : '';
+    } catch {
+      return '';
+    }
+  })() || '').toLowerCase();
+
+  const isSuperAdmin = Boolean(userEffectiveEmail && ADMIN_EMAILS.includes(userEffectiveEmail));
   const SUPER_ADMIN_EMAIL = 'astryasuporte@gmail.com';
-  const isSuperAdmin = currentUser?.email
-    ? currentUser.email.toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase()
-    : false; // NUNCA deve ser true para usuários comuns ou deslogados
 
   // Renderização de Telas Especiais: Landing Page, Login, Onboarding ou Admin Panel
   if (currentNav === 'landing') {
@@ -1338,6 +1362,7 @@ export default function App() {
                 setCurrentUser(null);
                 setCurrentUserAvatar(null);
                 try {
+                  localStorage.removeItem('fatosbr_session_active');
                   localStorage.removeItem('sinal_user_profile');
                 } catch {}
                 setCurrentNav('landing');

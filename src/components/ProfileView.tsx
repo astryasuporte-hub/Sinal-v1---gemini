@@ -54,6 +54,7 @@ import { notificationService } from '../services/notificationService';
 import { ApiHealthModal } from './ApiHealthModal';
 import { User as SupabaseUser } from '@supabase/supabase-js';
 import { avatarProcessing } from '../services/avatarProcessing';
+import { validateImageFile } from '../utils/imageValidation';
 import { usePWAInstall } from '../hooks/usePWAInstall';
 
 interface ProfileViewProps {
@@ -247,37 +248,71 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
     const file = e.target.files?.[0];
     if (!file) return;
 
+    // 1. Validação rápida no front-end antes de qualquer requisição (máximo 6 MB e tipos permitidos)
+    const validation = validateImageFile(file);
+    if (!validation.valid) {
+      const err = validation.error || 'A imagem selecionada excede 6 MB ou possui formato inválido.';
+      setAvatarUploadError(err);
+      showToast(err);
+      e.target.value = '';
+      return;
+    }
+
     setAvatarUploadError(null);
     setAvatarUploadAudit(null);
     setIsUploadingAvatar(true);
 
     try {
+      // 2. Tenta validação no endpoint do servidor /api/avatar/verify se disponível
+      try {
+        const formData = new FormData();
+        formData.append('avatar', file);
+        const resp = await fetch('/api/avatar/verify', {
+          method: 'POST',
+          body: formData
+        });
+        if (resp.ok) {
+          const json = await resp.json();
+          if (json.audit) {
+            setAvatarUploadAudit(json.audit);
+          }
+        }
+      } catch {
+        // Fallback: se o endpoint não responder, o script rápido local assume
+      }
+
+      // 3. Script rápido de análise local no navegador (até 6 MB, remoção de GPS e sanitização)
       const result = await avatarProcessing.processAvatarFile(file);
       if (!result.valid || !result.dataUrl) {
         setAvatarUploadError(result.error || 'A imagem selecionada não é válida.');
+        showToast(result.error || 'Falha ao processar imagem.');
         setIsUploadingAvatar(false);
         return;
       }
 
-      setAvatarUploadAudit({
+      const cleanDataUrl = result.dataUrl;
+
+      setAvatarUploadAudit((prev) => prev || {
         fileNameSafe: true,
         magicBytesVerified: true,
         binarySignature: file.type || 'image/jpeg',
         payloadScanClean: true,
         gpsMetadataStripped: true,
-        exifStatus: 'Higienizado instantaneamente via Canvas 2D',
+        exifStatus: 'Higienizado instantaneamente via Canvas 2D (metadados GPS removidos)',
         originalSize: file.size,
-        sanitizedSize: Math.round(result.dataUrl.length * 0.75)
+        sanitizedSize: Math.round(cleanDataUrl.length * 0.75)
       });
 
       // Abrir modal de corte/zoom para ajuste do usuário
-      setCropRawUrl(result.dataUrl);
+      setCropRawUrl(cleanDataUrl);
       setCropZoom(1);
       setCropOffsetX(0);
       setCropOffsetY(0);
       setIsCropModalOpen(true);
+      showToast('Foto validada com sucesso! Ajuste o enquadramento.');
     } catch {
       setAvatarUploadError('Erro ao processar imagem no navegador.');
+      showToast('Erro ao processar imagem.');
     } finally {
       setIsUploadingAvatar(false);
       e.target.value = '';
@@ -824,14 +859,22 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                     </div>
                     <button
                       type="button"
-                      onClick={() => {
+                      onClick={async () => {
                         if (pwa.isIOS) {
                           setShowProfileIosGuide(true);
-                        } else {
-                          pwa.install();
+                          return;
                         }
+                        if (pwa.isInstallable) {
+                          const res = await pwa.install();
+                          if (res) {
+                            showToast('Aplicativo FatosBR instalado com sucesso!');
+                            return;
+                          }
+                        }
+                        // Dispara guia interativo caso o prompt direto do navegador não ocorra
+                        setShowProfileIosGuide(true);
                       }}
-                      className="px-4 py-2 bg-white text-black font-bold text-xs rounded-xl hover:bg-zinc-200 transition cursor-pointer shrink-0 shadow-sm flex items-center justify-center gap-1.5"
+                      className="px-4 py-2 bg-white text-black font-bold text-xs rounded-xl hover:bg-zinc-200 transition cursor-pointer shrink-0 shadow-sm flex items-center justify-center gap-1.5 active:scale-95"
                     >
                       <Download className="w-3.5 h-3.5" />
                       <span>Instalar FatosBR</span>
@@ -1215,6 +1258,10 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
         <button
           onClick={() => {
             if (confirm('Deseja realmente sair da sua conta no FatosBR?')) {
+              try {
+                localStorage.removeItem('fatosbr_session_active');
+                localStorage.removeItem('sinal_user_profile');
+              } catch {}
               showToast('Sessão encerrada com sucesso.');
               if (onLogout) onLogout();
             }
@@ -2421,14 +2468,21 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
         </div>
       )}
 
-      {/* ================= MODAL GUIA DE INSTALAÇÃO PWA PARA IOS ================= */}
+      {/* ================= MODAL GUIA DE INSTALAÇÃO PWA UNIVERSAL ================= */}
       {showProfileIosGuide && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/90 backdrop-blur-md p-4 animate-fade-in">
           <div className="relative w-full max-w-sm rounded-2xl border border-zinc-800 bg-[#0c0d10] p-6 text-zinc-100 shadow-2xl space-y-4">
             <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
-              <div className="flex items-center gap-2">
-                <Smartphone className="w-4 h-4 text-white" />
-                <h3 className="text-sm font-bold text-white">Instalar no iPhone / iPad</h3>
+              <div className="flex items-center gap-2.5">
+                <img
+                  src="/pwa-icon-192.png"
+                  alt="FatosBR"
+                  className="w-7 h-7 rounded-lg object-contain bg-black border border-zinc-700"
+                />
+                <div>
+                  <h3 className="text-sm font-bold text-white">Instalar App FatosBR</h3>
+                  <p className="text-[10px] text-zinc-400">Instalação direta no navegador</p>
+                </div>
               </div>
               <button
                 onClick={() => setShowProfileIosGuide(false)}
@@ -2438,34 +2492,76 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
               </button>
             </div>
 
-            <p className="text-xs text-zinc-300 leading-relaxed">
-              Para instalar o aplicativo no iOS pelo Safari, siga os passos abaixo:
-            </p>
-
-            <div className="space-y-3 text-xs">
-              <div className="flex items-start gap-3 p-3 rounded-xl bg-zinc-900/80 border border-zinc-800">
-                <span className="w-5 h-5 rounded-full bg-white text-black font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">
-                  1
-                </span>
-                <span className="text-zinc-300">
-                  Na barra inferior do Safari, toque no ícone de <strong className="text-white">Compartilhar</strong> (quadrado com seta apontando para cima).
-                </span>
+            {pwa.isInstallable ? (
+              <div className="space-y-3">
+                <p className="text-xs text-zinc-300 leading-relaxed">
+                  Seu navegador está pronto para adicionar o FatosBR à tela inicial do seu dispositivo.
+                </p>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const res = await pwa.install();
+                    if (res) {
+                      setShowProfileIosGuide(false);
+                      showToast('Aplicativo instalado com sucesso!');
+                    }
+                  }}
+                  className="w-full py-3 bg-white text-black text-xs font-bold rounded-xl hover:bg-zinc-200 transition cursor-pointer flex items-center justify-center gap-2 shadow-md"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>Instalar Agora</span>
+                </button>
               </div>
-
-              <div className="flex items-start gap-3 p-3 rounded-xl bg-zinc-900/80 border border-zinc-800">
-                <span className="w-5 h-5 rounded-full bg-white text-black font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">
-                  2
-                </span>
-                <span className="text-zinc-300">
-                  Role a lista para baixo e toque em <strong className="text-white">"Adicionar à Tela de Início"</strong>.
-                </span>
+            ) : pwa.isIOS ? (
+              <div className="space-y-3 text-xs">
+                <p className="text-zinc-300 leading-relaxed">
+                  No Safari do iOS (iPhone / iPad), siga estes 2 passos rápidos:
+                </p>
+                <div className="flex items-start gap-3 p-3 rounded-xl bg-zinc-900/80 border border-zinc-800">
+                  <span className="w-5 h-5 rounded-full bg-white text-black font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">
+                    1
+                  </span>
+                  <span className="text-zinc-300">
+                    Toque no botão <strong className="text-white">Compartilhar</strong> (ícone de quadrado com seta para cima na barra do Safari).
+                  </span>
+                </div>
+                <div className="flex items-start gap-3 p-3 rounded-xl bg-zinc-900/80 border border-zinc-800">
+                  <span className="w-5 h-5 rounded-full bg-white text-black font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">
+                    2
+                  </span>
+                  <span className="text-zinc-300">
+                    Role as opções e toque em <strong className="text-white">"Adicionar à Tela de Início"</strong>.
+                  </span>
+                </div>
               </div>
-            </div>
+            ) : (
+              <div className="space-y-3 text-xs">
+                <p className="text-zinc-300 leading-relaxed">
+                  Para instalar no Android ou Computador pelo Chrome/Edge:
+                </p>
+                <div className="flex items-start gap-3 p-3 rounded-xl bg-zinc-900/80 border border-zinc-800">
+                  <span className="w-5 h-5 rounded-full bg-white text-black font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">
+                    1
+                  </span>
+                  <span className="text-zinc-300">
+                    Clique no menu do navegador (<strong className="text-white">⋮</strong> ou ícone de instalar na barra de URL).
+                  </span>
+                </div>
+                <div className="flex items-start gap-3 p-3 rounded-xl bg-zinc-900/80 border border-zinc-800">
+                  <span className="w-5 h-5 rounded-full bg-white text-black font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">
+                    2
+                  </span>
+                  <span className="text-zinc-300">
+                    Selecione <strong className="text-white">"Instalar FatosBR"</strong> ou "Adicionar à tela inicial".
+                  </span>
+                </div>
+              </div>
+            )}
 
             <button
               type="button"
               onClick={() => setShowProfileIosGuide(false)}
-              className="w-full py-2.5 bg-white text-black text-xs font-bold rounded-xl hover:bg-zinc-200 transition cursor-pointer"
+              className="w-full py-2.5 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white border border-zinc-800 text-xs font-semibold rounded-xl transition cursor-pointer"
             >
               Fechar
             </button>
