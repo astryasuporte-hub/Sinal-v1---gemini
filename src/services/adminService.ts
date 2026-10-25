@@ -11,16 +11,19 @@ export interface AdminUser {
   email: string;
   fullName: string;
   avatarUrl?: string;
+  provider?: 'google' | 'email';
   planName: string;
   subscriptionStatus: string;
   trialEndsAt?: string;
   isAdmin: boolean;
   createdAt: string;
+  lastSignInAt?: string;
 }
 
 export interface AdminMetrics {
   activeUsers: number;
   proSubscriptions: number;
+  trialUsers: number;
   monitoredEvents: number;
   collectedArticles: number;
   sourcesCount: number;
@@ -36,133 +39,144 @@ export interface SystemLog {
 
 export const adminService = {
   /**
-   * Busca métricas reais da base de dados Supabase
+   * Busca lista consolidada de usuários cadastrados (Supabase `profiles` + Registro Agregado)
    */
-  async getMetrics(localEventsCount = 0): Promise<AdminMetrics> {
-    if (!isSupabaseConfigured) {
-      return {
-        activeUsers: 1, // Astrya Suporte (Super Admin)
-        proSubscriptions: 0, // Admin não conta como assinante pagante
-        monitoredEvents: localEventsCount,
-        collectedArticles: localEventsCount * 3,
-        sourcesCount: 6
-      };
-    }
+  async getUsers(): Promise<AdminUser[]> {
+    const registryMap = new Map<string, AdminUser>();
 
+    // Super Admin padrão
+    const superAdminAccount: AdminUser = {
+      id: 'usr_super_admin',
+      email: 'astryasuporte@gmail.com',
+      fullName: 'Astrya Suporte',
+      avatarUrl: undefined,
+      provider: 'google',
+      planName: 'PRO_UNLIMITED',
+      subscriptionStatus: 'ACTIVE',
+      isAdmin: true,
+      createdAt: '2025-01-01T00:00:00.000Z',
+      lastSignInAt: new Date().toISOString()
+    };
+    registryMap.set(superAdminAccount.email.toLowerCase(), superAdminAccount);
+
+    // 1. Carregar contas do registro agregado persistido
     try {
-      // 1. Contagem de perfis cadastrados
-      const { count: usersCount } = await supabase
-        .from('profiles')
-        .select('*', { count: 'exact', head: true });
-
-      // 2. Contagem de assinantes pagantes reais (excluindo o Super Admin e períodos de teste 7D)
-      const { data: profilesList } = await supabase
-        .from('profiles')
-        .select('email, plan_name, subscription_status');
-
-      let realPayingProCount = 0;
-      if (profilesList && profilesList.length > 0) {
-        realPayingProCount = profilesList.filter(
-          (p) =>
-            p.email?.toLowerCase() !== 'astryasuporte@gmail.com' &&
-            p.subscription_status === 'ACTIVE' &&
-            p.plan_name !== 'TRIAL_7D' &&
-            p.plan_name !== 'TRIAL'
-        ).length;
+      const STORAGE_KEY = 'sinal_registered_accounts_registry';
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          parsed.forEach((u: any) => {
+            if (u && u.email) {
+              const emailKey = u.email.toLowerCase();
+              registryMap.set(emailKey, {
+                id: u.id || `usr_${Date.now()}`,
+                email: u.email,
+                fullName: u.fullName || u.email.split('@')[0],
+                avatarUrl: u.avatarUrl,
+                provider: u.provider || (u.email.includes('gmail') ? 'google' : 'email'),
+                planName: u.planName || 'TRIAL_7D',
+                subscriptionStatus: u.subscriptionStatus || 'TRIAL_ACTIVE',
+                trialEndsAt: u.trialEndsAt,
+                isAdmin: Boolean(u.isAdmin || emailKey === 'astryasuporte@gmail.com'),
+                createdAt: u.createdAt || new Date().toISOString(),
+                lastSignInAt: u.lastSignInAt || new Date().toISOString()
+              });
+            }
+          });
+        }
       }
+    } catch {}
 
-      // 3. Contagem de acontecimentos
-      const { count: eventsCount } = await supabase
-        .from('events')
-        .select('*', { count: 'exact', head: true });
+    // 2. Se o Supabase estiver configurado, buscar perfis da tabela profiles
+    if (isSupabaseConfigured) {
+      try {
+        const { data: remoteProfiles, error } = await supabase
+          .from('profiles')
+          .select('*')
+          .order('created_at', { ascending: false });
 
-      // 4. Contagem de fontes
-      const { count: sourcesCount } = await supabase
-        .from('sources')
-        .select('*', { count: 'exact', head: true });
-
-      const finalEventsCount = eventsCount ?? localEventsCount;
-
-      return {
-        activeUsers: Math.max(usersCount || 1, 1),
-        proSubscriptions: realPayingProCount, // Apenas assinaturas pagantes reais
-        monitoredEvents: finalEventsCount,
-        collectedArticles: finalEventsCount * 3,
-        sourcesCount: sourcesCount || 6
-      };
-    } catch {
-      return {
-        activeUsers: 1,
-        proSubscriptions: 0,
-        monitoredEvents: localEventsCount,
-        collectedArticles: localEventsCount * 3,
-        sourcesCount: 6
-      };
+        if (!error && remoteProfiles && remoteProfiles.length > 0) {
+          remoteProfiles.forEach((row: any) => {
+            if (row && row.email) {
+              const emailKey = row.email.toLowerCase();
+              const existing = registryMap.get(emailKey);
+              registryMap.set(emailKey, {
+                id: row.id,
+                email: row.email,
+                fullName: row.full_name || row.email.split('@')[0],
+                avatarUrl: row.avatar_url || existing?.avatarUrl,
+                provider: existing?.provider || (row.email.includes('gmail') ? 'google' : 'email'),
+                planName: row.plan_name || 'TRIAL_7D',
+                subscriptionStatus: row.subscription_status || 'TRIAL_ACTIVE',
+                trialEndsAt: row.trial_ends_at,
+                isAdmin: Boolean(row.is_admin || emailKey === 'astryasuporte@gmail.com'),
+                createdAt: row.created_at || existing?.createdAt || new Date().toISOString(),
+                lastSignInAt: existing?.lastSignInAt || row.updated_at || new Date().toISOString()
+              });
+            }
+          });
+        }
+      } catch (err) {
+        console.warn('Erro ao consultar profiles do Supabase:', err);
+      }
     }
+
+    return Array.from(registryMap.values()).sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
   },
 
   /**
-   * Busca lista de usuários cadastrados no Supabase `profiles`
+   * Busca métricas consolidadas da base de dados e usuários agregados
    */
-  async getUsers(): Promise<AdminUser[]> {
-    if (!isSupabaseConfigured) {
-      return [
-        {
-          id: 'user-super-admin',
-          email: 'astryasuporte@gmail.com',
-          fullName: 'Astrya Suporte',
-          planName: 'PRO_UNLIMITED',
-          subscriptionStatus: 'ACTIVE',
-          isAdmin: true,
-          createdAt: new Date().toISOString()
+  async getMetrics(localEventsCount = 0): Promise<AdminMetrics> {
+    const users = await this.getUsers();
+    const activeUsersCount = Math.max(users.length, 1);
+
+    const proSubscriptions = users.filter(
+      (u) =>
+        u.email.toLowerCase() !== 'astryasuporte@gmail.com' &&
+        u.subscriptionStatus === 'ACTIVE' &&
+        (u.planName.includes('PRO') || u.planName === 'ACTIVE')
+    ).length;
+
+    const trialUsers = users.filter(
+      (u) =>
+        u.email.toLowerCase() !== 'astryasuporte@gmail.com' &&
+        (u.planName.includes('TRIAL') || u.subscriptionStatus === 'TRIAL_ACTIVE')
+    ).length;
+
+    let finalEventsCount = localEventsCount;
+    let sourcesCount = 6;
+
+    if (isSupabaseConfigured) {
+      try {
+        const { count: eventsCount } = await supabase
+          .from('events')
+          .select('*', { count: 'exact', head: true });
+
+        const { count: sCount } = await supabase
+          .from('sources')
+          .select('*', { count: 'exact', head: true });
+
+        if (eventsCount !== null && eventsCount !== undefined) {
+          finalEventsCount = eventsCount;
         }
-      ];
+        if (sCount !== null && sCount !== undefined) {
+          sourcesCount = sCount;
+        }
+      } catch {}
     }
 
-    try {
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('*')
-        .order('created_at', { ascending: false });
-
-      if (error || !data || data.length === 0) {
-        return [
-          {
-            id: 'user-super-admin',
-            email: 'astryasuporte@gmail.com',
-            fullName: 'Astrya Suporte',
-            planName: 'PRO_UNLIMITED',
-            subscriptionStatus: 'ACTIVE',
-            isAdmin: true,
-            createdAt: new Date().toISOString()
-          }
-        ];
-      }
-
-      return data.map((row) => ({
-        id: row.id,
-        email: row.email,
-        fullName: row.full_name || row.email.split('@')[0],
-        avatarUrl: row.avatar_url,
-        planName: row.plan_name || 'TRIAL_7D',
-        subscriptionStatus: row.subscription_status || 'TRIAL_ACTIVE',
-        trialEndsAt: row.trial_ends_at,
-        isAdmin: Boolean(row.is_admin || row.email === 'astryasuporte@gmail.com'),
-        createdAt: row.created_at
-      }));
-    } catch {
-      return [
-        {
-          id: 'user-super-admin',
-          email: 'astryasuporte@gmail.com',
-          fullName: 'Astrya Suporte',
-          planName: 'PRO_UNLIMITED',
-          subscriptionStatus: 'ACTIVE',
-          isAdmin: true,
-          createdAt: new Date().toISOString()
-        }
-      ];
-    }
+    return {
+      activeUsers: activeUsersCount,
+      proSubscriptions: proSubscriptions,
+      trialUsers: trialUsers,
+      monitoredEvents: finalEventsCount,
+      collectedArticles: finalEventsCount * 3,
+      sourcesCount: sourcesCount
+    };
   },
 
   /**

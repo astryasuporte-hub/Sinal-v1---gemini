@@ -45,7 +45,8 @@ import {
   Inbox,
   TrendingUp,
   Instagram,
-  Globe2
+  Globe2,
+  Copy
 } from 'lucide-react';
 import { Event, Source, Topic, Entity } from '../types/sinal';
 import { newsIngestionService } from '../services/newsIngestionService';
@@ -217,6 +218,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [metrics, setMetrics] = useState<AdminMetrics>({
     activeUsers: 1,
     proSubscriptions: 0, // Admin não conta como assinante pagante
+    trialUsers: 1,
     monitoredEvents: events.length,
     collectedArticles: events.reduce((acc, ev) => acc + (ev.sources?.length || 1), 0),
     sourcesCount: sources.length || 6
@@ -224,6 +226,12 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [usersList, setUsersList] = useState<AdminUser[]>([]);
   const [isLoadingUsers, setIsLoadingUsers] = useState(false);
   const [isSeeding, setIsSeeding] = useState(false);
+  const [userSearchTerm, setUserSearchTerm] = useState('');
+  const [userPlanFilter, setUserPlanFilter] = useState<'all' | 'pro' | 'trial'>('all');
+  const [userProviderFilter, setUserProviderFilter] = useState<'all' | 'google' | 'email'>('all');
+  const [selectedUserModal, setSelectedUserModal] = useState<AdminUser | null>(null);
+  const [showRlsSnippet, setShowRlsSnippet] = useState(false);
+  const [copiedSql, setCopiedSql] = useState(false);
 
   // Status de Conexão dos Provedores (Verde = Conectado / Vermelho = Erro / Cinza = Desconectado)
   const [providers, setProviders] = useState<ProviderItem[]>([
@@ -376,6 +384,87 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       };
     });
   }, [events]);
+
+  // Estatísticas de Usuários em Tempo Real
+  const userStats = useMemo(() => {
+    const total = usersList.length;
+    const superAdmins = usersList.filter(
+      (u) => u.isAdmin || u.email.toLowerCase() === 'astryasuporte@gmail.com'
+    ).length;
+    const proUsers = usersList.filter(
+      (u) =>
+        !u.isAdmin &&
+        u.email.toLowerCase() !== 'astryasuporte@gmail.com' &&
+        (u.planName === 'PRO' || u.planName === 'PRO_UNLIMITED')
+    ).length;
+    const trialUsers = usersList.filter(
+      (u) =>
+        !u.isAdmin &&
+        u.email.toLowerCase() !== 'astryasuporte@gmail.com' &&
+        (u.planName === 'TRIAL_7D' || u.planName === 'TRIAL' || u.subscriptionStatus === 'TRIAL_ACTIVE')
+    ).length;
+    const googleCount = usersList.filter(
+      (u) => (u.provider || (u.email.includes('gmail') ? 'google' : 'email')) === 'google'
+    ).length;
+    return { total, superAdmins, proUsers, trialUsers, googleCount };
+  }, [usersList]);
+
+  // Lista Filtrada de Usuários
+  const filteredUsers = useMemo(() => {
+    return usersList.filter((u) => {
+      const q = userSearchTerm.trim().toLowerCase();
+      const matchesSearch =
+        !q ||
+        (u.fullName && u.fullName.toLowerCase().includes(q)) ||
+        (u.email && u.email.toLowerCase().includes(q));
+      if (!matchesSearch) return false;
+
+      const isUserAdmin = u.isAdmin || u.email.toLowerCase() === 'astryasuporte@gmail.com';
+      if (userPlanFilter === 'pro' && !isUserAdmin && u.planName !== 'PRO' && u.planName !== 'PRO_UNLIMITED') {
+        return false;
+      }
+      if (userPlanFilter === 'trial' && (isUserAdmin || (u.planName !== 'TRIAL_7D' && u.planName !== 'TRIAL' && u.subscriptionStatus !== 'TRIAL_ACTIVE'))) {
+        return false;
+      }
+
+      const prov = u.provider || (u.email.includes('gmail') ? 'google' : 'email');
+      if (userProviderFilter !== 'all' && prov !== userProviderFilter) {
+        return false;
+      }
+
+      return true;
+    });
+  }, [usersList, userSearchTerm, userPlanFilter, userProviderFilter]);
+
+  const copyRlsSql = () => {
+    const sql = `-- Políticas RLS no Supabase para liberar leitura das contas para o Super Admin
+DROP POLICY IF EXISTS "Usuário ou Super Admin lê perfis" ON public.profiles;
+CREATE POLICY "Usuário ou Super Admin lê perfis" ON public.profiles
+  FOR SELECT USING (
+    auth.uid() = id 
+    OR (auth.jwt() ->> 'email') = 'astryasuporte@gmail.com'
+    OR EXISTS (SELECT 1 FROM public.profiles p WHERE p.id = auth.uid() AND p.is_admin = true)
+  );
+
+DROP POLICY IF EXISTS "Usuário insere o próprio perfil" ON public.profiles;
+CREATE POLICY "Usuário insere o próprio perfil" ON public.profiles
+  FOR INSERT WITH CHECK (
+    auth.uid() = id 
+    OR (auth.jwt() ->> 'email') = 'astryasuporte@gmail.com'
+  );
+
+DROP POLICY IF EXISTS "Usuário ou Super Admin edita o próprio perfil" ON public.profiles;
+CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profiles
+  FOR UPDATE USING (
+    auth.uid() = id 
+    OR (auth.jwt() ->> 'email') = 'astryasuporte@gmail.com'
+  );`;
+
+    navigator.clipboard?.writeText(sql);
+    setCopiedSql(true);
+    showToast('Script SQL copiado com sucesso! Execute no SQL Editor do Supabase.');
+    setTimeout(() => setCopiedSql(false), 3000);
+  };
 
   // Carregar métricas e usuários do Supabase
   const loadDatabaseData = async () => {
@@ -2110,60 +2199,327 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           </div>
         )}
 
-        {/* ================= TAB 6: USUÁRIOS & SESSÕES ================= */}
+        {/* ================= TAB 6: USUÁRIOS & SESSÕES (ANALÍTICA COMPLETA) ================= */}
         {activeAdminTab === 'users' && (
           <div className="space-y-4 sm:space-y-6">
+            {/* 1. CARDS DE MÉTRICAS RÁPIDAS DE USUÁRIOS */}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+              <div className="p-4 rounded-2xl bg-[#0e1320] border border-[#182136] space-y-1">
+                <div className="flex items-center justify-between text-zinc-400">
+                  <span className="text-[11px] font-mono uppercase tracking-wider">Total de Leitores</span>
+                  <Users className="w-4 h-4 text-blue-400" />
+                </div>
+                <div className="text-xl sm:text-2xl font-bold text-white font-mono">{userStats.total}</div>
+                <div className="text-[10px] text-zinc-500">Contas cadastradas no sistema</div>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-[#0e1320] border border-[#182136] space-y-1">
+                <div className="flex items-center justify-between text-zinc-400">
+                  <span className="text-[11px] font-mono uppercase tracking-wider">Teste Gratuito</span>
+                  <Sparkles className="w-4 h-4 text-emerald-400" />
+                </div>
+                <div className="flex items-baseline gap-2">
+                  <span className="text-xl sm:text-2xl font-bold text-white font-mono">{userStats.trialUsers}</span>
+                  <span className="text-[10px] font-mono font-bold text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/20">
+                    - 7D
+                  </span>
+                </div>
+                <div className="text-[10px] text-zinc-500">Período de avaliação ativo</div>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-[#0e1320] border border-[#182136] space-y-1">
+                <div className="flex items-center justify-between text-zinc-400">
+                  <span className="text-[11px] font-mono uppercase tracking-wider">Assinantes Pro</span>
+                  <CreditCard className="w-4 h-4 text-purple-400" />
+                </div>
+                <div className="text-xl sm:text-2xl font-bold text-white font-mono">{userStats.proUsers}</div>
+                <div className="text-[10px] text-zinc-500">Planos Pro mensais ativos</div>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-[#0e1320] border border-[#182136] space-y-1">
+                <div className="flex items-center justify-between text-zinc-400">
+                  <span className="text-[11px] font-mono uppercase tracking-wider">Super Admin</span>
+                  <Shield className="w-4 h-4 text-amber-400" />
+                </div>
+                <div className="text-xl sm:text-2xl font-bold text-amber-300 font-mono">{userStats.superAdmins}</div>
+                <div className="text-[10px] text-zinc-500">Acesso mestre e irrestrito</div>
+              </div>
+            </div>
+
+            {/* 2. CARD RETRÁTIL DE CONFIGURAÇÃO DE RLS NO SUPABASE */}
+            <div className="p-4 rounded-2xl bg-[#0c101a] border border-[#1c2740] space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-start sm:items-center gap-3">
+                  <div className="w-8 h-8 rounded-xl bg-blue-500/10 border border-blue-500/20 text-blue-400 flex items-center justify-center shrink-0">
+                    <Database className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="text-xs sm:text-sm font-bold text-white">
+                      Sincronização & Permissões Supabase (RLS)
+                    </h3>
+                    <p className="text-[11px] text-zinc-400">
+                      O painel agrega automaticamente contas locais e remotas. Para permitir que o Super Admin leia todas as linhas de outros navegadores via SQL do Supabase, certifique-se de aplicar a política de leitura.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    onClick={() => setShowRlsSnippet(!showRlsSnippet)}
+                    className="px-3 py-1.5 rounded-xl border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white text-xs font-semibold transition cursor-pointer"
+                  >
+                    {showRlsSnippet ? 'Ocultar Script SQL' : 'Ver Script SQL'}
+                  </button>
+
+                  <button
+                    onClick={copyRlsSql}
+                    className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-sm"
+                  >
+                    {copiedSql ? (
+                      <>
+                        <Check className="w-3.5 h-3.5 text-white" />
+                        <span>Copiado!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>Copiar SQL</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {showRlsSnippet && (
+                <div className="pt-2 border-t border-[#182136] animate-fade-in space-y-2">
+                  <div className="flex items-center justify-between text-[10px] text-zinc-400 font-mono">
+                    <span>EXECUTE NO SUPABASE &gt; SQL EDITOR:</span>
+                    <span className="text-emerald-400">Habilita leitura irrestrita para astryasuporte@gmail.com</span>
+                  </div>
+                  <pre className="p-3 rounded-xl bg-[#06080d] border border-[#141b2b] text-[11px] font-mono text-zinc-300 overflow-x-auto whitespace-pre leading-relaxed">
+{`-- Políticas RLS no Supabase para liberar leitura das contas para o Super Admin
+DROP POLICY IF EXISTS "Usuário ou Super Admin lê perfis" ON public.profiles;
+CREATE POLICY "Usuário ou Super Admin lê perfis" ON public.profiles
+  FOR SELECT USING (
+    auth.uid() = id 
+    OR (auth.jwt() ->> 'email') = 'astryasuporte@gmail.com'
+    OR EXISTS (SELECT 1 FROM public.profiles p WHERE p.id = auth.uid() AND p.is_admin = true)
+  );
+
+DROP POLICY IF EXISTS "Usuário insere o próprio perfil" ON public.profiles;
+CREATE POLICY "Usuário insere o próprio perfil" ON public.profiles
+  FOR INSERT WITH CHECK (
+    auth.uid() = id 
+    OR (auth.jwt() ->> 'email') = 'astryasuporte@gmail.com'
+  );
+
+DROP POLICY IF EXISTS "Usuário ou Super Admin edita o próprio perfil" ON public.profiles;
+CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profiles
+  FOR UPDATE USING (
+    auth.uid() = id 
+    OR (auth.jwt() ->> 'email') = 'astryasuporte@gmail.com'
+  );`}
+                  </pre>
+                </div>
+              )}
+            </div>
+
+            {/* 3. TABELA COMPLETA DE USUÁRIOS COM FILTROS & BUSCA */}
             <div className="p-4 sm:p-5 rounded-2xl bg-[#0e1320] border border-[#182136] space-y-4">
-              <div className="flex items-center justify-between pb-3 border-b border-[#182136]">
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-3 border-b border-[#182136]">
                 <div>
                   <h2 className="text-sm sm:text-base font-bold text-white flex items-center gap-2">
                     <Users className="w-5 h-5 text-blue-400 shrink-0" />
-                    <span>Usuários & Permissões</span>
+                    <span>Tabela Consolidada de Leitores & Contas</span>
                   </h2>
                   <p className="text-xs text-zinc-400 mt-0.5">
-                    Controle de contas e Super Admin via Supabase Auth.
+                    Visualização em tempo real de novos registros, provedor (Google / E-mail), plano e status.
                   </p>
                 </div>
-                <span className="text-[11px] px-2.5 py-1 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20 font-mono">
-                  {usersList.length} cadastrados
-                </span>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => {
+                      loadDatabaseData();
+                      showToast('Lista de usuários sincronizada com o banco de dados.');
+                    }}
+                    disabled={isLoadingUsers}
+                    className="px-3.5 py-1.5 rounded-xl border border-[#1a2337] bg-[#0a0d14] hover:bg-[#121826] text-zinc-200 text-xs font-semibold transition flex items-center gap-2 cursor-pointer disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isLoadingUsers ? 'animate-spin text-blue-400' : 'text-zinc-400'}`} />
+                    <span>Sincronizar Lista</span>
+                  </button>
+
+                  <span className="text-[11px] px-2.5 py-1 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20 font-mono">
+                    {filteredUsers.length} de {usersList.length} contas
+                  </span>
+                </div>
+              </div>
+
+              {/* BARRA DE PESQUISA E FILTROS */}
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+                {/* Campo de Busca */}
+                <div className="relative flex-1">
+                  <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-zinc-500" />
+                  <input
+                    type="text"
+                    placeholder="Buscar por nome ou e-mail..."
+                    value={userSearchTerm}
+                    onChange={(e) => setUserSearchTerm(e.target.value)}
+                    className="w-full bg-[#0a0d14] border border-[#1a2337] rounded-xl pl-9 pr-3 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-500 focus:outline-none focus:border-blue-500"
+                  />
+                  {userSearchTerm && (
+                    <button
+                      onClick={() => setUserSearchTerm('')}
+                      className="absolute right-2.5 top-2 text-zinc-500 hover:text-white text-xs"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+
+                {/* Filtros de Plano e Provedor */}
+                <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1 bg-[#0a0d14] border border-[#1a2337] rounded-xl p-1 text-xs">
+                    <span className="text-[10px] text-zinc-500 font-mono px-1.5 uppercase">Plano:</span>
+                    <button
+                      onClick={() => setUserPlanFilter('all')}
+                      className={`px-2 py-0.5 rounded-lg text-[11px] transition cursor-pointer ${
+                        userPlanFilter === 'all'
+                          ? 'bg-zinc-800 text-white font-bold'
+                          : 'text-zinc-400 hover:text-white'
+                      }`}
+                    >
+                      Todos
+                    </button>
+                    <button
+                      onClick={() => setUserPlanFilter('trial')}
+                      className={`px-2 py-0.5 rounded-lg text-[11px] transition cursor-pointer ${
+                        userPlanFilter === 'trial'
+                          ? 'bg-emerald-500/20 text-emerald-400 font-bold border border-emerald-500/30'
+                          : 'text-zinc-400 hover:text-white'
+                      }`}
+                    >
+                      Teste 7D
+                    </button>
+                    <button
+                      onClick={() => setUserPlanFilter('pro')}
+                      className={`px-2 py-0.5 rounded-lg text-[11px] transition cursor-pointer ${
+                        userPlanFilter === 'pro'
+                          ? 'bg-purple-500/20 text-purple-400 font-bold border border-purple-500/30'
+                          : 'text-zinc-400 hover:text-white'
+                      }`}
+                    >
+                      Pro
+                    </button>
+                  </div>
+
+                  <div className="flex items-center gap-1 bg-[#0a0d14] border border-[#1a2337] rounded-xl p-1 text-xs">
+                    <span className="text-[10px] text-zinc-500 font-mono px-1.5 uppercase">Login:</span>
+                    <button
+                      onClick={() => setUserProviderFilter('all')}
+                      className={`px-2 py-0.5 rounded-lg text-[11px] transition cursor-pointer ${
+                        userProviderFilter === 'all'
+                          ? 'bg-zinc-800 text-white font-bold'
+                          : 'text-zinc-400 hover:text-white'
+                      }`}
+                    >
+                      Todos
+                    </button>
+                    <button
+                      onClick={() => setUserProviderFilter('google')}
+                      className={`px-2 py-0.5 rounded-lg text-[11px] transition cursor-pointer ${
+                        userProviderFilter === 'google'
+                          ? 'bg-blue-500/20 text-blue-400 font-bold border border-blue-500/30'
+                          : 'text-zinc-400 hover:text-white'
+                      }`}
+                    >
+                      Google
+                    </button>
+                    <button
+                      onClick={() => setUserProviderFilter('email')}
+                      className={`px-2 py-0.5 rounded-lg text-[11px] transition cursor-pointer ${
+                        userProviderFilter === 'email'
+                          ? 'bg-zinc-700 text-white font-bold'
+                          : 'text-zinc-400 hover:text-white'
+                      }`}
+                    >
+                      E-mail
+                    </button>
+                  </div>
+                </div>
               </div>
 
               {/* LISTA EM CARDS NO MOBILE */}
               <div className="md:hidden space-y-3">
-                {usersList.length === 0 ? (
+                {filteredUsers.length === 0 ? (
                   <div className="p-6 text-center text-zinc-500 text-xs bg-[#0a0e17] rounded-xl border border-[#182136]">
-                    Nenhum usuário cadastrado.
+                    Nenhum usuário encontrado com os filtros selecionados.
                   </div>
                 ) : (
-                  usersList.map((u) => {
+                  filteredUsers.map((u) => {
                     const isUserAdmin = u.isAdmin || u.email.toLowerCase() === 'astryasuporte@gmail.com';
+                    const isGoogle = (u.provider || (u.email.includes('gmail') ? 'google' : 'email')) === 'google';
+                    const isTrial = !isUserAdmin && (u.planName === 'TRIAL_7D' || u.planName === 'TRIAL' || u.subscriptionStatus === 'TRIAL_ACTIVE');
+
                     return (
                       <div
                         key={u.id}
-                        className="p-3.5 rounded-xl bg-[#0a0e17] border border-[#182136] space-y-2 text-xs"
+                        className="p-3.5 rounded-xl bg-[#0a0e17] border border-[#182136] space-y-2.5 text-xs"
                       >
                         <div className="flex items-center justify-between">
-                          <div className="font-semibold text-white">{u.fullName}</div>
+                          <div className="flex items-center gap-2.5">
+                            <div className="w-8 h-8 rounded-full overflow-hidden bg-zinc-800 border border-zinc-700 flex items-center justify-center text-white text-xs font-bold shrink-0">
+                              {u.avatarUrl ? (
+                                <img src={u.avatarUrl} alt={u.fullName} className="w-full h-full object-cover" />
+                              ) : (
+                                <span>{(u.fullName || u.email).substring(0, 2).toUpperCase()}</span>
+                              )}
+                            </div>
+                            <div>
+                              <div className="font-semibold text-white leading-tight">{u.fullName}</div>
+                              <div className="text-[10px] text-zinc-400 font-mono">{u.email}</div>
+                            </div>
+                          </div>
+
                           {isUserAdmin ? (
                             <span className="text-[9px] font-mono px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 uppercase font-bold">
                               SUPER ADMIN
                             </span>
+                          ) : isTrial ? (
+                            <span className="text-[9px] font-mono px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 font-bold">
+                              - 7D TRIAL
+                            </span>
                           ) : (
-                            <span className="text-[9px] font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-400">
-                              USUÁRIO
+                            <span className="text-[9px] font-mono px-2 py-0.5 rounded bg-purple-500/15 text-purple-400 border border-purple-500/30 font-bold">
+                              PRO
                             </span>
                           )}
                         </div>
 
-                        <div className="text-[11px] text-zinc-400 font-mono">{u.email}</div>
+                        <div className="flex items-center justify-between text-[11px] pt-2 border-t border-[#141b2c]">
+                          <div className="flex items-center gap-2">
+                            {/* Badge do Provedor */}
+                            {isGoogle ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-blue-500/10 text-blue-300 border border-blue-500/20 text-[10px] font-mono">
+                                <span>G</span> Google
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 text-[10px] font-mono">
+                                <Mail className="w-2.5 h-2.5" /> E-mail
+                              </span>
+                            )}
 
-                        <div className="flex items-center justify-between pt-1 border-t border-[#141b2c]">
-                          {/* Status da sessão: Verde se admin/ativo */}
-                          {renderStatusBadge('connected', isUserAdmin ? 'Online' : 'Ativo')}
-                          <span className="text-[10px] font-mono text-zinc-500">
-                            {new Date(u.createdAt).toLocaleDateString('pt-BR')}
-                          </span>
+                            {/* Status da Sessão */}
+                            {renderStatusBadge('connected', isUserAdmin ? 'Online' : 'Ativo')}
+                          </div>
+
+                          <button
+                            onClick={() => setSelectedUserModal(u)}
+                            className="px-2.5 py-1 rounded-lg bg-[#141d30] hover:bg-[#1a2640] border border-[#202e4d] text-zinc-300 text-[10px] font-semibold cursor-pointer"
+                          >
+                            Detalhes
+                          </button>
                         </div>
                       </div>
                     );
@@ -2176,30 +2532,70 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                 <table className="w-full text-left text-xs">
                   <thead>
                     <tr className="border-b border-[#182136] text-[11px] text-zinc-400 uppercase font-mono">
-                      <th className="pb-3 pl-2">Usuário</th>
-                      <th className="pb-3">Papel / Role</th>
-                      <th className="pb-3">Plano</th>
+                      <th className="pb-3 pl-2">Leitor</th>
+                      <th className="pb-3">Provedor</th>
+                      <th className="pb-3">Papel / Acesso</th>
+                      <th className="pb-3">Plano Atual</th>
                       <th className="pb-3">Status da Sessão</th>
                       <th className="pb-3">Data de Cadastro</th>
                       <th className="pb-3 text-right pr-2">Ação</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#151d2e]">
-                    {usersList.length === 0 ? (
+                    {filteredUsers.length === 0 ? (
                       <tr>
-                        <td colSpan={6} className="py-8 text-center text-zinc-500 text-xs font-mono">
-                          Nenhum usuário cadastrado na base de dados.
+                        <td colSpan={7} className="py-8 text-center text-zinc-500 text-xs font-mono">
+                          Nenhum usuário cadastrado encontrado com esses filtros.
                         </td>
                       </tr>
                     ) : (
-                      usersList.map((u) => {
+                      filteredUsers.map((u) => {
                         const isUserAdmin = u.isAdmin || u.email.toLowerCase() === 'astryasuporte@gmail.com';
+                        const isGoogle = (u.provider || (u.email.includes('gmail') ? 'google' : 'email')) === 'google';
+                        const isTrial = !isUserAdmin && (u.planName === 'TRIAL_7D' || u.planName === 'TRIAL' || u.subscriptionStatus === 'TRIAL_ACTIVE');
+
                         return (
-                          <tr key={u.id} className="hover:bg-[#12192b]/40">
+                          <tr key={u.id} className="hover:bg-[#12192b]/40 transition-colors">
                             <td className="py-3.5 pl-2">
-                              <div className="font-semibold text-white">{u.fullName}</div>
-                              <div className="text-[10px] text-zinc-400 font-mono">{u.email}</div>
+                              <div className="flex items-center gap-3">
+                                <div className="w-8 h-8 rounded-full overflow-hidden bg-zinc-800 border border-zinc-700 flex items-center justify-center text-white text-xs font-bold shrink-0">
+                                  {u.avatarUrl ? (
+                                    <img src={u.avatarUrl} alt={u.fullName} className="w-full h-full object-cover" />
+                                  ) : (
+                                    <span>{(u.fullName || u.email).substring(0, 2).toUpperCase()}</span>
+                                  )}
+                                </div>
+                                <div>
+                                  <div className="font-semibold text-white leading-tight">{u.fullName}</div>
+                                  <div className="text-[10px] text-zinc-400 font-mono flex items-center gap-1.5 mt-0.5">
+                                    <span>{u.email}</span>
+                                    <button
+                                      onClick={() => {
+                                        navigator.clipboard?.writeText(u.email);
+                                        showToast(`E-mail ${u.email} copiado!`);
+                                      }}
+                                      title="Copiar e-mail"
+                                      className="text-zinc-500 hover:text-zinc-300 p-0.5 cursor-pointer"
+                                    >
+                                      <Copy className="w-2.5 h-2.5" />
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
                             </td>
+
+                            <td className="py-3.5">
+                              {isGoogle ? (
+                                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20 text-[10px] font-mono">
+                                  <span className="font-bold">G</span> Google OAuth
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-300 border border-zinc-700 text-[10px] font-mono">
+                                  <Mail className="w-2.5 h-2.5" /> E-mail / Senha
+                                </span>
+                              )}
+                            </td>
+
                             <td className="py-3.5">
                               {isUserAdmin ? (
                                 <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 uppercase font-bold">
@@ -2207,33 +2603,42 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                                 </span>
                               ) : (
                                 <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-400">
-                                  USUÁRIO
+                                  LEITOR
                                 </span>
                               )}
                             </td>
+
                             <td className="py-3.5">
                               {isUserAdmin ? (
                                 <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">
                                   PRO ILIMITADO
                                 </span>
-                              ) : (
+                              ) : isTrial ? (
                                 <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-bold">
-                                  - 7D
+                                  - 7D (TESTE)
+                                </span>
+                              ) : (
+                                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-purple-500/15 text-purple-400 border border-purple-500/30 font-bold">
+                                  PRO MENSAL
                                 </span>
                               )}
                             </td>
+
                             <td className="py-3.5">
                               {renderStatusBadge('connected', isUserAdmin ? 'Online' : 'Ativo')}
                             </td>
+
                             <td className="py-3.5 font-mono text-[10px] text-zinc-400">
-                              {new Date(u.createdAt).toLocaleDateString('pt-BR')}
+                              <div>{new Date(u.createdAt).toLocaleDateString('pt-BR')}</div>
+                              <div className="text-[9px] text-zinc-600">
+                                {new Date(u.createdAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                              </div>
                             </td>
+
                             <td className="py-3.5 text-right pr-2">
                               <button
-                                onClick={() => {
-                                  showToast(`Permissões do usuário ${u.email} verificadas.`);
-                                }}
-                                className="px-2.5 py-1 rounded-lg bg-[#141d30] hover:bg-[#1a2640] border border-[#202e4d] text-zinc-300 text-[11px] font-medium cursor-pointer"
+                                onClick={() => setSelectedUserModal(u)}
+                                className="px-3 py-1 rounded-lg bg-[#141d30] hover:bg-[#1a2640] border border-[#202e4d] text-zinc-300 hover:text-white text-[11px] font-medium cursor-pointer transition shadow-xs"
                               >
                                 Detalhes
                               </button>
@@ -2246,6 +2651,113 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                 </table>
               </div>
             </div>
+
+            {/* MODAL: DETALHES COMPLETOS DO USUÁRIO SELECIONADO */}
+            {selectedUserModal && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-md p-4 animate-fade-in">
+                <div className="w-full max-w-lg bg-[#0c101a] border border-[#202c46] rounded-2xl p-6 shadow-2xl space-y-5 text-white">
+                  <div className="flex items-center justify-between border-b border-[#182136] pb-3">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-full overflow-hidden bg-zinc-800 border border-zinc-700 flex items-center justify-center text-white text-sm font-bold">
+                        {selectedUserModal.avatarUrl ? (
+                          <img src={selectedUserModal.avatarUrl} alt={selectedUserModal.fullName} className="w-full h-full object-cover" />
+                        ) : (
+                          <span>{(selectedUserModal.fullName || selectedUserModal.email).substring(0, 2).toUpperCase()}</span>
+                        )}
+                      </div>
+                      <div>
+                        <h3 className="text-sm font-bold text-white">{selectedUserModal.fullName}</h3>
+                        <p className="text-xs text-zinc-400 font-mono">{selectedUserModal.email}</p>
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={() => setSelectedUserModal(null)}
+                      className="p-1 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 cursor-pointer"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3 text-xs font-mono">
+                    <div className="p-3 rounded-xl bg-[#080b12] border border-[#141d30] space-y-1">
+                      <span className="text-[10px] text-zinc-500 uppercase">Papel no Sistema</span>
+                      <div className="font-bold text-white">
+                        {selectedUserModal.isAdmin || selectedUserModal.email.toLowerCase() === 'astryasuporte@gmail.com'
+                          ? 'Super Administrador'
+                          : 'Leitor FatosBR'}
+                      </div>
+                    </div>
+
+                    <div className="p-3 rounded-xl bg-[#080b12] border border-[#141d30] space-y-1">
+                      <span className="text-[10px] text-zinc-500 uppercase">Provedor de Login</span>
+                      <div className="font-bold text-white">
+                        {(selectedUserModal.provider || (selectedUserModal.email.includes('gmail') ? 'google' : 'email')) === 'google'
+                          ? 'Google OAuth'
+                          : 'E-mail e Senha'}
+                      </div>
+                    </div>
+
+                    <div className="p-3 rounded-xl bg-[#080b12] border border-[#141d30] space-y-1">
+                      <span className="text-[10px] text-zinc-500 uppercase">Plano Ativo</span>
+                      <div className="font-bold text-emerald-400">
+                        {selectedUserModal.planName || 'TRIAL_7D'}
+                      </div>
+                    </div>
+
+                    <div className="p-3 rounded-xl bg-[#080b12] border border-[#141d30] space-y-1">
+                      <span className="text-[10px] text-zinc-500 uppercase">Status da Assinatura</span>
+                      <div className="font-bold text-blue-400">
+                        {selectedUserModal.subscriptionStatus || 'TRIAL_ACTIVE'}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="p-3 rounded-xl bg-[#080b12] border border-[#141d30] space-y-2 text-xs font-mono">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="text-zinc-500">ID Único da Conta:</span>
+                      <span className="text-zinc-300 font-bold truncate max-w-[240px]">{selectedUserModal.id}</span>
+                    </div>
+
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="text-zinc-500">Data de Cadastro:</span>
+                      <span className="text-zinc-300">
+                        {new Date(selectedUserModal.createdAt).toLocaleString('pt-BR')}
+                      </span>
+                    </div>
+
+                    {selectedUserModal.lastSignInAt && (
+                      <div className="flex items-center justify-between text-[11px]">
+                        <span className="text-zinc-500">Último Acesso:</span>
+                        <span className="text-zinc-300">
+                          {new Date(selectedUserModal.lastSignInAt).toLocaleString('pt-BR')}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex justify-between items-center pt-2 border-t border-[#182136]">
+                    <button
+                      onClick={() => {
+                        navigator.clipboard?.writeText(selectedUserModal.email);
+                        showToast(`E-mail ${selectedUserModal.email} copiado.`);
+                      }}
+                      className="px-3 py-1.5 rounded-xl border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white text-xs font-medium cursor-pointer transition flex items-center gap-1.5"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                      <span>Copiar E-mail</span>
+                    </button>
+
+                    <button
+                      onClick={() => setSelectedUserModal(null)}
+                      className="px-4 py-1.5 rounded-xl bg-white hover:bg-zinc-200 text-black text-xs font-bold cursor-pointer transition"
+                    >
+                      Fechar
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
 

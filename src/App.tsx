@@ -438,6 +438,9 @@ export default function App() {
         );
       } catch {}
 
+      // Sincronizar ativamente no Supabase public.profiles e no registro consolidado do painel admin
+      userService.syncUserProfile(user);
+
       // Sincronizar itens salvos do usuário
       userService.getSavedEventIds(user.id).then((savedIds) => {
         if (savedIds && savedIds.length > 0) {
@@ -740,7 +743,12 @@ export default function App() {
     return (
       <LoginPage
         onBackToLanding={() => setCurrentNav('landing')}
-        onAuthSuccess={(_email) => {
+        onAuthSuccess={(_email, _name) => {
+          userService.syncUserProfile({
+            email: _email,
+            full_name: _name || _email.split('@')[0],
+            name: _name || _email.split('@')[0]
+          });
           authService.getCurrentUser().then((user) => {
             if (user) {
               handleUserSession(user);

@@ -252,12 +252,31 @@ CREATE POLICY "Leitura pública de tópicos do acontecimento" ON public.event_to
 CREATE POLICY "Leitura pública de entidades do acontecimento" ON public.event_entities FOR SELECT USING (true);
 CREATE POLICY "Leitura pública de timeline do acontecimento" ON public.event_timeline FOR SELECT USING (true);
 
--- Políticas de Perfis (Usuário lê e atualiza apenas o seu próprio perfil)
-CREATE POLICY "Usuário lê o próprio perfil" ON public.profiles
-  FOR SELECT USING (auth.uid() = id);
+-- Políticas de Perfis (Usuário lê e edita o seu perfil; Super Admin lê e gerencia todos os perfis)
+DROP POLICY IF EXISTS "Usuário lê o próprio perfil" ON public.profiles;
+DROP POLICY IF EXISTS "Super Admin lê todos os perfis" ON public.profiles;
+DROP POLICY IF EXISTS "Usuário ou Super Admin lê perfis" ON public.profiles;
+DROP POLICY IF EXISTS "Usuário edita o próprio perfil" ON public.profiles;
+DROP POLICY IF EXISTS "Usuário insere o próprio perfil" ON public.profiles;
 
-CREATE POLICY "Usuário edita o próprio perfil" ON public.profiles
-  FOR UPDATE USING (auth.uid() = id);
+CREATE POLICY "Usuário ou Super Admin lê perfis" ON public.profiles
+  FOR SELECT USING (
+    auth.uid() = id 
+    OR (auth.jwt() ->> 'email') = 'astryasuporte@gmail.com'
+    OR EXISTS (SELECT 1 FROM public.profiles p WHERE p.id = auth.uid() AND p.is_admin = true)
+  );
+
+CREATE POLICY "Usuário insere o próprio perfil" ON public.profiles
+  FOR INSERT WITH CHECK (
+    auth.uid() = id 
+    OR (auth.jwt() ->> 'email') = 'astryasuporte@gmail.com'
+  );
+
+CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profiles
+  FOR UPDATE USING (
+    auth.uid() = id 
+    OR (auth.jwt() ->> 'email') = 'astryasuporte@gmail.com'
+  );
 
 -- Políticas de Preferências
 CREATE POLICY "Usuário gerencia suas preferências" ON public.user_preferences

@@ -1,6 +1,6 @@
 {
-  "summary":  "Plano de implementação para a página dedicada de login em tela cheia e o novo fluxo completo de Onboarding em 7 etapas adaptado para Mobile e PC, incorporando o protótipo do Figma e as imagens de alta resolução do Globo Terrestre e do Selo Luminoso de Conclusão.",
-  "updatedAt":  "2026-10-25T01:41:50.614675791Z",
+  "summary":  "Plano de implementação para corrigir a sincronização e contagem de novos usuários autenticados (Google e e-mail) no Painel Admin, incluindo upsert automático de perfis, superação do bloqueio de RLS e tabela analítica detalhada com filtros.",
+  "updatedAt":  "2026-10-25T02:08:47.411185874Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

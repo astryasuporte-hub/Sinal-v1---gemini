@@ -6,6 +6,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { ArrowLeft, Check, AlertCircle, Eye, EyeOff, Lock, Mail, User, ShieldCheck } from 'lucide-react';
 import { authService } from '../services/authService';
+import { userService } from '../services/userService';
 import { isSupabaseConfigured, getSupabaseConfigStatus } from '../lib/supabase';
 
 interface LoginPageProps {
@@ -69,6 +70,12 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         setIsGoogleLoading(false);
         const demoEmail = 'leitor.google@fatosbr.com.br';
         const demoName = 'Leitor Convidado';
+        userService.syncUserProfile({
+          email: demoEmail,
+          full_name: demoName,
+          name: demoName,
+          provider: 'google'
+        });
         try {
           localStorage.setItem(
             'sinal_user_profile',
@@ -188,10 +195,18 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       setIsLoading(false);
       setSuccessMessage('Autenticação confirmada com sucesso! Acessando...');
 
+      const resolvedName = fullName || email.split('@')[0];
+      userService.syncUserProfile({
+        email: email,
+        full_name: resolvedName,
+        name: resolvedName,
+        provider: 'email'
+      });
+
       try {
         const userProfile = {
-          name: fullName || email.split('@')[0],
-          displayName: fullName || email.split('@')[0],
+          name: resolvedName,
+          displayName: resolvedName,
           email: email,
           avatarUrl: null,
           timezone: 'America/Sao_Paulo'
@@ -200,7 +215,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       } catch {}
 
       setTimeout(() => {
-        onAuthSuccess(email, fullName || email.split('@')[0]);
+        onAuthSuccess(email, resolvedName);
       }, 500);
     }, 600);
   };
