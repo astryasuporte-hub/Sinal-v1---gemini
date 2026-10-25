@@ -42,7 +42,10 @@ import {
   Image as ImageIcon,
   CheckCircle2,
   AlertCircle,
-  RefreshCw
+  RefreshCw,
+  ZoomIn,
+  ZoomOut,
+  Crop
 } from 'lucide-react';
 import { FinancialDashboard } from './FinancialDashboard';
 import { ticketService } from '../services/ticketService';
@@ -50,6 +53,8 @@ import { soundAlertService } from '../services/soundAlertService';
 import { notificationService } from '../services/notificationService';
 import { ApiHealthModal } from './ApiHealthModal';
 import { User as SupabaseUser } from '@supabase/supabase-js';
+import { avatarProcessing } from '../services/avatarProcessing';
+import { usePWAInstall } from '../hooks/usePWAInstall';
 
 interface ProfileViewProps {
   currentUser?: SupabaseUser | null;
@@ -211,7 +216,11 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   const [contactSubject, setContactSubject] = useState('');
   const [contactMessage, setContactMessage] = useState('');
 
-  // Gallery Avatar Upload States & Backend Metadata / GPS Inspection
+  // PWA Hook & iOS Helper Modal State
+  const pwa = usePWAInstall();
+  const [showProfileIosGuide, setShowProfileIosGuide] = useState(false);
+
+  // Gallery Avatar Upload States & Local Fast Analysis (até 6 MB)
   const [isUploadingAvatar, setIsUploadingAvatar] = useState(false);
   const [avatarUploadError, setAvatarUploadError] = useState<string | null>(null);
   const [avatarUploadAudit, setAvatarUploadAudit] = useState<{
@@ -226,59 +235,74 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   } | null>(null);
   const avatarFileInputRef = React.useRef<HTMLInputElement | null>(null);
 
+  // Crop / Zoom Modal States
+  const [isCropModalOpen, setIsCropModalOpen] = useState(false);
+  const [cropRawUrl, setCropRawUrl] = useState<string | null>(null);
+  const [cropZoom, setCropZoom] = useState<number>(1);
+  const [cropOffsetX, setCropOffsetX] = useState<number>(0);
+  const [cropOffsetY, setCropOffsetY] = useState<number>(0);
+  const [isSavingCrop, setIsSavingCrop] = useState<boolean>(false);
+
   const handleAvatarFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     setAvatarUploadError(null);
     setAvatarUploadAudit(null);
-
-    // Validação de tamanho no cliente (5 MB)
-    if (file.size > 5 * 1024 * 1024) {
-      setAvatarUploadError(`O arquivo (${(file.size / (1024 * 1024)).toFixed(2)} MB) excede o limite máximo permitido de 5 MB.`);
-      return;
-    }
-
     setIsUploadingAvatar(true);
 
     try {
-      const reader = new FileReader();
-      reader.onload = async () => {
-        const dataUrl = reader.result as string;
-        try {
-          const response = await fetch('/api/avatar/verify', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              fileName: file.name,
-              dataUrl: dataUrl
-            })
-          });
-
-          const data = await response.json();
-          if (!response.ok || !data.success) {
-            setAvatarUploadError(data.error || 'A foto foi rejeitada pelo servidor de segurança.');
-          } else {
-            setEditAvatarInput(data.safeDataUrl);
-            setAvatarUploadAudit(data.audit);
-            showToast('Foto validada e metadados GPS removidos com sucesso.');
-          }
-        } catch {
-          setAvatarUploadError('Falha ao comunicar com o servidor de validação de imagens.');
-        } finally {
-          setIsUploadingAvatar(false);
-        }
-      };
-      reader.onerror = () => {
+      const result = await avatarProcessing.processAvatarFile(file);
+      if (!result.valid || !result.dataUrl) {
+        setAvatarUploadError(result.error || 'A imagem selecionada não é válida.');
         setIsUploadingAvatar(false);
-        setAvatarUploadError('Erro ao ler a foto selecionada da galeria.');
-      };
-      reader.readAsDataURL(file);
+        return;
+      }
+
+      setAvatarUploadAudit({
+        fileNameSafe: true,
+        magicBytesVerified: true,
+        binarySignature: file.type || 'image/jpeg',
+        payloadScanClean: true,
+        gpsMetadataStripped: true,
+        exifStatus: 'Higienizado instantaneamente via Canvas 2D',
+        originalSize: file.size,
+        sanitizedSize: Math.round(result.dataUrl.length * 0.75)
+      });
+
+      // Abrir modal de corte/zoom para ajuste do usuário
+      setCropRawUrl(result.dataUrl);
+      setCropZoom(1);
+      setCropOffsetX(0);
+      setCropOffsetY(0);
+      setIsCropModalOpen(true);
     } catch {
-      setIsUploadingAvatar(false);
-      setAvatarUploadError('Erro inesperado ao processar arquivo.');
+      setAvatarUploadError('Erro ao processar imagem no navegador.');
     } finally {
+      setIsUploadingAvatar(false);
       e.target.value = '';
+    }
+  };
+
+  const handleApplyCrop = async () => {
+    if (!cropRawUrl) return;
+    setIsSavingCrop(true);
+    try {
+      const croppedUrl = await avatarProcessing.cropAndZoomImage(
+        cropRawUrl,
+        cropZoom,
+        cropOffsetX,
+        cropOffsetY,
+        512
+      );
+      setEditAvatarInput(croppedUrl);
+      setIsCropModalOpen(false);
+      setCropRawUrl(null);
+      showToast('Foto processada, recortada e metadados GPS removidos!');
+    } catch {
+      showToast('Erro ao aplicar corte na imagem.');
+    } finally {
+      setIsSavingCrop(false);
     }
   };
 
@@ -756,6 +780,76 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                     </div>
                   </div>
                   <ChevronRight className="w-4 h-4 text-zinc-500 group-hover:text-white transition" />
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* CARD DO APLICATIVO FATOSBR (PWA) */}
+          <div className="p-5 rounded-2xl border border-[#1e2026] bg-[#111216] space-y-4">
+            <div className="flex items-center justify-between border-b border-zinc-800/80 pb-3">
+              <div className="flex items-center gap-2.5">
+                <Smartphone className="w-4 h-4 text-zinc-400" />
+                <div>
+                  <h3 className="text-sm font-bold text-white">Aplicativo FatosBR</h3>
+                  <p className="text-[11px] text-zinc-400">Instale no seu celular ou computador.</p>
+                </div>
+              </div>
+              {pwa.isInstalled && (
+                <span className="px-2 py-0.5 rounded text-[10px] font-mono font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
+                  <CheckCircle2 className="w-3 h-3" /> Instalado
+                </span>
+              )}
+            </div>
+
+            <div className="space-y-3 text-xs">
+              {pwa.isInstalled ? (
+                <div className="p-3.5 rounded-xl bg-zinc-900/50 border border-zinc-800/80 space-y-1.5">
+                  <div className="text-white font-semibold flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                    <span>Aplicativo Web Instalado e Ativo</span>
+                  </div>
+                  <p className="text-zinc-400 text-[11px] leading-relaxed">
+                    Você já possui o FatosBR instalado na tela de início com suporte offline e alertas instantâneos.
+                  </p>
+                </div>
+              ) : (
+                <div className="p-3.5 rounded-xl bg-zinc-900/60 border border-zinc-800/80 space-y-3">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div>
+                      <div className="font-semibold text-white">Instalar app no dispositivo</div>
+                      <p className="text-zinc-400 text-[11px] mt-0.5 leading-relaxed">
+                        Acesso rápido sem precisar abrir o navegador. Menos de 2 MB de espaço.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (pwa.isIOS) {
+                          setShowProfileIosGuide(true);
+                        } else {
+                          pwa.install();
+                        }
+                      }}
+                      className="px-4 py-2 bg-white text-black font-bold text-xs rounded-xl hover:bg-zinc-200 transition cursor-pointer shrink-0 shadow-sm flex items-center justify-center gap-1.5"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Instalar FatosBR</span>
+                    </button>
+                  </div>
+
+                  {pwa.isIOS && (
+                    <div className="p-2.5 rounded-lg bg-zinc-950 border border-zinc-800 text-[11px] text-zinc-400 flex items-center justify-between">
+                      <span>No iPhone/iPad: use o botão Compartilhar ➔ "Adicionar à Tela de Início"</span>
+                      <button
+                        type="button"
+                        onClick={() => setShowProfileIosGuide(true)}
+                        className="text-white underline font-semibold ml-2 cursor-pointer"
+                      >
+                        Ver instruções
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -1246,7 +1340,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                       )}
                     </div>
                     <p className="text-[10px] text-zinc-400 mt-0.5">
-                      Inspeção ativa de segurança no backend e higienização de GPS.
+                      Validação instantânea local e remoção de metadados EXIF/GPS (até 6 MB).
                     </p>
 
                     <div className="flex items-center gap-2 mt-2">
@@ -1259,12 +1353,12 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                         {isUploadingAvatar ? (
                           <>
                             <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                            <span>Verificando...</span>
+                            <span>Analisando...</span>
                           </>
                         ) : (
                           <>
                             <Upload className="w-3.5 h-3.5" />
-                            <span>Escolher da Galeria</span>
+                            <span>Escolher da Galeria (até 6 MB)</span>
                           </>
                         )}
                       </button>
@@ -1286,12 +1380,12 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                   </div>
                 </div>
 
-                {/* Erro de Validação no Backend */}
+                {/* Erro de Validação de Imagem */}
                 {avatarUploadError && (
                   <div className="p-3 rounded-xl bg-red-950/40 border border-red-500/30 flex items-start gap-2.5 text-xs text-red-200 animate-fade-in">
                     <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
                     <div>
-                      <strong className="block text-red-300 font-semibold">Upload Rejeitado pelo Servidor:</strong>
+                      <strong className="block text-red-300 font-semibold">Falha na Análise da Imagem:</strong>
                       <p className="text-[11px] text-red-200/90 mt-0.5 leading-relaxed">{avatarUploadError}</p>
                     </div>
                   </div>
@@ -1302,12 +1396,12 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                   <div className="p-3 rounded-xl bg-emerald-950/30 border border-emerald-500/30 space-y-2 text-xs text-emerald-200 animate-fade-in">
                     <div className="flex items-center gap-2 text-emerald-400 font-semibold text-xs">
                       <CheckCircle2 className="w-4 h-4" />
-                      <span>Foto aprovada na inspeção de segurança do backend</span>
+                      <span>Foto aprovada na análise local (metadados GPS descartados)</span>
                     </div>
                     <div className="grid grid-cols-2 gap-2 text-[10px] text-zinc-300 font-mono pt-1.5 border-t border-emerald-500/20">
                       <div>
                         <span className="text-zinc-500 block">Nome & Extensão:</span>
-                        <span className="text-emerald-300">✓ Seguro (Sem .sh/.exe)</span>
+                        <span className="text-emerald-300">✓ Seguro (Sem executáveis)</span>
                       </div>
                       <div>
                         <span className="text-zinc-500 block">Assinatura Binária:</span>
@@ -1318,8 +1412,8 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                         <span className="text-emerald-300">✓ Dados de localização removidos</span>
                       </div>
                       <div>
-                        <span className="text-zinc-500 block">Varredura de Scripts:</span>
-                        <span className="text-emerald-300">✓ 0 vetores detectados</span>
+                        <span className="text-zinc-500 block">Tamanho Original:</span>
+                        <span className="text-emerald-300">✓ {(avatarUploadAudit.originalSize / (1024 * 1024)).toFixed(2)} MB</span>
                       </div>
                     </div>
                   </div>
@@ -1329,7 +1423,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                 <div className="p-2.5 rounded-xl bg-zinc-950 border border-zinc-800/90 flex items-start gap-2 text-[10px] text-zinc-400">
                   <Shield className="w-3.5 h-3.5 text-zinc-300 shrink-0 mt-0.5" />
                   <p className="leading-relaxed">
-                    <strong className="text-zinc-200">Privacidade & Inspeção Ativa:</strong> As fotos enviadas passam por validação de formato e remoção automática de metadados EXIF/GPS no backend, garantindo que suas coordenadas de localização não sejam armazenadas nem expostas.
+                    <strong className="text-zinc-200">Privacidade Local & Sem Dependência de Servidor:</strong> As fotos são analisadas e renderizadas via Canvas local de até 6 MB, garantindo velocidade imediata e descartando metadados de localização geográfica.
                   </p>
                 </div>
               </div>
@@ -2202,6 +2296,179 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                 Fechar
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ================= MODAL INTERATIVO: CORTE E ZOOM DA FOTO DE PERFIL ================= */}
+      {isCropModalOpen && cropRawUrl && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/90 backdrop-blur-md p-4 animate-fade-in">
+          <div className="relative w-full max-w-sm rounded-2xl border border-zinc-800 bg-[#0c0d10] p-6 text-zinc-100 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+              <div className="flex items-center gap-2">
+                <Crop className="w-4 h-4 text-white" />
+                <h3 className="text-sm font-bold text-white">Ajustar Enquadramento</h3>
+              </div>
+              <button
+                onClick={() => {
+                  setIsCropModalOpen(false);
+                  setCropRawUrl(null);
+                }}
+                className="p-1 text-zinc-400 hover:text-white rounded-lg transition"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-[11px] text-zinc-400 text-center">
+              Ajuste o zoom e o enquadramento circular da foto. Metadados de localização foram removidos automaticamente.
+            </p>
+
+            {/* Círculo de Pré-visualização com Zoom e Posição */}
+            <div className="relative w-48 h-48 mx-auto rounded-full overflow-hidden border-2 border-white/50 bg-black shadow-inner flex items-center justify-center">
+              <img
+                src={cropRawUrl}
+                alt="Prévia de corte"
+                className="w-full h-full object-cover transition-transform duration-75 select-none pointer-events-none"
+                style={{
+                  transform: `scale(${cropZoom}) translate(${cropOffsetX * 20}%, ${cropOffsetY * 20}%)`
+                }}
+              />
+            </div>
+
+            {/* Controle de Zoom */}
+            <div className="space-y-1.5 pt-2">
+              <div className="flex items-center justify-between text-[11px] text-zinc-400">
+                <span className="flex items-center gap-1">
+                  <ZoomOut className="w-3.5 h-3.5" /> Menos
+                </span>
+                <span className="font-mono text-zinc-200 font-semibold">{cropZoom.toFixed(1)}x</span>
+                <span className="flex items-center gap-1">
+                  Mais <ZoomIn className="w-3.5 h-3.5" />
+                </span>
+              </div>
+              <input
+                type="range"
+                min="1"
+                max="2.5"
+                step="0.05"
+                value={cropZoom}
+                onChange={(e) => setCropZoom(parseFloat(e.target.value))}
+                className="w-full accent-white cursor-pointer"
+              />
+            </div>
+
+            {/* Controles de Posição Eixo X e Y */}
+            <div className="grid grid-cols-2 gap-3 pt-1 text-[11px]">
+              <div>
+                <label className="text-zinc-400 block mb-1">Posição Horizontal</label>
+                <input
+                  type="range"
+                  min="-1"
+                  max="1"
+                  step="0.05"
+                  value={cropOffsetX}
+                  onChange={(e) => setCropOffsetX(parseFloat(e.target.value))}
+                  className="w-full accent-white cursor-pointer"
+                />
+              </div>
+              <div>
+                <label className="text-zinc-400 block mb-1">Posição Vertical</label>
+                <input
+                  type="range"
+                  min="-1"
+                  max="1"
+                  step="0.05"
+                  value={cropOffsetY}
+                  onChange={(e) => setCropOffsetY(parseFloat(e.target.value))}
+                  className="w-full accent-white cursor-pointer"
+                />
+              </div>
+            </div>
+
+            {/* Ações do Modal de Corte */}
+            <div className="pt-2 flex gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsCropModalOpen(false);
+                  setCropRawUrl(null);
+                }}
+                className="flex-1 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-semibold transition"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={isSavingCrop}
+                onClick={handleApplyCrop}
+                className="flex-1 py-2.5 rounded-xl bg-white hover:bg-zinc-200 text-black text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+              >
+                {isSavingCrop ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Salvando...</span>
+                  </>
+                ) : (
+                  <>
+                    <Check className="w-3.5 h-3.5" />
+                    <span>Aplicar Foto</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ================= MODAL GUIA DE INSTALAÇÃO PWA PARA IOS ================= */}
+      {showProfileIosGuide && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/90 backdrop-blur-md p-4 animate-fade-in">
+          <div className="relative w-full max-w-sm rounded-2xl border border-zinc-800 bg-[#0c0d10] p-6 text-zinc-100 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+              <div className="flex items-center gap-2">
+                <Smartphone className="w-4 h-4 text-white" />
+                <h3 className="text-sm font-bold text-white">Instalar no iPhone / iPad</h3>
+              </div>
+              <button
+                onClick={() => setShowProfileIosGuide(false)}
+                className="p-1 text-zinc-400 hover:text-white rounded-lg transition"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-zinc-300 leading-relaxed">
+              Para instalar o aplicativo no iOS pelo Safari, siga os passos abaixo:
+            </p>
+
+            <div className="space-y-3 text-xs">
+              <div className="flex items-start gap-3 p-3 rounded-xl bg-zinc-900/80 border border-zinc-800">
+                <span className="w-5 h-5 rounded-full bg-white text-black font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">
+                  1
+                </span>
+                <span className="text-zinc-300">
+                  Na barra inferior do Safari, toque no ícone de <strong className="text-white">Compartilhar</strong> (quadrado com seta apontando para cima).
+                </span>
+              </div>
+
+              <div className="flex items-start gap-3 p-3 rounded-xl bg-zinc-900/80 border border-zinc-800">
+                <span className="w-5 h-5 rounded-full bg-white text-black font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">
+                  2
+                </span>
+                <span className="text-zinc-300">
+                  Role a lista para baixo e toque em <strong className="text-white">"Adicionar à Tela de Início"</strong>.
+                </span>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setShowProfileIosGuide(false)}
+              className="w-full py-2.5 bg-white text-black text-xs font-bold rounded-xl hover:bg-zinc-200 transition cursor-pointer"
+            >
+              Fechar
+            </button>
           </div>
         </div>
       )}

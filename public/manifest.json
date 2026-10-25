@@ -1,0 +1,32 @@
+{
+  "id": "/",
+  "name": "FatosBR — Notícias & Contexto",
+  "short_name": "FatosBR",
+  "description": "Acompanhe temas, pessoas e empresas com menos ruído e mais contexto.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#08090b",
+  "theme_color": "#08090b",
+  "icons": [
+    {
+      "src": "/logo-fatosbr.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/assets/aistudio/file_00000000f254820eb392affea4aaa51a_376a3222.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/assets/aistudio/file_00000000f254820eb392affea4aaa51a_376a3222.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

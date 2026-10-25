@@ -31,9 +31,13 @@ import {
   Film,
   Leaf,
   GraduationCap,
-  X
+  X,
+  Download,
+  Smartphone,
+  Users
 } from 'lucide-react';
 import { Entity, Topic, Source } from '../types/sinal';
+import { usePWAInstall } from '../hooks/usePWAInstall';
 
 interface OnboardingFlowProps {
   onComplete: () => void;
@@ -51,6 +55,8 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
   sources = []
 }) => {
   const [step, setStep] = useState<number>(1);
+  const pwa = usePWAInstall();
+  const [showIosGuide, setShowIosGuide] = useState<boolean>(false);
 
   // Tela 2: Temas selecionados
   const ALL_THEMES = useMemo(
@@ -210,9 +216,9 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
         }}
       />
 
-      {/* Top Bar Fixa com Indicador e Botão Voltar */}
-      <div className="relative z-20 w-full max-w-lg lg:max-w-xl mx-auto px-5 pt-4 pb-2 flex items-center justify-between">
-        {step > 1 ? (
+      {/* Top Bar Fixa com Indicador e Botão Voltar (Visível nas etapas 2 a 6) */}
+      {step > 1 && step < 7 && (
+        <div className="relative z-20 w-full max-w-lg lg:max-w-xl mx-auto px-5 pt-4 pb-2 flex items-center justify-between">
           <button
             onClick={prevStep}
             className="p-2 -ml-2 text-zinc-400 hover:text-white rounded-xl transition cursor-pointer flex items-center gap-1.5 text-xs font-medium"
@@ -221,63 +227,120 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
             <ChevronLeft className="w-5 h-5" />
             <span className="hidden sm:inline">Voltar</span>
           </button>
-        ) : (
-          <div className="w-8" />
-        )}
 
-        {/* Logo Central Minimalista */}
-        <div className="flex items-center gap-2">
-          <div className="w-6 h-6 rounded-md bg-zinc-900 border border-zinc-800 flex items-center justify-center">
-            <svg
-              className="w-3.5 h-3.5 text-white"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <polyline points="2 12 6 12 9 3 13 21 16 12 22 12" />
-            </svg>
+          {/* Logo Central Minimalista */}
+          <div className="flex items-center gap-2">
+            <div className="w-6 h-6 rounded-md bg-zinc-900 border border-zinc-800 flex items-center justify-center">
+              <svg
+                className="w-3.5 h-3.5 text-white"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <polyline points="2 12 6 12 9 3 13 21 16 12 22 12" />
+              </svg>
+            </div>
+            <span className="font-bold text-xs tracking-tight text-white">FatosBR</span>
           </div>
-          <span className="font-bold text-xs tracking-tight text-white">FatosBR</span>
-        </div>
 
-        {/* Indicador de Etapa Numérica */}
-        <div className="font-mono text-xs text-zinc-400 font-semibold px-2.5 py-1 rounded-full bg-zinc-900 border border-zinc-800">
-          {step}/7
+          {/* Indicador de Etapa Numérica */}
+          <div className="font-mono text-xs text-zinc-400 font-semibold px-2.5 py-1 rounded-full bg-zinc-900 border border-zinc-800">
+            {step}/7
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Container Principal Centralizado (Otimizado para Mobile e PC) */}
-      <main className="relative z-10 w-full max-w-lg lg:max-w-xl mx-auto flex-1 flex flex-col justify-between px-4 sm:px-6 py-2 sm:py-4">
+      <main className="relative z-10 w-full max-w-lg lg:max-w-xl mx-auto flex-1 flex flex-col justify-between px-4 sm:px-6 py-2 sm:py-3">
+        {/* Banner Deslizante Discreto de Instalação do PWA FatosBR */}
+        {!pwa.isInstalled && !pwa.isDismissed && (
+          <div className="w-full mb-3 px-3.5 py-2.5 rounded-2xl bg-[#12141a]/95 border border-zinc-800 backdrop-blur-md flex items-center justify-between gap-3 shadow-xl animate-fadeIn">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-8 h-8 rounded-xl bg-white/10 flex items-center justify-center shrink-0 border border-white/10 text-white">
+                <Smartphone className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-xs font-semibold text-white truncate">Instalar FatosBR</div>
+                <div className="text-[11px] text-zinc-400 truncate">App direto no celular ou PC</div>
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  if (pwa.isIOS) {
+                    setShowIosGuide(true);
+                  } else {
+                    pwa.install();
+                  }
+                }}
+                className="px-3 py-1.5 bg-white text-black text-xs font-bold rounded-lg hover:bg-zinc-200 transition cursor-pointer"
+              >
+                Instalar
+              </button>
+              <button
+                type="button"
+                onClick={pwa.dismiss}
+                className="p-1.5 text-zinc-400 hover:text-white rounded-lg transition cursor-pointer"
+                title="Dispensar"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* ========================================================================= */}
-        {/* ETAPA 1: HERO BOAS-VINDAS COM IMAGEM DO GLOBO */}
+        {/* ETAPA 1: HERO BOAS-VINDAS CONFORME MOCKUP 2 */}
         {/* ========================================================================= */}
         {step === 1 && (
-          <div className="flex-1 flex flex-col justify-between animate-fadeIn py-2 sm:py-4">
-            {/* Imagem de Alta Resolução do Globo Terrestre */}
-            <div className="relative w-full aspect-[4/3] sm:aspect-[16/10] rounded-3xl overflow-hidden border border-zinc-800/80 shadow-2xl bg-black">
-              <img
-                src="/assets/aistudio/file_00000000d9dc820eb1300938edc857d3_8a6e1430.png"
-                alt="FatosBR - Observatório Global de Notícias"
-                className="w-full h-full object-cover object-center scale-[1.03] transition duration-700 hover:scale-105"
-              />
-              <div className="absolute inset-0 bg-gradient-to-t from-black via-black/30 to-transparent" />
+          <div className="flex-1 flex flex-col justify-between animate-fadeIn py-1 sm:py-2 min-h-[calc(100vh-80px)]">
+            {/* Top: Logo Oficial Centralizado "FatosBR" */}
+            <div className="flex items-center justify-center gap-2 pt-2 sm:pt-4">
+              <div className="w-7 h-7 rounded-lg bg-zinc-900 border border-zinc-800 flex items-center justify-center shadow-sm">
+                <svg
+                  className="w-4 h-4 text-white"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <polyline points="2 12 6 12 9 3 13 21 16 12 22 12" />
+                </svg>
+              </div>
+              <span className="font-bold text-base tracking-tight text-white">FatosBR</span>
             </div>
 
-            {/* Texto de Apresentação Hero */}
-            <div className="text-center px-2 pt-6 sm:pt-8 space-y-3.5">
-              <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight leading-tight">
-                O que importa para você, sempre à frente.
+            {/* Headline e Subtítulo Alinhados à Esquerda (Mockup 2) */}
+            <div className="text-left px-1 pt-6 sm:pt-8 space-y-3">
+              <h1 className="text-3xl sm:text-4xl font-extrabold text-white tracking-tight leading-[1.18]">
+                O que importa<br />
+                para você,<br />
+                sempre à frente.
               </h1>
-              <p className="text-xs sm:text-sm text-zinc-400 max-w-md mx-auto leading-relaxed">
+              <p className="text-xs sm:text-sm text-zinc-400 leading-relaxed max-w-sm">
                 A FatosBR observa o mundo por você, reunindo os acontecimentos mais relevantes em um só lugar.
               </p>
             </div>
 
+            {/* Imagem do Globo Emergindo do Fundo Escuro */}
+            <div className="relative w-full aspect-[4/3] sm:aspect-[16/10] overflow-hidden my-auto flex items-center justify-center">
+              <img
+                src="/assets/aistudio/file_00000000d9dc820eb1300938edc857d3_8a6e1430.png"
+                alt="FatosBR - Observatório Global"
+                className="w-full h-full object-contain object-center scale-[1.04]"
+              />
+              {/* Fade superior suave fundindo no preto */}
+              <div className="absolute inset-0 bg-gradient-to-t from-transparent via-transparent to-black/85 pointer-events-none" />
+            </div>
+
             {/* Ações Inferiores Etapa 1 */}
-            <div className="pt-8 sm:pt-10 pb-6 space-y-3 text-center">
+            <div className="pt-2 pb-1 space-y-3 text-center">
               <button
                 onClick={nextStep}
                 className="w-full py-4 px-6 bg-white text-black hover:bg-zinc-200 font-bold text-sm sm:text-base rounded-full transition cursor-pointer active:scale-[0.99] shadow-lg shadow-white/5"
@@ -293,6 +356,16 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
                   Já tem uma conta? <span className="underline font-semibold text-zinc-200">Entrar</span>
                 </button>
               )}
+            </div>
+
+            {/* Indicador 1/7 e Barra de Progresso no Rodapé da Etapa 1 */}
+            <div className="pt-2 pb-1 space-y-2">
+              <div className="text-center font-mono text-[11px] text-zinc-500 font-medium">
+                1/7
+              </div>
+              <div className="w-full h-1 bg-zinc-900 rounded-full overflow-hidden border border-zinc-800/40">
+                <div className="h-full bg-white rounded-full w-[14.28%]" />
+              </div>
             </div>
           </div>
         )}
@@ -715,89 +788,182 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
         )}
 
         {/* ========================================================================= */}
-        {/* ETAPA 7: TUDO PRONTO COM SELO LUMINOSO E RESUMO */}
+        {/* ETAPA 7: TUDO PRONTO CONFORME MOCKUP 3 */}
         {/* ========================================================================= */}
         {step === 7 && (
-          <div className="flex-1 flex flex-col justify-between animate-fadeIn py-2">
+          <div className="flex-1 flex flex-col justify-between animate-fadeIn py-1 sm:py-2 min-h-[calc(100vh-80px)]">
             <div>
-              <div className="text-center pt-2 pb-4">
-                <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+              {/* Botão Voltar no Canto Superior Esquerdo (Mockup 3) */}
+              <div className="pt-1 pb-3">
+                <button
+                  type="button"
+                  onClick={prevStep}
+                  className="p-1.5 -ml-1 text-zinc-400 hover:text-white rounded-lg transition cursor-pointer"
+                  aria-label="Voltar etapa anterior"
+                >
+                  <ChevronLeft className="w-6 h-6" />
+                </button>
+              </div>
+
+              {/* Título e Subtítulo Alinhados à Esquerda (Mockup 3) */}
+              <div className="text-left space-y-2 pb-5">
+                <h1 className="text-3xl font-extrabold text-white tracking-tight">
                   Tudo pronto!
                 </h1>
-                <p className="text-xs sm:text-sm text-zinc-400 mt-1.5 max-w-sm mx-auto">
+                <p className="text-xs sm:text-sm text-zinc-400 leading-relaxed max-w-sm">
                   Agora é só explorar. Seu feed já está personalizado com base nas suas escolhas.
                 </p>
               </div>
 
-              {/* Imagem de Alta Resolução do Selo Luminoso */}
-              <div className="relative w-full aspect-[21/9] sm:aspect-[2.4/1] rounded-3xl overflow-hidden border border-zinc-800 shadow-2xl bg-black my-3 flex items-center justify-center">
-                <img
-                  src="/assets/aistudio/file_00000000f254820eb392affea4aaa51a_376a3222.png"
-                  alt="FatosBR - Conclusão e Calibragem Pronta"
-                  className="w-full h-full object-cover object-center scale-[1.02]"
-                />
-                <div className="absolute inset-0 bg-radial-gradient from-transparent via-transparent to-black/60 pointer-events-none" />
-              </div>
-
-              {/* Box com Resumo Dinâmico */}
-              <div className="mt-4 p-4 sm:p-5 rounded-2xl bg-[#0e1015] border border-zinc-800/80 space-y-3">
-                <div className="flex items-center justify-between text-xs sm:text-sm border-b border-zinc-800/60 pb-2.5">
-                  <div className="flex items-center gap-2.5 text-zinc-400">
-                    <Sliders className="w-4 h-4 text-zinc-400" />
-                    <span>Temas selecionados</span>
-                  </div>
-                  <span className="font-bold font-mono text-zinc-200">+{selectedThemes.size}</span>
+              {/* Card Único Unificado com Selo Luminoso e Lista de Resumo (Mockup 3) */}
+              <div className="w-full rounded-3xl bg-[#0c0d11] border border-zinc-800/80 overflow-hidden shadow-2xl">
+                {/* Metade Superior: Selo Luminoso com Checkmark */}
+                <div className="relative w-full aspect-[2.2/1] sm:aspect-[2.5/1] bg-black flex items-center justify-center overflow-hidden border-b border-zinc-800/40">
+                  <img
+                    src="/assets/aistudio/file_00000000f254820eb392affea4aaa51a_376a3222.png"
+                    alt="FatosBR - Conclusão e Calibragem"
+                    className="w-full h-full object-cover object-center scale-[1.02]"
+                  />
+                  <div className="absolute inset-0 bg-radial-gradient from-transparent via-transparent to-black/40 pointer-events-none" />
                 </div>
 
-                <div className="flex items-center justify-between text-xs sm:text-sm border-b border-zinc-800/60 pb-2.5">
-                  <div className="flex items-center gap-2.5 text-zinc-400">
-                    <Layers className="w-4 h-4 text-zinc-400" />
-                    <span>Pessoas e empresas</span>
+                {/* Metade Inferior: 4 Linhas com Ícones Circulares */}
+                <div className="p-4 sm:p-5 space-y-3.5">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-400 shrink-0">
+                        <Sliders className="w-4 h-4" />
+                      </div>
+                      <span className="text-xs sm:text-sm text-zinc-200 font-medium">Temas selecionados</span>
+                    </div>
+                    <span className="font-mono text-xs sm:text-sm font-semibold text-zinc-300">
+                      +{selectedThemes.size || 5}
+                    </span>
                   </div>
-                  <span className="font-bold font-mono text-zinc-200">+{followedEntities.size}</span>
-                </div>
 
-                <div className="flex items-center justify-between text-xs sm:text-sm border-b border-zinc-800/60 pb-2.5">
-                  <div className="flex items-center gap-2.5 text-zinc-400">
-                    <Bell className="w-4 h-4 text-zinc-400" />
-                    <span>Notificações ativas</span>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-400 shrink-0">
+                        <Users className="w-4 h-4" />
+                      </div>
+                      <span className="text-xs sm:text-sm text-zinc-200 font-medium">Pessoas e empresas</span>
+                    </div>
+                    <span className="font-mono text-xs sm:text-sm font-semibold text-zinc-300">
+                      +{followedEntities.size || 3}
+                    </span>
                   </div>
-                  <span className="font-bold font-mono text-zinc-200">+{notificationsPreferences.size}</span>
-                </div>
 
-                <div className="flex items-center justify-between text-xs sm:text-sm">
-                  <div className="flex items-center gap-2.5 text-zinc-400">
-                    <MapPin className="w-4 h-4 text-zinc-400" />
-                    <span>Localização definida</span>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-400 shrink-0">
+                        <Bell className="w-4 h-4" />
+                      </div>
+                      <span className="text-xs sm:text-sm text-zinc-200 font-medium">Notificações ativas</span>
+                    </div>
+                    <span className="font-mono text-xs sm:text-sm font-semibold text-zinc-300">
+                      +{notificationsPreferences.size || 2}
+                    </span>
                   </div>
-                  <span className="font-semibold text-zinc-200">{userLocation || 'Brasil'}</span>
+
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-400 shrink-0">
+                        <MapPin className="w-4 h-4" />
+                      </div>
+                      <span className="text-xs sm:text-sm text-zinc-200 font-medium">Localização definida</span>
+                    </div>
+                    <span className="text-xs sm:text-sm font-medium text-zinc-300">
+                      {userLocation || 'São Paulo, SP'}
+                    </span>
+                  </div>
                 </div>
               </div>
             </div>
 
-            {/* Ações Inferiores Etapa 7 */}
-            <div className="pt-6 pb-4">
+            {/* Ações Inferiores Etapa 7: Botão + Indicador 7/7 + Barra 100% */}
+            <div className="pt-4 pb-1 space-y-3 text-center">
               <button
                 onClick={onComplete}
-                className="w-full py-4 px-6 bg-white text-black hover:bg-zinc-200 font-bold text-sm sm:text-base rounded-full transition cursor-pointer active:scale-[0.99] shadow-lg shadow-white/5 flex items-center justify-center gap-2"
+                className="w-full py-4 px-6 bg-white text-black hover:bg-zinc-200 font-bold text-sm sm:text-base rounded-full transition cursor-pointer active:scale-[0.99] shadow-lg shadow-white/5"
               >
-                <span>Acessar a FatosBR</span>
-                <ArrowRight className="w-4 h-4" />
+                Acessar o FatosBR
               </button>
+
+              <div className="pt-2 space-y-2">
+                <div className="text-center font-mono text-[11px] text-zinc-500 font-medium">
+                  7/7
+                </div>
+                <div className="w-full h-1 bg-zinc-900 rounded-full overflow-hidden border border-zinc-800/40">
+                  <div className="h-full bg-white rounded-full w-full" />
+                </div>
+              </div>
             </div>
           </div>
         )}
       </main>
 
-      {/* Barra de Progresso Global no Rodapé */}
-      <footer className="relative z-20 w-full max-w-lg lg:max-w-xl mx-auto px-5 pb-5 pt-1">
-        <div className="w-full h-1 bg-zinc-900 rounded-full overflow-hidden border border-zinc-800/50">
-          <div
-            className="h-full bg-white transition-all duration-300 ease-out rounded-full"
-            style={{ width: `${progressPercent}%` }}
-          />
+      {/* Barra de Progresso Global no Rodapé (Exclusivo para Etapas Intermediárias 2 a 6) */}
+      {step > 1 && step < 7 && (
+        <footer className="relative z-20 w-full max-w-lg lg:max-w-xl mx-auto px-5 pb-5 pt-1">
+          <div className="w-full h-1 bg-zinc-900 rounded-full overflow-hidden border border-zinc-800/50">
+            <div
+              className="h-full bg-white transition-all duration-300 ease-out rounded-full"
+              style={{ width: `${progressPercent}%` }}
+            />
+          </div>
+        </footer>
+      )}
+
+      {/* Modal Guia de Instalação para iOS Safari */}
+      {showIosGuide && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-sm p-4 animate-fadeIn">
+          <div className="relative w-full max-w-sm rounded-2xl border border-zinc-800 bg-[#0e1015] p-6 text-zinc-100 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+              <div className="flex items-center gap-2">
+                <Smartphone className="w-5 h-5 text-white" />
+                <h3 className="text-sm font-bold text-white">Instalar no iPhone / iPad</h3>
+              </div>
+              <button
+                onClick={() => setShowIosGuide(false)}
+                className="p-1 text-zinc-400 hover:text-white rounded-lg transition"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-zinc-300 leading-relaxed">
+              O Safari do iOS não exibe botão de instalação automática. Siga os 2 passos rápidos:
+            </p>
+
+            <div className="space-y-3 text-xs">
+              <div className="flex items-start gap-3 p-3 rounded-xl bg-zinc-900/80 border border-zinc-800">
+                <span className="w-5 h-5 rounded-full bg-white text-black font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">
+                  1
+                </span>
+                <span className="text-zinc-300">
+                  Toque no botão <strong className="text-white">Compartilhar</strong> (ícone de quadrado com seta para cima na barra inferior do Safari).
+                </span>
+              </div>
+
+              <div className="flex items-start gap-3 p-3 rounded-xl bg-zinc-900/80 border border-zinc-800">
+                <span className="w-5 h-5 rounded-full bg-white text-black font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">
+                  2
+                </span>
+                <span className="text-zinc-300">
+                  Role para baixo e selecione <strong className="text-white">"Adicionar à Tela de Início"</strong>.
+                </span>
+              </div>
+            </div>
+
+            <button
+              onClick={() => setShowIosGuide(false)}
+              className="w-full py-2.5 bg-white text-black text-xs font-bold rounded-xl hover:bg-zinc-200 transition cursor-pointer"
+            >
+              Entendi
+            </button>
+          </div>
         </div>
-      </footer>
+      )}
     </div>
   );
 };

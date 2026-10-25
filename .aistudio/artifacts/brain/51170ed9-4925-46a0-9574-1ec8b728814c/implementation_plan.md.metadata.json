@@ -1,6 +1,6 @@
 {
-  "summary":  "Plano de implementação para corrigir a sincronização e contagem de novos usuários autenticados (Google e e-mail) no Painel Admin, incluindo upsert automático de perfis, superação do bloqueio de RLS e tabela analítica detalhada com filtros.",
-  "updatedAt":  "2026-10-25T02:08:47.411185874Z",
+  "summary":  "Plano detalhado para redesenho das telas 1 e 7 do Onboarding de acordo com os mockups do Figma, banner flutuante PWA no Onboarding e botão permanente no Perfil, e script local de validação e recorte de foto de perfil até 6MB.",
+  "updatedAt":  "2026-10-25T17:01:35.158416727Z",
   "requestFeedback":  true,
   "userFacing":  true
 }
