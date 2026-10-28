@@ -106,5 +106,18 @@ export const rateLimitService = {
     } catch {
       return null;
     }
+  },
+
+  /**
+   * Limpa cache de notícias e reseta timestamps para permitir recarga forçada imediata
+   */
+  clearCache(): void {
+    if (typeof window === 'undefined') return;
+    try {
+      localStorage.removeItem(STORAGE_KEY_FEED_CACHE);
+      localStorage.removeItem(STORAGE_KEY_FEED_TIMESTAMP);
+    } catch (e) {
+      console.warn('Erro ao limpar cache local de feed:', e);
+    }
   }
 };

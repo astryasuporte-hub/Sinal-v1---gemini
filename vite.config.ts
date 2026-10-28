@@ -6,6 +6,7 @@ import { defineConfig, Plugin } from 'vite';
 import { renderEmailTemplate, buildEditorialBriefingHtml } from './src/server/templateEngine';
 import { instagramEngine } from './src/server/instagramEngine';
 import { verifyAndSanitizeAvatarUpload } from './src/server/avatarSecurityService';
+import { saveCompanyLogoUpload } from './src/server/companyLogoService';
 
 dotenv.config();
 
@@ -1170,9 +1171,15 @@ function apiProxyPlugin(): Plugin {
                   return;
                 }
 
+                const rawData = String(parsedBody.dataUrl || parsedBody.base64 || '').trim();
+                const dataUrl = rawData.startsWith('data:')
+                  ? rawData
+                  : `data:${parsedBody.mimeType || 'image/jpeg'};base64,${rawData}`;
+                const fileName = String(parsedBody.fileName || 'avatar.jpg').trim();
+
                 const result = await verifyAndSanitizeAvatarUpload({
-                  fileName: parsedBody.fileName || '',
-                  dataUrl: parsedBody.dataUrl || ''
+                  fileName,
+                  dataUrl
                 });
 
                 res.setHeader('Content-Type', 'application/json');
@@ -1184,6 +1191,78 @@ function apiProxyPlugin(): Plugin {
               res.setHeader('Content-Type', 'application/json');
               res.statusCode = 405;
               res.end(JSON.stringify({ error: 'Método não permitido. Utilize POST.' }));
+              return;
+            }
+
+            // ================= 11. COMPANY LOGO UPLOAD & TRANSPARENCY VALIDATION =================
+            if (req.url === '/api/admin/company-logo' || req.url?.startsWith('/api/admin/company-logo')) {
+              const urlObj = new URL(req.url, 'http://localhost:3000');
+              
+              if (req.method === 'POST') {
+                const buffers: any[] = [];
+                for await (const chunk of req) {
+                  buffers.push(chunk);
+                }
+                const bodyStr = Buffer.concat(buffers).toString();
+                let parsedBody: any = {};
+                try {
+                  parsedBody = JSON.parse(bodyStr);
+                } catch {
+                  res.setHeader('Content-Type', 'application/json');
+                  res.statusCode = 400;
+                  res.end(JSON.stringify({ success: false, error: 'Payload JSON malformatado.' }));
+                  return;
+                }
+
+                const entityId = String(parsedBody.entityId || '').trim();
+                const rawBase64 = String(parsedBody.base64 || parsedBody.dataUrl || '').trim();
+                const fileName = String(parsedBody.fileName || `${entityId || 'company'}.png`).trim();
+
+                if (!entityId || !rawBase64) {
+                  res.setHeader('Content-Type', 'application/json');
+                  res.statusCode = 400;
+                  res.end(JSON.stringify({
+                    success: false,
+                    error: 'ID da empresa (entityId) e dados binários em Base64 são obrigatórios.'
+                  }));
+                  return;
+                }
+
+                const result = await saveCompanyLogoUpload(entityId, rawBase64, fileName);
+
+                res.setHeader('Content-Type', 'application/json');
+                res.statusCode = result.valid ? 200 : 422;
+                res.end(
+                  JSON.stringify({
+                    success: result.valid,
+                    logoUrl: result.storageUrl || result.cleanDataUrl,
+                    details: result,
+                    error: result.error
+                  })
+                );
+                return;
+              }
+
+              if (req.method === 'DELETE') {
+                const entityId = urlObj.searchParams.get('entityId') || urlObj.searchParams.get('id');
+                if (entityId) {
+                  try {
+                    const filePath = path.resolve(process.cwd(), 'public', 'logos', `${entityId.toLowerCase()}.png`);
+                    if (fs.existsSync(filePath)) {
+                      fs.unlinkSync(filePath);
+                    }
+                  } catch {}
+                }
+
+                res.setHeader('Content-Type', 'application/json');
+                res.statusCode = 200;
+                res.end(JSON.stringify({ success: true, message: 'Logotipo removido com sucesso.' }));
+                return;
+              }
+
+              res.setHeader('Content-Type', 'application/json');
+              res.statusCode = 405;
+              res.end(JSON.stringify({ error: 'Método não permitido. Utilize POST ou DELETE.' }));
               return;
             }
 

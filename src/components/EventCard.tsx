@@ -194,6 +194,7 @@ export const EventCard: React.FC<EventCardProps> = ({
                   name={primaryEntity.name}
                   brandColor={primaryEntity.brandColor}
                   type={primaryEntity.type}
+                  logoUrl={primaryEntity.logoUrl}
                   size="sm"
                 />
                 <span className="text-xs font-semibold text-zinc-300 hover:text-white truncate max-w-[110px] sm:max-w-[160px]">

@@ -172,6 +172,8 @@ export const eventService = {
         description: e.description || '',
         sector: e.sector,
         website: e.website,
+        avatarUrl: e.avatar_url,
+        logoUrl: e.logo_url || (typeof window !== 'undefined' ? localStorage.getItem(`fatosbr_company_logo_${e.id}`) || undefined : undefined),
         isFollowed: false,
         brandColor: e.brand_color || '#10b981',
       }));

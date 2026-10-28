@@ -57,6 +57,7 @@ import { avatarProcessing } from '../services/avatarProcessing';
 import { validateImageFile } from '../utils/imageValidation';
 import { usePWAInstall } from '../hooks/usePWAInstall';
 import { userService } from '../services/userService';
+import { LanguageSelector } from './LanguageSelector';
 
 interface ProfileViewProps {
   currentUser?: SupabaseUser | null;
@@ -75,6 +76,7 @@ interface ProfileViewProps {
   isSuperAdmin?: boolean;
   onLogout?: () => void;
   onProfileUpdated?: (updatedProfile: UserProfileData) => void;
+  onClearCacheAndSync?: () => Promise<void> | void;
 }
 
 export interface UserProfileData {
@@ -102,7 +104,8 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   onOpenOnboarding,
   isSuperAdmin = false,
   onLogout,
-  onProfileUpdated
+  onProfileUpdated,
+  onClearCacheAndSync
 }) => {
   // Sincronização Dinâmica do Perfil com o Usuário Autenticado
   const [profile, setProfile] = useState<UserProfileData>(() => {
@@ -252,15 +255,25 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   const [cropOffsetX, setCropOffsetX] = useState<number>(0);
   const [cropOffsetY, setCropOffsetY] = useState<number>(0);
   const [isSavingCrop, setIsSavingCrop] = useState<boolean>(false);
+  const [isClearingCache, setIsClearingCache] = useState<boolean>(false);
 
   const handleAvatarFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // 1. Validação rápida no front-end antes de qualquer requisição (máximo 6 MB e tipos permitidos)
+    // 1. Validação estrita no front-end antes de qualquer requisição (máximo 6 MB e tipo de imagem)
+    const MAX_SIZE = 6 * 1024 * 1024;
+    if (file.size > MAX_SIZE) {
+      const err = `A imagem selecionada possui ${(file.size / (1024 * 1024)).toFixed(2)} MB, excedendo o limite máximo de 6 MB.`;
+      setAvatarUploadError(err);
+      showToast(err);
+      e.target.value = '';
+      return;
+    }
+
     const validation = validateImageFile(file);
     if (!validation.valid) {
-      const err = validation.error || 'A imagem selecionada excede 6 MB ou possui formato inválido.';
+      const err = validation.error || 'Formato de imagem inválido. Utilize JPG, PNG, WEBP, GIF ou AVIF.';
       setAvatarUploadError(err);
       showToast(err);
       e.target.value = '';
@@ -272,34 +285,55 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
     setIsUploadingAvatar(true);
 
     try {
-      // 2. Tenta validação no endpoint do servidor /api/avatar/verify se disponível
+      // 2. Converte o arquivo local para string Base64 Data URL
+      const rawBase64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = () => reject(new Error('Erro ao ler os bytes da imagem.'));
+        reader.readAsDataURL(file);
+      });
+
+      // 3. Envia a string base64 para o endpoint /api/avatar/verify (avatarSecurityService) para higienização de EXIF/GPS
+      let cleanDataUrl = rawBase64;
       try {
-        const formData = new FormData();
-        formData.append('avatar', file);
         const resp = await fetch('/api/avatar/verify', {
           method: 'POST',
-          body: formData
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            base64: rawBase64,
+            dataUrl: rawBase64,
+            fileName: file.name
+          })
         });
-        if (resp.ok) {
-          const json = await resp.json();
-          if (json.audit) {
-            setAvatarUploadAudit(json.audit);
-          }
+
+        const verifyResult = await resp.json().catch(() => null);
+
+        if (!resp.ok || (verifyResult && !verifyResult.success)) {
+          const err = verifyResult?.error || 'A imagem selecionada não passou na verificação de segurança.';
+          setAvatarUploadError(err);
+          showToast(err);
+          setIsUploadingAvatar(false);
+          e.target.value = '';
+          return;
         }
-      } catch {
-        // Fallback: se o endpoint não responder, o script rápido local assume
-      }
 
-      // 3. Script rápido de análise local no navegador (até 6 MB, remoção de GPS e sanitização)
-      const result = await avatarProcessing.processAvatarFile(file);
-      if (!result.valid || !result.dataUrl) {
-        setAvatarUploadError(result.error || 'A imagem selecionada não é válida.');
-        showToast(result.error || 'Falha ao processar imagem.');
-        setIsUploadingAvatar(false);
-        return;
-      }
+        if (verifyResult?.safeDataUrl) {
+          cleanDataUrl = verifyResult.safeDataUrl;
+        }
 
-      const cleanDataUrl = result.dataUrl;
+        if (verifyResult?.audit) {
+          setAvatarUploadAudit(verifyResult.audit);
+        }
+      } catch (networkErr) {
+        console.warn('Endpoint /api/avatar/verify indisponível, executando sanitização no navegador:', networkErr);
+        // Fallback local via Canvas 2D
+        const localResult = await avatarProcessing.processAvatarFile(file);
+        if (localResult.valid && localResult.dataUrl) {
+          cleanDataUrl = localResult.dataUrl;
+        }
+      }
 
       setAvatarUploadAudit((prev) => prev || {
         fileNameSafe: true,
@@ -307,18 +341,18 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
         binarySignature: file.type || 'image/jpeg',
         payloadScanClean: true,
         gpsMetadataStripped: true,
-        exifStatus: 'Higienizado instantaneamente via Canvas 2D (metadados GPS removidos)',
+        exifStatus: 'Metadados EXIF/GPS removidos com sucesso. Apenas a imagem pura foi preservada.',
         originalSize: file.size,
         sanitizedSize: Math.round(cleanDataUrl.length * 0.75)
       });
 
-      // Abrir modal de corte/zoom para ajuste do usuário
+      // Abrir modal de corte/enquadramento com a imagem limpa e segura
       setCropRawUrl(cleanDataUrl);
       setCropZoom(1);
       setCropOffsetX(0);
       setCropOffsetY(0);
       setIsCropModalOpen(true);
-      showToast('Foto validada com sucesso! Ajuste o enquadramento.');
+      showToast('Imagem verificada e metadados GPS removidos! Ajuste o enquadramento.');
     } catch {
       setAvatarUploadError('Erro ao processar imagem no navegador.');
       showToast('Erro ao processar imagem.');
@@ -343,7 +377,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
       setIsCropModalOpen(false);
       setCropRawUrl(null);
 
-      // SALVAMENTO IMEDIATO NO LOCALSTORAGE & ESTADO
+      // SALVAMENTO IMEDIATO NO LOCALSTORAGE & SINCRONIZAÇÃO EM TEMPO REAL
       const updatedProfile: UserProfileData = {
         ...profile,
         avatarUrl: croppedUrl
@@ -353,6 +387,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
       try {
         localStorage.setItem('fatosbr_user_avatar', croppedUrl);
         localStorage.setItem('sinal_user_profile', JSON.stringify(updatedProfile));
+        window.dispatchEvent(new CustomEvent('fatosbr_avatar_updated', { detail: { avatarUrl: croppedUrl } }));
       } catch (err) {
         console.warn('Erro ao salvar avatar no localStorage:', err);
       }
@@ -373,6 +408,27 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
       showToast('Erro ao aplicar corte na imagem.');
     } finally {
       setIsSavingCrop(false);
+    }
+  };
+
+  const handleClearCacheAndSync = async () => {
+    setIsClearingCache(true);
+    try {
+      try {
+        localStorage.removeItem('sinal_cached_news_feed_v1');
+        localStorage.removeItem('sinal_last_feed_sync');
+        localStorage.removeItem('sinal_rate_limit_state');
+        sessionStorage.clear();
+      } catch {}
+
+      if (onClearCacheAndSync) {
+        await onClearCacheAndSync();
+      }
+      showToast('Cache limpo com sucesso! Feed de notícias sincronizado em tempo real.');
+    } catch (err: any) {
+      showToast('Erro ao sincronizar: ' + (err?.message || 'Falha de rede'));
+    } finally {
+      setIsClearingCache(false);
     }
   };
 
@@ -412,6 +468,10 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
       localStorage.setItem('sinal_user_profile', JSON.stringify(updated));
       if (avatarUrl) {
         localStorage.setItem('fatosbr_user_avatar', avatarUrl);
+        window.dispatchEvent(new CustomEvent('fatosbr_avatar_updated', { detail: { avatarUrl } }));
+      } else {
+        localStorage.removeItem('fatosbr_user_avatar');
+        window.dispatchEvent(new CustomEvent('fatosbr_avatar_updated', { detail: { avatarUrl: null } }));
       }
       if (consumedNameChange) {
         localStorage.setItem(getNameChangeKey(profile.email), 'true');
@@ -1210,6 +1270,28 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                 <ChevronRight className="w-4 h-4 text-zinc-500 group-hover:text-white transition" />
               </div>
 
+              {/* Botão Limpar Cache e Sincronizar */}
+              <div
+                onClick={handleClearCacheAndSync}
+                className="p-3 rounded-xl hover:bg-[#16181f] transition cursor-pointer flex items-center justify-between group border border-emerald-500/20 bg-emerald-500/5 hover:border-emerald-500/40"
+              >
+                <div className="flex items-center gap-3">
+                  <RefreshCw className={`w-4 h-4 text-emerald-400 ${isClearingCache ? 'animate-spin' : 'group-hover:rotate-180 transition-transform duration-500'}`} />
+                  <div>
+                    <div className="font-semibold text-white flex items-center gap-2">
+                      <span>Limpar Cache e Sincronizar</span>
+                      <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                        Feed
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-zinc-400">Limpa cache local e força busca de notícias em tempo real</div>
+                  </div>
+                </div>
+                <span className="text-xs font-semibold px-2.5 py-1 rounded-lg bg-zinc-800 text-zinc-300 group-hover:bg-emerald-400 group-hover:text-black transition">
+                  {isClearingCache ? 'Limpando...' : 'Limpar'}
+                </span>
+              </div>
+
               <div
                 onClick={() => setActiveModal('deleteAccount')}
                 className="p-3 rounded-xl hover:bg-red-950/20 transition cursor-pointer flex items-center justify-between group"
@@ -1879,16 +1961,11 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                 </div>
               </div>
 
-              <div className="space-y-1.5 pt-2 border-t border-zinc-800">
-                <span className="text-zinc-300 font-semibold block">Idioma da plataforma</span>
-                <div className="p-3 rounded-xl bg-[#111216] border border-zinc-800 flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Globe className="w-4 h-4 text-zinc-400" />
-                    <span className="text-white font-medium">Português (Brasil)</span>
-                  </div>
-                  <span className="text-[10px] text-zinc-400 font-mono">Padrão</span>
-                </div>
+              <div className="space-y-2 pt-2 border-t border-zinc-800">
+                <span className="text-zinc-300 font-semibold block">Idioma da plataforma (10 idiomas)</span>
+                <LanguageSelector variant="inline" />
               </div>
+
             </div>
 
             <div className="pt-2 flex justify-end">

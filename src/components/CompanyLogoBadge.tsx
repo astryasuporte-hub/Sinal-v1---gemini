@@ -9,6 +9,7 @@ import { Sparkles, Building2, User, Landmark, Globe, Layers, Scale } from 'lucid
 export interface CompanyLogoBadgeProps {
   name: string;
   brandColor?: string;
+  logoUrl?: string;
   type?: 'company' | 'person' | 'organization' | 'topic' | 'source' | string;
   size?: 'xs' | 'sm' | 'md' | 'lg' | 'xl';
   className?: string;
@@ -17,11 +18,13 @@ export interface CompanyLogoBadgeProps {
 export const CompanyLogoBadge: React.FC<CompanyLogoBadgeProps> = ({
   name = '',
   brandColor,
+  logoUrl,
   type = 'company',
   size = 'md',
   className = ''
 }) => {
   const norm = (name || '').trim().toLowerCase();
+  const [imageError, setImageError] = React.useState(false);
 
   const sizeClasses = {
     xs: 'w-4 h-4 text-[9px] rounded',
@@ -30,6 +33,23 @@ export const CompanyLogoBadge: React.FC<CompanyLogoBadgeProps> = ({
     lg: 'w-10 h-10 text-sm rounded-xl',
     xl: 'w-16 h-16 sm:w-20 sm:h-20 text-xl sm:text-2xl rounded-2xl'
   }[size];
+
+  // Se houver um logotipo customizado (PNG com transparência) carregado pelo Admin, exibe prioritariamente
+  if (logoUrl && !imageError) {
+    return (
+      <div
+        className={`${sizeClasses} flex items-center justify-center shrink-0 border border-white/10 bg-[#12141a]/60 backdrop-blur-sm overflow-hidden p-0.5 select-none ${className}`}
+        title={name}
+      >
+        <img
+          src={logoUrl}
+          alt={name}
+          className="w-full h-full object-contain filter drop-shadow-sm"
+          onError={() => setImageError(true)}
+        />
+      </div>
+    );
+  }
 
   // 1. Brasil / Governo Federal
   if (norm === 'brasil' || norm.includes('governo federal') || norm.includes('planalto')) {

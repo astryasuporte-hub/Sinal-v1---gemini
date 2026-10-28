@@ -46,7 +46,9 @@ import {
   TrendingUp,
   Instagram,
   Globe2,
-  Copy
+  Copy,
+  Building2,
+  Smartphone
 } from 'lucide-react';
 import { Event, Source, Topic, Entity } from '../types/sinal';
 import { newsIngestionService } from '../services/newsIngestionService';
@@ -64,6 +66,10 @@ import { MarketTrendAnalysis } from './MarketTrendAnalysis';
 import { InstagramCarouselStudio } from './InstagramCarouselStudio';
 import { ThreeGlobeScene } from './ThreeGlobeScene';
 import { ResendConfigPanel } from './ResendConfigPanel';
+import { AdminCompanyManager } from './AdminCompanyManager';
+import { AdminBriefingCustomizer } from './AdminBriefingCustomizer';
+import { AdminMobileView } from './AdminMobileView';
+import { AdminFinancialDashboard } from './AdminFinancialDashboard';
 
 export type StatusColor = 'connected' | 'error' | 'disconnected';
 
@@ -168,6 +174,7 @@ const INITIAL_SECRETS: VaultSecret[] = [
 type AdminTab =
   | 'overview'
   | 'events'
+  | 'companies'
   | 'api-health'
   | 'providers'
   | 'ai'
@@ -195,6 +202,8 @@ interface AdminPanelProps {
   onResetEvents?: () => void;
   onAddSource?: (newSource: Source) => void;
   onDeleteSource?: (sourceId: string) => void;
+  onUpdateEntityLogo?: (entityId: string, logoUrl: string | null) => void;
+  onAddEntity?: (newEntity: Entity) => void;
 }
 
 export const AdminPanel: React.FC<AdminPanelProps> = ({
@@ -209,10 +218,24 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   onClearEvents,
   onResetEvents,
   onAddSource,
-  onDeleteSource
+  onDeleteSource,
+  onUpdateEntityLogo,
+  onAddEntity
 }) => {
   const [activeAdminTab, setActiveAdminTab] = useState<AdminTab>('overview');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [isMobileViewport, setIsMobileViewport] = useState<boolean>(() => {
+    return typeof window !== 'undefined' ? window.innerWidth < 768 : false;
+  });
+  const [viewMode, setViewMode] = useState<'auto' | 'mobile' | 'desktop'>('auto');
+
+  useEffect(() => {
+    const handleResize = () => {
+      setIsMobileViewport(window.innerWidth < 768);
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
 
   // Estado de Dados do Supabase
   const [metrics, setMetrics] = useState<AdminMetrics>({
@@ -867,6 +890,7 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
     { id: 'overview', label: 'Visão geral', shortLabel: 'Geral', icon: BarChart3 },
     { id: 'trends', label: 'Tendências de Mercado', shortLabel: 'Tendências', icon: TrendingUp, badge: '30D' },
     { id: 'events', label: 'Eventos / Feed', shortLabel: 'Eventos', icon: Calendar, badge: events.length },
+    { id: 'companies', label: 'Empresas & Logotipos', shortLabel: 'Empresas', icon: Building2, badge: entities.filter((e) => e.type === 'company').length },
     { id: 'api-health', label: 'Saúde das APIs', shortLabel: 'Saúde APIs', icon: Activity, badge: 'Live' },
     { id: 'providers', label: 'Provedores & 24/7', shortLabel: 'Provedores', icon: Radio, badge: '4 APIs' },
     { id: 'ai', label: 'IA / Provedores', shortLabel: 'IA / NIM', icon: Cpu },
@@ -917,6 +941,32 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
       </span>
     );
   };
+
+  // Renderização do Painel Mobile se estiver em viewport móvel ou no modo forçado
+  if ((isMobileViewport && viewMode !== 'desktop') || viewMode === 'mobile') {
+    return (
+      <AdminMobileView
+        events={events}
+        sources={sources}
+        topics={topics}
+        entities={entities}
+        users={usersList}
+        metrics={metrics}
+        onBackToApp={onBackToApp}
+        onOpenControl={onOpenControl}
+        onShowToast={showToast}
+        onAddEvent={onAddEvent}
+        onDeleteEvent={onDeleteEvent}
+        onClearEvents={onClearEvents}
+        onResetEvents={onResetEvents}
+        onAddSource={onAddSource}
+        onDeleteSource={onDeleteSource}
+        onUpdateEntityLogo={onUpdateEntityLogo}
+        onAddEntity={onAddEntity}
+        onToggleDesktopView={() => setViewMode('desktop')}
+      />
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#07090e] text-zinc-100 flex flex-col md:flex-row antialiased">
@@ -1170,6 +1220,25 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
               >
                 <Instagram className="w-4 h-4 text-emerald-400 shrink-0" />
                 <span>FatosBR Control</span>
+              </button>
+            )}
+
+            <button
+              onClick={() => setViewMode('mobile')}
+              className="flex-1 sm:flex-none items-center justify-center gap-1.5 px-3.5 py-2.5 min-h-[44px] rounded-xl bg-[#081524] hover:bg-[#0d2238] border border-[#2378D4]/40 text-[#41C8F4] hover:text-white font-bold text-xs transition cursor-pointer shadow-sm flex"
+              title="Visualizar o Painel Mobile fiel ao mockup de 6 telas"
+            >
+              <Smartphone className="w-3.5 h-3.5 text-[#41C8F4] shrink-0" />
+              <span>Painel Mobile</span>
+            </button>
+
+            {viewMode === 'desktop' && (
+              <button
+                onClick={() => setViewMode('auto')}
+                className="text-[10px] font-mono px-2 py-1 rounded-lg bg-zinc-800 text-zinc-400 hover:text-zinc-200 border border-zinc-700"
+                title="Voltar para detecção automática de tela"
+              >
+                Auto
               </button>
             )}
 
@@ -2010,9 +2079,12 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
           </div>
         )}
 
-        {/* ================= TAB 5: ASSINATURAS & PIX (REGRA DO ADMIN & TRIAL - 7D) ================= */}
+        {/* ================= TAB 5: ASSINATURAS & PIX (DASHBOARD FINANCEIRO FATURADO / NÃO FATURADO) ================= */}
         {activeAdminTab === 'billing' && (
-          <div className="space-y-4 sm:space-y-6">
+          <div className="space-y-6">
+            {/* Dashboard Financeiro Completo: MRR, Faturado vs Não Faturado, Gráfico e Exportação CSV */}
+            <AdminFinancialDashboard users={usersList} onShowToast={showToast} />
+
             <div className="p-4 sm:p-5 rounded-2xl bg-[#0e1320] border border-[#182136] space-y-4">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-[#182136]">
                 <div>
@@ -2829,9 +2901,25 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
           </div>
         )}
 
+        {/* ================= TAB: EMPRESAS & LOGOTIPOS PNG ================= */}
+        {activeAdminTab === 'companies' && (
+          <AdminCompanyManager
+            entities={entities}
+            onUpdateEntityLogo={onUpdateEntityLogo}
+            onAddEntity={onAddEntity}
+            onShowToast={showToast}
+          />
+        )}
+
         {/* ================= TAB 8: BRIEFINGS & E-MAILS ================= */}
         {activeAdminTab === 'briefings' && (
           <div className="space-y-6">
+            {/* Customizador de Títulos e Subtítulos de Briefings com Preview e Webhooks em Tempo Real */}
+            <AdminBriefingCustomizer
+              events={events}
+              onShowToast={showToast}
+            />
+
             {/* Interface de Configuração SMTP do Resend e Testes em Tempo Real */}
             <ResendConfigPanel onShowToast={showToast} />
 

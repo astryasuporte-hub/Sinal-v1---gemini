@@ -5,9 +5,29 @@
 
 import { createClient, SupabaseClient, SupabaseClientOptions } from '@supabase/supabase-js';
 
-// Extrair e sanitizar variáveis de ambiente Vite
-const rawSupabaseUrl = (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.trim();
-const rawSupabaseAnonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined)?.trim();
+// Extrair e sanitizar variáveis de ambiente Vite ou credenciais salvas no navegador
+const getSavedUrl = (): string | undefined => {
+  try {
+    if (typeof window !== 'undefined') {
+      const stored = localStorage.getItem('fatosbr_supabase_url');
+      if (stored && stored.trim()) return stored.trim();
+    }
+  } catch {}
+  return (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.trim();
+};
+
+const getSavedAnonKey = (): string | undefined => {
+  try {
+    if (typeof window !== 'undefined') {
+      const stored = localStorage.getItem('fatosbr_supabase_anon_key');
+      if (stored && stored.trim()) return stored.trim();
+    }
+  } catch {}
+  return (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined)?.trim();
+};
+
+const rawSupabaseUrl = getSavedUrl();
+const rawSupabaseAnonKey = getSavedAnonKey();
 
 /**
  * Detecta se a execução atual está ocorrendo no ambiente do navegador (cliente).
@@ -217,12 +237,46 @@ export function getSupabaseConfigStatus() {
 }
 
 /**
- * Testa a conectividade com o banco Supabase de forma segura
+ * Salva credenciais do Supabase no navegador para sincronização imediata
+ */
+export function saveSupabaseCredentials(url: string, anonKey: string): boolean {
+  if (!isBrowserEnvironment()) return false;
+  try {
+    if (!isValidSupabaseUrl(url)) {
+      throw new Error('URL do Supabase inválida. Deve começar com https://');
+    }
+    const val = validateSupabaseKey(anonKey);
+    if (!val.isValid || val.isServiceRole) {
+      throw new Error(val.error || 'Chave do Supabase inválida. Utilize exclusivamente a chave pública anon.');
+    }
+    localStorage.setItem('fatosbr_supabase_url', url.trim());
+    localStorage.setItem('fatosbr_supabase_anon_key', anonKey.trim());
+    return true;
+  } catch (err) {
+    console.error('Falha ao salvar credenciais do Supabase:', err);
+    throw err;
+  }
+}
+
+/**
+ * Limpa credenciais customizadas do Supabase
+ */
+export function clearCustomSupabaseCredentials(): void {
+  if (!isBrowserEnvironment()) return;
+  try {
+    localStorage.removeItem('fatosbr_supabase_url');
+    localStorage.removeItem('fatosbr_supabase_anon_key');
+  } catch {}
+}
+
+/**
+ * Testa a conectividade com o banco Supabase de forma segura e verifica tabelas existentes
  */
 export async function checkSupabaseConnection(): Promise<{
   connected: boolean;
   message: string;
   role?: string | null;
+  tablesStatus?: { profiles: boolean; events: boolean; sources: boolean; topics: boolean };
 }> {
   if (keyValidation.isServiceRole || isServiceRoleBlocked) {
     return {
@@ -237,23 +291,46 @@ export async function checkSupabaseConnection(): Promise<{
     return {
       connected: false,
       message:
-        'Supabase não configurado ou chaves ausentes. Defina VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY no .env ou na Vercel.',
+        'Supabase não configurado ou chaves ausentes. Configure sua URL e chave anon pública no painel administrativo.',
     };
   }
 
   try {
-    const { error } = await supabase.from('topics').select('id').limit(1);
-    if (error) {
+    // Testar tabelas essenciais para diagnóstico detalhado
+    const tables = { profiles: false, events: false, sources: false, topics: false };
+
+    const [profilesRes, eventsRes, sourcesRes, topicsRes] = await Promise.allSettled([
+      supabase.from('profiles').select('id').limit(1),
+      supabase.from('events').select('id').limit(1),
+      supabase.from('sources').select('id').limit(1),
+      supabase.from('topics').select('id').limit(1)
+    ]);
+
+    if (profilesRes.status === 'fulfilled' && !profilesRes.value.error) tables.profiles = true;
+    if (eventsRes.status === 'fulfilled' && !eventsRes.value.error) tables.events = true;
+    if (sourcesRes.status === 'fulfilled' && !sourcesRes.value.error) tables.sources = true;
+    if (topicsRes.status === 'fulfilled' && !topicsRes.value.error) tables.topics = true;
+
+    const anyOk = tables.profiles || tables.events || tables.sources || tables.topics;
+
+    if (!anyOk) {
+      const firstError =
+        (profilesRes.status === 'fulfilled' && profilesRes.value.error?.message) ||
+        (topicsRes.status === 'fulfilled' && topicsRes.value.error?.message) ||
+        'Tabelas não encontradas ou restrição de RLS.';
       return {
         connected: false,
-        message: `Conectado ao Supabase, mas a consulta falhou: ${error.message}. (Verifique se o script schema.sql foi executado no Supabase)`,
+        message: `Conectado ao endpoint do Supabase, mas as tabelas ainda precisam do script SQL: ${firstError}`,
         role: keyValidation.role,
+        tablesStatus: tables
       };
     }
+
     return {
       connected: true,
-      message: 'Conectado com sucesso ao Supabase PostgreSQL via chave pública "anon".',
+      message: 'Conectado e sincronizado com o Supabase PostgreSQL em tempo real.',
       role: keyValidation.role,
+      tablesStatus: tables
     };
   } catch (err) {
     return {
@@ -262,3 +339,4 @@ export async function checkSupabaseConnection(): Promise<{
     };
   }
 }
+

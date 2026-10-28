@@ -257,6 +257,7 @@ export const EntityDetailModal: React.FC<EntityDetailModalProps> = ({
         name={entity.name}
         brandColor={entity.brandColor}
         type={entity.type}
+        logoUrl={entity.logoUrl}
         size="xl"
       />
     );

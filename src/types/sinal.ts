@@ -15,6 +15,7 @@ export interface Entity {
   organization?: string;
   website?: string;
   avatarUrl?: string;
+  logoUrl?: string;
   isFollowed: boolean;
   interestCount?: string;
   brandColor?: string;

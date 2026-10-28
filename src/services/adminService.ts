@@ -557,5 +557,82 @@ export const adminService = {
         message: `Erro na sincronização: ${err?.message || 'Falha ao gravar no Supabase'}`
       };
     }
+  },
+
+  /**
+   * Upload e validação de logotipo PNG com transparência para uma empresa
+   */
+  async uploadCompanyLogo(entityId: string, file: File): Promise<{ success: boolean; logoUrl?: string; error?: string }> {
+    try {
+      if (!file.type.includes('png')) {
+        return { success: false, error: 'O logotipo deve ser obrigatoriamente um arquivo PNG (.png).' };
+      }
+      if (file.size > 4 * 1024 * 1024) {
+        return { success: false, error: 'O arquivo excede o limite máximo de 4 MB.' };
+      }
+
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+
+      const resp = await fetch('/api/admin/company-logo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          entityId,
+          base64,
+          fileName: file.name
+        })
+      });
+
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok || !data?.success) {
+        return { success: false, error: data?.error || 'Erro na validação do logotipo PNG.' };
+      }
+
+      const logoUrl = data.logoUrl;
+
+      if (isSupabaseConfigured && entityId) {
+        try {
+          await supabase.from('entities').update({ logo_url: logoUrl }).eq('id', entityId);
+        } catch (dbErr) {
+          console.warn('Erro ao atualizar logo_url no Supabase:', dbErr);
+        }
+      }
+
+      try {
+        localStorage.setItem(`fatosbr_company_logo_${entityId}`, logoUrl);
+      } catch {}
+
+      return { success: true, logoUrl };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Falha na conexão ao enviar logotipo.' };
+    }
+  },
+
+  /**
+   * Remove o logotipo customizado de uma empresa
+   */
+  async removeCompanyLogo(entityId: string): Promise<boolean> {
+    try {
+      await fetch(`/api/admin/company-logo?entityId=${encodeURIComponent(entityId)}`, {
+        method: 'DELETE'
+      });
+
+      if (isSupabaseConfigured && entityId) {
+        await supabase.from('entities').update({ logo_url: null }).eq('id', entityId);
+      }
+
+      try {
+        localStorage.removeItem(`fatosbr_company_logo_${entityId}`);
+      } catch {}
+
+      return true;
+    } catch {
+      return false;
+    }
   }
 };

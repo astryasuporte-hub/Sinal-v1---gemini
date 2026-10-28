@@ -81,7 +81,9 @@ import {
   Volume2,
   VolumeX,
   Headphones,
-  Instagram
+  Instagram,
+  Check,
+  CheckCircle2
 } from 'lucide-react';
 import { rateLimitService } from './services/rateLimitService';
 import { KeyboardShortcutsModal } from './components/KeyboardShortcutsModal';
@@ -92,6 +94,8 @@ import { EditorialPushBanner, PushNotificationPayload } from './components/Edito
 import { FatosBRControlView } from './components/FatosBRControlView';
 import { LoginPage } from './components/LoginPage';
 import { OnboardingFlow } from './components/OnboardingFlow';
+import { LanguageSelector } from './components/LanguageSelector';
+import { useI18n, useTranslation } from './i18n';
 
 const HISTORY_STORAGE_KEY = 'sinal_history_items_v1';
 const MAX_HISTORY_ITEMS = 50;
@@ -131,6 +135,8 @@ export default function App() {
     }
     return 'landing';
   });
+  const { language, isRTL } = useI18n();
+  const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<'for-you' | 'following' | 'trending'>('for-you');
   const [homeCategoryFilter, setHomeCategoryFilter] = useState<'all' | 'tech' | 'politics' | 'business' | 'science'>('all');
   const [feedAnimationKey, setFeedAnimationKey] = useState<number>(0);
@@ -144,6 +150,49 @@ export default function App() {
     return null;
   });
   const [currentUser, setCurrentUser] = useState<SupabaseUser | null>(null);
+  const [, setAvatarSyncCounter] = useState<number>(0);
+  const [historyCheckToast, setHistoryCheckToast] = useState<{ id: string; title: string } | null>(null);
+
+  // Sincronização automática do avatar em todos os componentes reativos via fatosbr_avatar_updated e storage
+  useEffect(() => {
+    const handleAvatarUpdateEvent = (e: any) => {
+      const newAvatar = e.detail?.avatarUrl !== undefined ? e.detail.avatarUrl : localStorage.getItem('fatosbr_user_avatar');
+      setCurrentUserAvatar(newAvatar || null);
+      setAvatarSyncCounter((c) => c + 1);
+    };
+
+    const handleStorageEvent = (e: StorageEvent) => {
+      if (e.key === 'fatosbr_user_avatar') {
+        setCurrentUserAvatar(e.newValue || null);
+        setAvatarSyncCounter((c) => c + 1);
+      }
+    };
+
+    window.addEventListener('fatosbr_avatar_updated', handleAvatarUpdateEvent);
+    window.addEventListener('storage', handleStorageEvent);
+
+    return () => {
+      window.removeEventListener('fatosbr_avatar_updated', handleAvatarUpdateEvent);
+      window.removeEventListener('storage', handleStorageEvent);
+    };
+  }, []);
+
+  // Sincronização em tempo real de logotipos de empresas cadastrados via AdminPanel
+  useEffect(() => {
+    const handleEntitiesUpdated = () => {
+      setEntities((prev) =>
+        prev.map((ent) => {
+          try {
+            const savedLogo = localStorage.getItem('fatosbr_company_logo_' + ent.id);
+            if (savedLogo) return { ...ent, logoUrl: savedLogo };
+          } catch {}
+          return ent;
+        })
+      );
+    };
+    window.addEventListener('fatosbr_entities_updated', handleEntitiesUpdated);
+    return () => window.removeEventListener('fatosbr_entities_updated', handleEntitiesUpdated);
+  }, []);
 
   // Notificações Push Editoriais (Desativadas visualmente)
 
@@ -183,7 +232,15 @@ export default function App() {
   const [events, setEvents] = useState<Event[]>([]);
   const [isFeedRefreshing, setIsFeedRefreshing] = useState(false);
   const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
-  const [entities, setEntities] = useState<Entity[]>(INITIAL_ENTITIES);
+  const [entities, setEntities] = useState<Entity[]>(() => {
+    return INITIAL_ENTITIES.map((ent) => {
+      try {
+        const savedLogo = localStorage.getItem('fatosbr_company_logo_' + ent.id);
+        if (savedLogo) return { ...ent, logoUrl: savedLogo };
+      } catch {}
+      return ent;
+    });
+  });
   const [topics, setTopics] = useState<Topic[]>(INITIAL_TOPICS);
   const [sources, setSources] = useState<Source[]>(INITIAL_SOURCES);
   const [subscription, setSubscription] = useState<UserSubscription>(INITIAL_SUBSCRIPTION);
@@ -606,6 +663,15 @@ export default function App() {
     const now = Date.now();
     const isoString = new Date(now).toISOString();
 
+    // Feedback visual animado de conclusão (check) ao adicionar ao histórico / marcar como lido
+    setHistoryCheckToast({
+      id: event.id,
+      title: event.title
+    });
+    setTimeout(() => {
+      setHistoryCheckToast((prev) => (prev?.id === event.id ? null : prev));
+    }, 3500);
+
     setHistoryItems((prev) => {
       // Reabertura: remove ocorrência anterior se já existia para reposicioná-la no topo com novo horário
       const filtered = prev.filter((item) => item.event.id !== event.id);
@@ -889,6 +955,14 @@ export default function App() {
           onResetEvents={() => loadRealTimeNews(true)}
           onAddSource={(newSource) => setSources((prev) => [newSource, ...prev])}
           onDeleteSource={(sourceId) => setSources((prev) => prev.filter((s) => s.id !== sourceId))}
+          onUpdateEntityLogo={(entityId, logoUrl) => {
+            setEntities((prev) =>
+              prev.map((e) => (e.id === entityId ? { ...e, logoUrl: logoUrl || undefined } : e))
+            );
+          }}
+          onAddEntity={(newEntity) => {
+            setEntities((prev) => [newEntity, ...prev]);
+          }}
         />
       </div>
     );
@@ -906,16 +980,45 @@ export default function App() {
         />
       )}
 
-      {/* Banner de Notificação Push (Desativado conforme solicitação até envio do novo HTML/imagem pelo usuário) */}
+      {/* Micro-interação Animada de 'Check' (Conclusão) ao salvar no Histórico ou marcar como lido */}
+      <AnimatePresence>
+        {historyCheckToast && (
+          <motion.div
+            initial={{ opacity: 0, y: -24, scale: 0.92 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -16, scale: 0.95 }}
+            transition={{ type: 'spring', stiffness: 450, damping: 28 }}
+            className="fixed top-5 left-1/2 -translate-x-1/2 z-[100] flex items-center gap-3.5 px-4 py-2.5 rounded-2xl bg-[#0c0d12]/95 backdrop-blur-md border border-emerald-500/40 shadow-2xl shadow-emerald-950/60 text-white pointer-events-none"
+          >
+            <motion.div
+              initial={{ scale: 0, rotate: -60 }}
+              animate={{ scale: [0, 1.25, 1], rotate: 0 }}
+              transition={{ duration: 0.35, ease: 'easeOut' }}
+              className="w-7 h-7 rounded-full bg-emerald-500 flex items-center justify-center text-black font-extrabold shrink-0 shadow-lg shadow-emerald-500/40"
+            >
+              <Check className="w-4 h-4 stroke-[3]" />
+            </motion.div>
+            <div className="text-left pr-1">
+              <div className="text-xs font-bold text-emerald-300 flex items-center gap-1.5">
+                <span>Marcado como lido e salvo no Histórico</span>
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+              </div>
+              <div className="text-[11px] text-zinc-300 max-w-[280px] sm:max-w-[420px] truncate">
+                {historyCheckToast.title}
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Container Principal Desktop / Mobile */}
       <div className="max-w-[1440px] mx-auto min-h-screen flex flex-col md:flex-row">
         
         {/* ================= 1. SIDEBAR DESKTOP (1440px MOCKUP) ================= */}
         <aside className="hidden md:flex flex-col justify-between w-64 lg:w-72 border-r p-6 shrink-0 sticky top-0 h-screen bg-[#08090b] border-[#1a1c22]">
-          <div className="space-y-8">
+          <div className="space-y-6">
             {/* macOS Window Dots & Logo */}
-            <div className="space-y-6">
+            <div className="space-y-5">
               <div className="flex items-center space-x-2">
                 <div className="w-3 h-3 rounded-full bg-[#ff5f56]" />
                 <div className="w-3 h-3 rounded-full bg-[#ffbd2e]" />
@@ -931,6 +1034,37 @@ export default function App() {
               </div>
             </div>
 
+            {/* BUSCA GLOBAL NA BARRA LATERAL (Pesquisa por palavras-chave em todos os feeds) */}
+            <div className="relative group">
+              <Search className="w-4 h-4 absolute left-3 top-3 text-zinc-500 group-focus-within:text-emerald-400 transition-colors pointer-events-none" />
+              <input
+                type="text"
+                placeholder="Pesquisar em todos os feeds..."
+                value={searchQuery}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value);
+                  if (currentNav !== 'home' && currentNav !== 'explore') {
+                    setCurrentNav('home');
+                  }
+                }}
+                className="w-full bg-[#111216] border border-[#1e2026] focus:border-emerald-500/50 rounded-xl pl-9 pr-8 py-2 text-xs text-zinc-200 placeholder:text-zinc-500 focus:outline-none transition-all shadow-inner"
+              />
+              {searchQuery ? (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-2.5 top-2.5 p-0.5 text-zinc-500 hover:text-white transition cursor-pointer"
+                  title="Limpar pesquisa"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              ) : (
+                <span className="absolute right-2.5 top-2.5 text-[9px] font-mono text-zinc-600 bg-zinc-900 px-1.5 py-0.5 rounded border border-zinc-800 pointer-events-none">
+                  ⌘K
+                </span>
+              )}
+            </div>
+
             {/* Menu Links */}
             <nav className="space-y-1.5 text-sm">
               <button
@@ -942,7 +1076,7 @@ export default function App() {
                 }`}
               >
                 <Home className="w-4 h-4" />
-                <span>Início</span>
+                <span>{t('nav.home')}</span>
               </button>
 
               <button
@@ -954,7 +1088,7 @@ export default function App() {
                 }`}
               >
                 <Compass className="w-4 h-4" />
-                <span>Explorar</span>
+                <span>{t('nav.explore')}</span>
               </button>
 
               <button
@@ -966,7 +1100,7 @@ export default function App() {
                 }`}
               >
                 <Bookmark className="w-4 h-4" />
-                <span>Seguindo</span>
+                <span>{t('nav.following')}</span>
               </button>
 
               <button
@@ -979,7 +1113,7 @@ export default function App() {
               >
                 <div className="flex items-center space-x-3.5">
                   <Bell className="w-4 h-4" />
-                  <span>Notificações</span>
+                  <span>{t('nav.notifications')}</span>
                 </div>
                 {unreadCount > 0 && (
                   <span className="w-2 h-2 rounded-full bg-red-500" />
@@ -995,7 +1129,7 @@ export default function App() {
                 }`}
               >
                 <Bookmark className="w-4 h-4" />
-                <span>Salvos</span>
+                <span>{t('nav.saved')}</span>
               </button>
 
               <button
@@ -1007,7 +1141,7 @@ export default function App() {
                 }`}
               >
                 <Clock className="w-4 h-4" />
-                <span>Histórico</span>
+                <span>{t('nav.history')}</span>
               </button>
 
               <button
@@ -1019,7 +1153,7 @@ export default function App() {
                 }`}
               >
                 <FileText className="w-4 h-4" />
-                <span>Briefings</span>
+                <span>{t('nav.briefings')}</span>
               </button>
 
               <button
@@ -1045,7 +1179,7 @@ export default function App() {
                 className="w-full flex items-center space-x-3.5 px-4 py-3 rounded-xl transition-colors cursor-pointer text-zinc-400 hover:text-white hover:bg-[#121317]"
               >
                 <Globe2 className="w-4 h-4 text-emerald-400" />
-                <span>Landing Page</span>
+                <span>{t('nav.landing')}</span>
               </button>
 
               <button
@@ -1057,26 +1191,29 @@ export default function App() {
                 }`}
               >
                 <User className="w-4 h-4" />
-                <span>Perfil</span>
+                <span>{t('nav.profile')}</span>
               </button>
             </nav>
 
-            {/* Atalhos Rápidos na Sidebar */}
-            <div className="pt-2 border-t border-[#1a1c22] space-y-1">
-
+            {/* Atalhos Rápidos na Sidebar & Seletor de Idioma */}
+            <div className="pt-2 border-t border-[#1a1c22] space-y-2">
               <button
                 onClick={() => setIsShortcutsModalOpen(true)}
-                className="w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl transition text-xs cursor-pointer text-zinc-400 hover:text-white hover:bg-[#121317]"
+                className="w-full flex items-center justify-between px-3.5 py-2 rounded-xl transition text-xs cursor-pointer text-zinc-400 hover:text-white hover:bg-[#121317]"
                 title="Atalhos de teclado globais (tecla ?)"
               >
                 <div className="flex items-center space-x-2.5">
                   <Command className="w-4 h-4 text-emerald-400" />
-                  <span>Atalhos Globais</span>
+                  <span>{t('nav.shortcuts')}</span>
                 </div>
                 <kbd className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-zinc-800 text-zinc-300">
                   ?
                 </kbd>
               </button>
+
+              <div className="pt-1">
+                <LanguageSelector variant="dropdown" />
+              </div>
             </div>
           </div>
 
@@ -1119,7 +1256,7 @@ export default function App() {
               title="Acessar Briefings Diários"
             >
               <FileText className="w-3.5 h-3.5 text-zinc-300" />
-              <span>Briefings</span>
+              <span>{t('nav.briefings')}</span>
             </button>
 
             {/* Botão FatosBR Control no Topo Mobile */}
@@ -1394,6 +1531,10 @@ export default function App() {
               onOpenOnboarding={() => setCurrentNav('onboarding')}
               isSuperAdmin={isSuperAdmin}
               onProfileUpdated={(updated) => setCurrentUserAvatar(updated.avatarUrl)}
+              onClearCacheAndSync={async () => {
+                rateLimitService.clearCache();
+                await loadRealTimeNews(true);
+              }}
               onLogout={async () => {
                 await authService.signOut();
                 setCurrentUser(null);
@@ -1462,10 +1603,10 @@ export default function App() {
                   className={`px-3.5 sm:px-4 py-1.5 rounded-full text-xs font-semibold transition cursor-pointer ${
                     activeTab === 'for-you'
                       ? 'bg-white text-black shadow-sm'
-                      : 'bg-[#111215] text-zinc-400 hover:text-white border border-[#1e2026]'
+                      : 'bg-[#111216] text-zinc-400 hover:text-white border border-[#1e2026]'
                   }`}
                 >
-                  Para você
+                  {t('feed.forYou')}
                 </button>
 
                 <button
@@ -1473,10 +1614,10 @@ export default function App() {
                   className={`px-3.5 sm:px-4 py-1.5 rounded-full text-xs font-semibold transition cursor-pointer ${
                     activeTab === 'following'
                       ? 'bg-white text-black shadow-sm'
-                      : 'bg-[#111215] text-zinc-400 hover:text-white border border-[#1e2026]'
+                      : 'bg-[#111216] text-zinc-400 hover:text-white border border-[#1e2026]'
                   }`}
                 >
-                  Seguindo
+                  {t('feed.following')}
                 </button>
 
                 <button
@@ -1484,10 +1625,10 @@ export default function App() {
                   className={`px-3.5 sm:px-4 py-1.5 rounded-full text-xs font-semibold transition cursor-pointer ${
                     activeTab === 'trending'
                       ? 'bg-white text-black shadow-sm'
-                      : 'bg-[#111215] text-zinc-400 hover:text-white border border-[#1e2026]'
+                      : 'bg-[#111216] text-zinc-400 hover:text-white border border-[#1e2026]'
                   }`}
                 >
-                  Em alta
+                  {t('feed.trending')}
                 </button>
               </div>
 
@@ -1508,7 +1649,7 @@ export default function App() {
                       className={`px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap transition cursor-pointer active:scale-95 ${
                         isSelected
                           ? 'bg-white text-black font-bold shadow-sm'
-                          : 'bg-[#111215] text-zinc-400 hover:text-white border border-[#1e2026] hover:border-zinc-700'
+                          : 'bg-[#111216] text-zinc-400 hover:text-white border border-[#1e2026] hover:border-zinc-700'
                       }`}
                     >
                       {cat.label}
@@ -1516,6 +1657,14 @@ export default function App() {
                   );
                 })}
               </div>
+
+              {/* Banner de separação entre idioma da interface e idioma original das notícias */}
+              {language !== 'pt-BR' && (
+                <div className="flex items-center gap-2.5 px-3.5 py-2 rounded-xl bg-zinc-900/80 border border-zinc-800 text-[11px] text-zinc-300">
+                  <Globe2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  <span>{t('common.newsNotice')}</span>
+                </div>
+              )}
 
               {/* Feed Refreshing Bar */}
               {isFeedRefreshing && (
@@ -1786,10 +1935,10 @@ export default function App() {
               ? 'text-white font-bold'
               : 'text-zinc-400 hover:text-zinc-200'
           }`}
-          aria-label="Início"
+          aria-label={t('nav.home')}
         >
           <Home className="w-4 h-4 sm:w-5 sm:h-5 mb-0.5" />
-          <span>Início</span>
+          <span>{t('nav.home')}</span>
         </button>
 
         <button
@@ -1799,10 +1948,10 @@ export default function App() {
               ? 'text-white font-bold'
               : 'text-zinc-400 hover:text-zinc-200'
           }`}
-          aria-label="Explorar"
+          aria-label={t('nav.explore')}
         >
           <Compass className="w-4 h-4 sm:w-5 sm:h-5 mb-0.5" />
-          <span>Explorar</span>
+          <span>{t('nav.explore')}</span>
         </button>
 
         <button
@@ -1812,10 +1961,10 @@ export default function App() {
               ? 'text-white font-bold'
               : 'text-zinc-400 hover:text-zinc-200'
           }`}
-          aria-label="Seguindo"
+          aria-label={t('nav.following')}
         >
           <Bookmark className="w-4 h-4 sm:w-5 sm:h-5 mb-0.5" />
-          <span>Seguindo</span>
+          <span>{t('nav.following')}</span>
         </button>
 
         <button
@@ -1825,10 +1974,10 @@ export default function App() {
               ? 'text-white font-bold'
               : 'text-zinc-400 hover:text-zinc-200'
           }`}
-          aria-label="Briefings"
+          aria-label={t('nav.briefings')}
         >
           <FileText className="w-4 h-4 sm:w-5 sm:h-5 mb-0.5" />
-          <span>Briefings</span>
+          <span>{t('nav.briefings')}</span>
         </button>
 
         <button
@@ -1838,13 +1987,13 @@ export default function App() {
               ? 'text-white font-bold'
               : 'text-zinc-400 hover:text-zinc-200'
           }`}
-          aria-label="Notificações"
+          aria-label={t('nav.notifications')}
         >
           <Bell className="w-4 h-4 sm:w-5 sm:h-5 mb-0.5" />
           {unreadCount > 0 && (
             <span className="absolute top-2 right-2.5 w-2 h-2 rounded-full bg-red-500 ring-2 ring-[#08090b]" />
           )}
-          <span>Notificações</span>
+          <span>{t('nav.notifications')}</span>
         </button>
 
         <button
@@ -1854,10 +2003,10 @@ export default function App() {
               ? 'text-white font-bold'
               : 'text-zinc-400 hover:text-zinc-200'
           }`}
-          aria-label="Perfil"
+          aria-label={t('nav.profile')}
         >
           <User className="w-4 h-4 sm:w-5 sm:h-5 mb-0.5" />
-          <span>Perfil</span>
+          <span>{t('nav.profile')}</span>
         </button>
       </nav>
 
