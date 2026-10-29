@@ -48,7 +48,9 @@ import {
   Globe2,
   Copy,
   Building2,
-  Smartphone
+  Smartphone,
+  Monitor,
+  Zap
 } from 'lucide-react';
 import { Event, Source, Topic, Entity } from '../types/sinal';
 import { newsIngestionService } from '../services/newsIngestionService';
@@ -70,6 +72,8 @@ import { AdminCompanyManager } from './AdminCompanyManager';
 import { AdminBriefingCustomizer } from './AdminBriefingCustomizer';
 import { AdminMobileView } from './AdminMobileView';
 import { AdminFinancialDashboard } from './AdminFinancialDashboard';
+import { ResendWebhookLiveMonitor } from './ResendWebhookLiveMonitor';
+import { notificationService } from '../services/notificationService';
 
 export type StatusColor = 'connected' | 'error' | 'disconnected';
 
@@ -184,6 +188,7 @@ type AdminTab =
   | 'users'
   | 'sources'
   | 'briefings'
+  | 'webhooks'
   | 'tickets'
   | 'trends'
   | 'instagram'
@@ -899,6 +904,7 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
     { id: 'users', label: 'Usuários & Sessões', shortLabel: 'Usuários', icon: Users, badge: usersList.length || 1 },
     { id: 'sources', label: 'Fontes & Veículos', shortLabel: 'Fontes', icon: Layers, badge: sources.length },
     { id: 'briefings', label: 'Briefings & E-mails', shortLabel: 'Briefings', icon: Mail },
+    { id: 'webhooks', label: 'Webhooks Resend', shortLabel: 'Webhooks', icon: Activity, badge: 'Live' },
     {
       id: 'tickets',
       label: 'Tickets de Suporte',
@@ -952,6 +958,8 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
         entities={entities}
         users={usersList}
         metrics={metrics}
+        systemLogs={systemLogs}
+        providers={providers}
         onBackToApp={onBackToApp}
         onOpenControl={onOpenControl}
         onShowToast={showToast}
@@ -963,6 +971,10 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
         onDeleteSource={onDeleteSource}
         onUpdateEntityLogo={onUpdateEntityLogo}
         onAddEntity={onAddEntity}
+        onTriggerIngestion={handleTriggerIngestion}
+        ingestionStatus={ingestionStatus}
+        onSeedDatabase={handleSeedDatabase}
+        isSeeding={isSeeding}
         onToggleDesktopView={() => setViewMode('desktop')}
       />
     );
@@ -1212,63 +1224,92 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
-            {onOpenControl && (
+            {/* Alternador de Visualização Desktop / Mobile */}
+            <div className="flex items-center p-0.5 rounded-xl bg-[#07111D] border border-[#183047] shadow-sm">
               <button
-                onClick={onOpenControl}
-                className="flex-1 sm:flex-none items-center justify-center gap-1.5 px-3.5 py-2.5 min-h-[44px] rounded-xl bg-gradient-to-r from-emerald-500/20 to-teal-500/20 hover:from-emerald-500/30 hover:to-teal-500/30 border border-emerald-500/40 text-emerald-300 hover:text-white font-bold text-xs transition cursor-pointer flex"
-                title="Abrir Central FatosBR Control"
+                onClick={() => setViewMode('desktop')}
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer bg-[#2378D4] text-white shadow-sm"
+                title="Visualização padrão desktop"
               >
-                <Instagram className="w-4 h-4 text-emerald-400 shrink-0" />
-                <span>FatosBR Control</span>
+                <Monitor className="w-3.5 h-3.5" />
+                <span className="hidden lg:inline">Desktop</span>
               </button>
-            )}
-
-            <button
-              onClick={() => setViewMode('mobile')}
-              className="flex-1 sm:flex-none items-center justify-center gap-1.5 px-3.5 py-2.5 min-h-[44px] rounded-xl bg-[#081524] hover:bg-[#0d2238] border border-[#2378D4]/40 text-[#41C8F4] hover:text-white font-bold text-xs transition cursor-pointer shadow-sm flex"
-              title="Visualizar o Painel Mobile fiel ao mockup de 6 telas"
-            >
-              <Smartphone className="w-3.5 h-3.5 text-[#41C8F4] shrink-0" />
-              <span>Painel Mobile</span>
-            </button>
-
-            {viewMode === 'desktop' && (
               <button
-                onClick={() => setViewMode('auto')}
-                className="text-[10px] font-mono px-2 py-1 rounded-lg bg-zinc-800 text-zinc-400 hover:text-zinc-200 border border-zinc-700"
-                title="Voltar para detecção automática de tela"
+                onClick={() => setViewMode('mobile')}
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer text-[#94A7BC] hover:text-[#F4F7FB] hover:bg-[#10233b]"
+                title="Visualizar Painel Mobile (Mockup de 6 telas)"
               >
-                Auto
+                <Smartphone className="w-3.5 h-3.5" />
+                <span className="hidden lg:inline">Mobile</span>
               </button>
-            )}
+            </div>
 
-            <button
-              onClick={() => setIsApiHealthModalOpen(true)}
-              className="flex-1 sm:flex-none items-center justify-center gap-1.5 px-4 py-2.5 min-h-[44px] rounded-xl bg-white hover:bg-zinc-200 text-black font-bold text-xs transition cursor-pointer shadow-md flex"
-              title="Abrir telemetria em tempo real e estado das cotas dos provedores (GNews, NewsAPI, World News, NVIDIA NIM)"
-            >
-              <Activity className="w-3.5 h-3.5 text-black shrink-0" />
-              <span>Saúde da API</span>
-            </button>
-
+            {/* Ação: Disparar Ingestão */}
             <button
               onClick={handleTriggerIngestion}
               disabled={ingestionStatus === 'running'}
-              className="flex-1 sm:flex-none items-center justify-center gap-2 px-4 py-2.5 min-h-[44px] rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-white font-bold text-xs transition cursor-pointer shadow-sm disabled:opacity-50 flex"
+              className="px-3.5 py-2 min-h-[38px] rounded-xl bg-[#07111D] hover:bg-[#0A1726] border border-[#183047] hover:border-[#2378D4] text-[#F4F7FB] font-semibold text-xs transition cursor-pointer shadow-sm disabled:opacity-50 flex items-center gap-2 active:scale-95"
+              title="Disparar coleta e processamento imediato dos feeds das APIs"
             >
-              <Play className="w-3.5 h-3.5 fill-white shrink-0" />
+              <Play className="w-3.5 h-3.5 text-[#41C8F4] fill-[#41C8F4]" />
               <span>{ingestionStatus === 'running' ? 'Ingerindo...' : 'Disparar Ingestão'}</span>
             </button>
 
+            {/* Ação: Saúde da API */}
+            <button
+              onClick={() => setIsApiHealthModalOpen(true)}
+              className="px-3.5 py-2 min-h-[38px] rounded-xl bg-[#07111D] hover:bg-[#0A1726] border border-[#183047] hover:border-[#20D6A0] text-[#F4F7FB] font-semibold text-xs transition cursor-pointer shadow-sm flex items-center gap-2 active:scale-95"
+              title="Abrir telemetria em tempo real e cotas de APIs (GNews, NewsAPI, World News, NVIDIA NIM)"
+            >
+              <Activity className="w-3.5 h-3.5 text-[#20D6A0]" />
+              <span>Saúde da API</span>
+            </button>
+
+            {/* Ação: Testar Web Push */}
+            <button
+              onClick={async () => {
+                const granted = await notificationService.requestPermission();
+                if (granted) {
+                  const sent = await notificationService.triggerTestNotification(
+                    'FatosBR • Alerta de Breaking News (Web Push)',
+                    'Notificação em segundo plano via Web Push ServiceWorker disparada com sucesso.'
+                  );
+                  showToast(sent ? 'Notificação Web Push enviada ao navegador!' : 'Permissão concedida. Teste emitido.');
+                  addLog('SUCCESS', 'WEB_PUSH', 'Notificação de teste emitida via Web Push API / Service Worker.');
+                } else {
+                  showToast('Permissão de notificações não concedida no navegador.');
+                  addLog('WARN', 'WEB_PUSH', 'Permissão de notificação negada pelo navegador.');
+                }
+              }}
+              className="px-3.5 py-2 min-h-[38px] rounded-xl bg-[#07111D] hover:bg-[#0A1726] border border-[#183047] hover:border-[#2378D4] text-[#41C8F4] font-semibold text-xs transition cursor-pointer shadow-sm flex items-center gap-2 active:scale-95"
+              title="Testar disparo de notificação push em segundo plano via Web Push API e ServiceWorker"
+            >
+              <Zap className="w-3.5 h-3.5 text-[#41C8F4]" />
+              <span>Web Push</span>
+            </button>
+
+            {/* Ação: Sincronizar Banco */}
             <button
               onClick={handleSeedDatabase}
               disabled={isSeeding}
-              className="flex-1 sm:flex-none items-center justify-center gap-2 px-4 py-2.5 min-h-[44px] rounded-xl bg-black hover:bg-zinc-900 border border-zinc-700 text-zinc-200 hover:text-white text-xs font-semibold transition cursor-pointer disabled:opacity-50 flex"
+              className="px-3.5 py-2 min-h-[38px] rounded-xl bg-[#07111D] hover:bg-[#0A1726] border border-[#183047] hover:border-zinc-600 text-zinc-300 hover:text-white text-xs font-medium transition cursor-pointer shadow-sm disabled:opacity-50 flex items-center gap-2 active:scale-95"
               title="Popula ou atualiza as tabelas de dados no Supabase"
             >
-              <Database className={`w-3.5 h-3.5 text-white shrink-0 ${isSeeding ? 'animate-spin' : ''}`} />
+              <Database className={`w-3.5 h-3.5 text-zinc-400 ${isSeeding ? 'animate-spin' : ''}`} />
               <span>Sincronizar Banco</span>
             </button>
+
+            {/* Ação Opcional: FatosBR Control */}
+            {onOpenControl && (
+              <button
+                onClick={onOpenControl}
+                className="px-3.5 py-2 min-h-[38px] rounded-xl bg-[#07111D] hover:bg-[#0A1726] border border-[#183047] hover:border-emerald-500/50 text-emerald-400 font-semibold text-xs transition cursor-pointer shadow-sm flex items-center gap-1.5 active:scale-95"
+                title="Abrir Central FatosBR Control"
+              >
+                <Instagram className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Control</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -2923,6 +2964,9 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
             {/* Interface de Configuração SMTP do Resend e Testes em Tempo Real */}
             <ResendConfigPanel onShowToast={showToast} />
 
+            {/* Componente Dedicado de Métricas em Tempo Real e Log de Webhooks (/api/resend/webhook) */}
+            <ResendWebhookLiveMonitor onShowToast={showToast} />
+
             {/* Componente Visual de Telemetria do Resend (providerStats.resend via /api/resend/status) */}
             <ResendTelemetryCard
               onTestDispatchSuccess={(id, recipient) => {
@@ -3031,6 +3075,19 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
                 </div>
               </div>
             </div>
+          </div>
+        )}
+
+        {/* ================= TAB: WEBHOOKS RESEND EM TEMPO REAL ================= */}
+        {activeAdminTab === 'webhooks' && (
+          <div className="space-y-6">
+            <ResendWebhookLiveMonitor onShowToast={showToast} />
+            <ResendTelemetryCard
+              onTestDispatchSuccess={(id, recipient) => {
+                showToast(`E-mail despachado via Resend: ID ${id}`);
+                addLog('SUCCESS', 'RESEND', `Disparo teste para ${recipient} concluído. ID: ${id}`);
+              }}
+            />
           </div>
         )}
 

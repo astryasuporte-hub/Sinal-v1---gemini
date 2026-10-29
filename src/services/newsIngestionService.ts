@@ -462,6 +462,130 @@ export const newsIngestionService = {
     } catch {
       return getRealNewsFallback(savedIds);
     }
+  },
+
+  /**
+   * Realiza busca direta e em tempo real nas APIs integradas (GNews e World News API)
+   * caso o termo pesquisado não tenha sido encontrado no cache local de eventos.
+   */
+  async searchLiveApis(query: string, savedIds?: Set<string>): Promise<Event[]> {
+    const q = (query || '').trim();
+    if (q.length < 2) return [];
+
+    try {
+      const results = await Promise.allSettled([
+        this.fetchLiveGNews(q),
+        this.fetchLiveWorldNews(q),
+        this.fetchLiveNewsApi(q)
+      ]);
+
+      const rawList: RawArticle[] = [];
+      results.forEach((res) => {
+        if (res.status === 'fulfilled' && Array.isArray(res.value)) {
+          rawList.push(...res.value);
+        }
+      });
+
+      if (rawList.length === 0) return [];
+
+      const seenUrls = new Set<string>();
+      const seenTitles = new Set<string>();
+      const uniqueArticles: RawArticle[] = [];
+
+      for (const art of rawList) {
+        if (!art.title || art.title.trim().length < 6) continue;
+        const normTitle = art.title.toLowerCase().slice(0, 32);
+        if (seenUrls.has(art.url) || seenTitles.has(normTitle)) continue;
+        seenUrls.add(art.url);
+        seenTitles.add(normTitle);
+        uniqueArticles.push(art);
+      }
+
+      const searchedEvents: Event[] = uniqueArticles.map((art, idx) => {
+        const category = detectCategory(art.title, art.snippet);
+        const fallbackImg = getCategoryFallbackImage(category);
+        const imageUrl = art.imageUrl && art.imageUrl.startsWith('http') ? art.imageUrl : fallbackImg;
+        const badge = getSourceBadge(art.sourceName);
+        const relativeTime = formatRelativeTime(art.publishedAt);
+        const eventId = `evt-search-${Date.now()}-${idx}`;
+        const isSaved = savedIds ? savedIds.has(eventId) : false;
+
+        const sources: SourceReference[] = [
+          {
+            id: `src-search-${Date.now()}-${idx}`,
+            sourceName: art.sourceName,
+            domain: art.domain,
+            headline: art.title,
+            url: art.url,
+            publishedAt: relativeTime
+          }
+        ];
+
+        const cleanSnippet = art.snippet.replace(/\n+/g, ' ').trim();
+        const whatHappened = [
+          `• ${art.title}.`,
+          cleanSnippet ? `• ${cleanSnippet}` : `• Fato apurado via consulta em tempo real por ${art.sourceName}.`,
+          `• Resultado obtido diretamente das APIs de imprensa conectadas ao FatosBR.`
+        ].join('\n');
+
+        const whyItMatters = `A apuração sobre "${q}" traz relevância para o contexto de ${category} em tempo real.`;
+
+        const entity: Entity = {
+          id: `ent-search-${idx}`,
+          name: art.sourceName,
+          type: 'organization',
+          description: `Veículo jornalístico reportando sobre ${q}`,
+          isFollowed: false,
+          interestCount: '+ 2.8K interesses',
+          brandColor: badge.color
+        };
+
+        const topic: Topic = {
+          id: `top-search-${category.toLowerCase().replace(/[^a-z0-9]/g, '-')}`,
+          name: category,
+          slug: category.toLowerCase().replace(/[^a-z0-9]/g, '-'),
+          description: `Notícias sobre ${category}`,
+          category,
+          isFollowed: false,
+          brandColor: badge.color
+        };
+
+        return {
+          id: eventId,
+          title: art.title,
+          summary: cleanSnippet.length > 220 ? cleanSnippet.slice(0, 220) + '...' : cleanSnippet || art.title,
+          whatHappened,
+          whyItMatters,
+          category,
+          publishedAt: art.publishedAt,
+          updatedAt: new Date().toISOString(),
+          imageUrl,
+          relevanceScore: Math.min(95, 85 + (idx % 10)),
+          relativeTime,
+          sourceCountText: '1 fonte conectada',
+          isSaved,
+          isViewed: false,
+          featuredSourceLogos: [badge],
+          sources,
+          entities: [entity],
+          topics: [topic],
+          timeline: [
+            {
+              id: `time-search-${idx}-1`,
+              date: 'Hoje',
+              time: relativeTime,
+              title: 'Coleta em tempo real via API',
+              description: `Notícia consultada diretamente em ${art.sourceName} (${art.domain}).`
+            }
+          ]
+        };
+      });
+
+      return searchedEvents;
+    } catch (err) {
+      console.warn('Erro ao pesquisar nas APIs ao vivo:', err);
+      return [];
+    }
   }
 };
 

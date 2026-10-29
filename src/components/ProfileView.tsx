@@ -285,16 +285,21 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
     setIsUploadingAvatar(true);
 
     try {
-      // 2. Converte o arquivo local para string Base64 Data URL
-      const rawBase64 = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result as string);
-        reader.onerror = () => reject(new Error('Erro ao ler os bytes da imagem.'));
-        reader.readAsDataURL(file);
-      });
+      // 2. Executa a validação local estrita e script de recorte prévio no navegador garantindo limite de 6MB
+      const localProcess = await avatarProcessing.processAvatarFile(file);
+      if (!localProcess.valid || !localProcess.dataUrl) {
+        const err = localProcess.error || 'Falha ao processar e validar a imagem localmente.';
+        setAvatarUploadError(err);
+        showToast(err);
+        setIsUploadingAvatar(false);
+        e.target.value = '';
+        return;
+      }
 
-      // 3. Envia a string base64 para o endpoint /api/avatar/verify (avatarSecurityService) para higienização de EXIF/GPS
-      let cleanDataUrl = rawBase64;
+      const locallyCroppedBase64 = localProcess.dataUrl;
+
+      // 3. Envia a imagem já validada, recortada e higienizada para o endpoint /api/avatar/verify
+      let cleanDataUrl = locallyCroppedBase64;
       try {
         const resp = await fetch('/api/avatar/verify', {
           method: 'POST',
@@ -302,8 +307,8 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({
-            base64: rawBase64,
-            dataUrl: rawBase64,
+            base64: locallyCroppedBase64,
+            dataUrl: locallyCroppedBase64,
             fileName: file.name
           })
         });

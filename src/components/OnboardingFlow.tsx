@@ -314,77 +314,81 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
         )}
 
         {/* ========================================================================= */}
-        {/* ETAPA 1: HERO BOAS-VINDAS CONFORME MOCKUP 2 */}
+        {/* ETAPA 1: HERO BOAS-VINDAS (FIGMA MOCKUP SCREEN 1) */}
         {/* ========================================================================= */}
         {step === 1 && (
-          <div className="flex-1 flex flex-col justify-between animate-fadeIn py-1 sm:py-2 min-h-[calc(100vh-80px)]">
-            {/* Top: Logo Oficial Centralizado "FatosBR" */}
-            <div className="flex items-center justify-center gap-2 pt-2 sm:pt-4">
-              <div className="w-7 h-7 rounded-lg bg-zinc-900 border border-zinc-800 flex items-center justify-center shadow-sm">
-                <svg
-                  className="w-4 h-4 text-white"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <polyline points="2 12 6 12 9 3 13 21 16 12 22 12" />
-                </svg>
-              </div>
-              <span className="font-bold text-base tracking-tight text-white">FatosBR</span>
+          <div className="flex-1 flex flex-col justify-between animate-fadeIn py-2 min-h-[calc(100vh-60px)] sm:min-h-[720px] max-w-sm sm:max-w-md mx-auto w-full">
+            {/* Top Logo FatosBR Centralizado */}
+            <div className="pt-3 pb-2 flex items-center justify-center gap-2">
+              <svg
+                className="w-7 h-7 text-white"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <polyline points="2 12 6 12 9 3 13 21 16 12 22 12" />
+              </svg>
+              <span className="font-bold text-2xl tracking-tight text-white">FatosBR</span>
             </div>
 
-            {/* Headline e Subtítulo Alinhados à Esquerda (Mockup 2) */}
-            <div className="text-left px-1 pt-6 sm:pt-8 space-y-3">
-              <h1 className="text-3xl sm:text-4xl font-extrabold text-white tracking-tight leading-[1.18]">
-                O que importa<br />
-                para você,<br />
-                sempre à frente.
+            {/* Imagem do Globo com Halo Radial Centralizado */}
+            <div className="relative w-full aspect-[4/3] max-h-[300px] my-auto flex items-center justify-center overflow-hidden">
+              <div
+                className="absolute inset-0 pointer-events-none opacity-40"
+                style={{
+                  background: 'radial-gradient(circle at 50% 50%, rgba(255,255,255,0.18) 0%, rgba(0,0,0,0) 70%)'
+                }}
+              />
+              <img
+                src="/assets/aistudio/file_00000000d9dc820eb1300938edc857d3_8a6e1430.png"
+                alt="FatosBR - Observatório Global"
+                className="w-full h-full object-contain object-center scale-[1.08] relative z-10"
+              />
+            </div>
+
+            {/* Headline e Subtítulo Centralizados Conforme Figma */}
+            <div className="text-center px-2 space-y-3 pb-4">
+              <h1 className="text-[30px] sm:text-[34px] font-bold text-white tracking-tight leading-[1.2]">
+                O que importa para você, sempre à frente.
               </h1>
-              <p className="text-xs sm:text-sm text-zinc-400 leading-relaxed max-w-sm">
+              <p className="text-[14px] sm:text-[15px] text-[#a1a1aa] leading-relaxed max-w-xs mx-auto">
                 A FatosBR observa o mundo por você, reunindo os acontecimentos mais relevantes em um só lugar.
               </p>
             </div>
 
-            {/* Imagem do Globo Emergindo do Fundo Escuro */}
-            <div className="relative w-full aspect-[4/3] sm:aspect-[16/10] overflow-hidden my-auto flex items-center justify-center">
-              <img
-                src="/assets/aistudio/file_00000000d9dc820eb1300938edc857d3_8a6e1430.png"
-                alt="FatosBR - Observatório Global"
-                className="w-full h-full object-contain object-center scale-[1.04]"
-              />
-              {/* Fade superior suave fundindo no preto */}
-              <div className="absolute inset-0 bg-gradient-to-t from-transparent via-transparent to-black/85 pointer-events-none" />
-            </div>
-
-            {/* Ações Inferiores Etapa 1 */}
-            <div className="pt-2 pb-1 space-y-3 text-center">
+            {/* Ações Inferiores: Botão Começar + Link de Login + Progresso 1/7 */}
+            <div className="pt-2 pb-3 space-y-3 w-full">
               <button
+                type="button"
                 onClick={nextStep}
-                className="w-full py-4 px-6 bg-white text-black hover:bg-zinc-200 font-bold text-sm sm:text-base rounded-full transition cursor-pointer active:scale-[0.99] shadow-lg shadow-white/5"
+                className="w-full py-4 px-6 bg-white text-black hover:bg-zinc-100 font-semibold text-base rounded-full transition cursor-pointer active:scale-[0.99] shadow-lg shadow-white/10"
               >
                 Começar
               </button>
 
               {onOpenLogin && (
-                <button
-                  onClick={onOpenLogin}
-                  className="text-xs text-zinc-400 hover:text-white transition cursor-pointer pt-1"
-                >
-                  Já tem uma conta? <span className="underline font-semibold text-zinc-200">Entrar</span>
-                </button>
+                <div className="text-center">
+                  <button
+                    type="button"
+                    onClick={onOpenLogin}
+                    className="text-sm text-[#8e8e93] hover:text-white transition cursor-pointer"
+                  >
+                    Já tem uma conta? <span className="text-zinc-200 underline font-medium">Entrar</span>
+                  </button>
+                </div>
               )}
-            </div>
 
-            {/* Indicador 1/7 e Barra de Progresso no Rodapé da Etapa 1 */}
-            <div className="pt-2 pb-1 space-y-2">
-              <div className="text-center font-mono text-[11px] text-zinc-500 font-medium">
-                1/7
-              </div>
-              <div className="w-full h-1 bg-zinc-900 rounded-full overflow-hidden border border-zinc-800/40">
-                <div className="h-full bg-white rounded-full w-[14.28%]" />
+              {/* Indicador 1/7 e Barra de Progresso no Rodapé */}
+              <div className="pt-3 space-y-2">
+                <div className="text-center font-mono text-[12px] text-[#8e8e93]">
+                  1/7
+                </div>
+                <div className="w-full h-1 bg-[#2c2c2e] rounded-full overflow-hidden">
+                  <div className="h-full bg-white rounded-full w-[14.28%]" />
+                </div>
               </div>
             </div>
           </div>
@@ -886,112 +890,114 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
         )}
 
         {/* ========================================================================= */}
-        {/* ETAPA 7: TUDO PRONTO CONFORME MOCKUP 3 */}
+        {/* ETAPA 7: TUDO PRONTO (FIGMA MOCKUP SCREEN 7) */}
         {/* ========================================================================= */}
         {step === 7 && (
-          <div className="flex-1 flex flex-col justify-between animate-fadeIn py-1 sm:py-2 min-h-[calc(100vh-80px)]">
+          <div className="flex-1 flex flex-col justify-between animate-fadeIn py-2 min-h-[calc(100vh-60px)] sm:min-h-[720px] max-w-sm sm:max-w-md mx-auto w-full">
             <div>
-              {/* Botão Voltar no Canto Superior Esquerdo (Mockup 3) */}
-              <div className="pt-1 pb-3">
+              {/* Botão Voltar no Canto Superior Esquerdo Conforme Figma */}
+              <div className="pt-1 pb-3 flex items-center justify-start">
                 <button
                   type="button"
                   onClick={prevStep}
-                  className="p-1.5 -ml-1 text-zinc-400 hover:text-white rounded-lg transition cursor-pointer"
+                  className="p-2 -ml-2 text-white hover:text-zinc-300 rounded-lg transition cursor-pointer"
                   aria-label="Voltar etapa anterior"
                 >
                   <ChevronLeft className="w-6 h-6" />
                 </button>
               </div>
 
-              {/* Título e Subtítulo Alinhados à Esquerda (Mockup 3) */}
-              <div className="text-left space-y-2 pb-5">
-                <h1 className="text-3xl font-extrabold text-white tracking-tight">
+              {/* Título e Subtítulo Conforme Figma */}
+              <div className="text-left space-y-2 pb-4">
+                <h1 className="text-[28px] font-bold text-white tracking-tight leading-tight">
                   Tudo pronto!
                 </h1>
-                <p className="text-xs sm:text-sm text-zinc-400 leading-relaxed max-w-sm">
+                <p className="text-[15px] text-[#8e8e93] leading-relaxed">
                   Agora é só explorar. Seu feed já está personalizado com base nas suas escolhas.
                 </p>
               </div>
 
-              {/* Card Único Unificado com Selo Luminoso e Lista de Resumo (Mockup 3) */}
-              <div className="w-full rounded-3xl bg-[#0c0d11] border border-zinc-800/80 overflow-hidden shadow-2xl">
-                {/* Metade Superior: Selo Luminoso com Checkmark */}
-                <div className="relative w-full aspect-[2.2/1] sm:aspect-[2.5/1] bg-black flex items-center justify-center overflow-hidden border-b border-zinc-800/40">
-                  <img
-                    src="/assets/aistudio/file_00000000f254820eb392affea4aaa51a_376a3222.png"
-                    alt="FatosBR - Conclusão e Calibragem"
-                    className="w-full h-full object-cover object-center scale-[1.02]"
-                  />
-                  <div className="absolute inset-0 bg-radial-gradient from-transparent via-transparent to-black/40 pointer-events-none" />
+              {/* Glowing Check Circle Conforme Figma (.check-placeholder) */}
+              <div className="relative my-6 flex items-center justify-center">
+                <div className="relative w-36 h-36 sm:w-40 sm:h-40 rounded-full border-2 border-white/80 flex items-center justify-center shadow-[0_0_40px_rgba(255,255,255,0.4),inset_0_0_20px_rgba(255,255,255,0.2)]">
+                  {/* Feixes de luz horizontais / diagonais */}
+                  <div className="absolute w-[160%] h-[1px] bg-gradient-to-r from-transparent via-white/70 to-transparent -rotate-[10deg] pointer-events-none" />
+                  <div className="absolute w-[160%] h-[1px] bg-gradient-to-r from-transparent via-white/70 to-transparent rotate-[10deg] pointer-events-none" />
+                  
+                  {/* Ícone de Check Glow */}
+                  <svg
+                    className="w-16 h-16 sm:w-20 sm:h-20 text-white drop-shadow-[0_0_12px_rgba(255,255,255,0.85)]"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <polyline points="20 6 9 17 4 12" />
+                  </svg>
+                </div>
+              </div>
+
+              {/* Summary Box Conforme Figma (.summary-box) */}
+              <div className="w-full rounded-[24px] bg-[#121212] border border-[#2c2c2e] p-5 space-y-4 text-left shadow-xl">
+                <div className="flex items-center justify-between text-sm">
+                  <div className="flex items-center gap-2.5 text-[#8e8e93]">
+                    <Sliders className="w-4 h-4 text-[#8e8e93]" />
+                    <span>Temas selecionados</span>
+                  </div>
+                  <span className="font-medium text-[#a1a1aa] font-mono">
+                    +{selectedThemes.size || 5}
+                  </span>
                 </div>
 
-                {/* Metade Inferior: 4 Linhas com Ícones Circulares */}
-                <div className="p-4 sm:p-5 space-y-3.5">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-400 shrink-0">
-                        <Sliders className="w-4 h-4" />
-                      </div>
-                      <span className="text-xs sm:text-sm text-zinc-200 font-medium">Temas selecionados</span>
-                    </div>
-                    <span className="font-mono text-xs sm:text-sm font-semibold text-zinc-300">
-                      +{selectedThemes.size || 5}
-                    </span>
+                <div className="flex items-center justify-between text-sm">
+                  <div className="flex items-center gap-2.5 text-[#8e8e93]">
+                    <Users className="w-4 h-4 text-[#8e8e93]" />
+                    <span>Pessoas e empresas</span>
                   </div>
+                  <span className="font-medium text-[#a1a1aa] font-mono">
+                    +{followedEntities.size || 3}
+                  </span>
+                </div>
 
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-400 shrink-0">
-                        <Users className="w-4 h-4" />
-                      </div>
-                      <span className="text-xs sm:text-sm text-zinc-200 font-medium">Pessoas e empresas</span>
-                    </div>
-                    <span className="font-mono text-xs sm:text-sm font-semibold text-zinc-300">
-                      +{followedEntities.size || 3}
-                    </span>
+                <div className="flex items-center justify-between text-sm">
+                  <div className="flex items-center gap-2.5 text-[#8e8e93]">
+                    <Bell className="w-4 h-4 text-[#8e8e93]" />
+                    <span>Notificações ativas</span>
                   </div>
+                  <span className="font-medium text-[#a1a1aa] font-mono">
+                    +{notificationsPreferences.size || 2}
+                  </span>
+                </div>
 
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-400 shrink-0">
-                        <Bell className="w-4 h-4" />
-                      </div>
-                      <span className="text-xs sm:text-sm text-zinc-200 font-medium">Notificações ativas</span>
-                    </div>
-                    <span className="font-mono text-xs sm:text-sm font-semibold text-zinc-300">
-                      +{notificationsPreferences.size || 2}
-                    </span>
+                <div className="flex items-center justify-between text-sm">
+                  <div className="flex items-center gap-2.5 text-[#8e8e93]">
+                    <MapPin className="w-4 h-4 text-[#8e8e93]" />
+                    <span>Localização definida</span>
                   </div>
-
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-400 shrink-0">
-                        <MapPin className="w-4 h-4" />
-                      </div>
-                      <span className="text-xs sm:text-sm text-zinc-200 font-medium">Localização definida</span>
-                    </div>
-                    <span className="text-xs sm:text-sm font-medium text-zinc-300">
-                      {userLocation || 'São Paulo, SP'}
-                    </span>
-                  </div>
+                  <span className="font-medium text-white">
+                    {userLocation || 'São Paulo, SP'}
+                  </span>
                 </div>
               </div>
             </div>
 
             {/* Ações Inferiores Etapa 7: Botão + Indicador 7/7 + Barra 100% */}
-            <div className="pt-4 pb-1 space-y-3 text-center">
+            <div className="pt-4 pb-2 space-y-3 w-full">
               <button
+                type="button"
                 onClick={onComplete}
-                className="w-full py-4 px-6 bg-white text-black hover:bg-zinc-200 font-bold text-sm sm:text-base rounded-full transition cursor-pointer active:scale-[0.99] shadow-lg shadow-white/5"
+                className="w-full py-4 px-6 bg-white text-black hover:bg-zinc-100 font-semibold text-base rounded-full transition cursor-pointer active:scale-[0.99] shadow-lg shadow-white/10"
               >
-                Acessar o FatosBR
+                Acessar a FatosBR
               </button>
 
               <div className="pt-2 space-y-2">
-                <div className="text-center font-mono text-[11px] text-zinc-500 font-medium">
+                <div className="text-center font-mono text-[12px] text-[#8e8e93]">
                   7/7
                 </div>
-                <div className="w-full h-1 bg-zinc-900 rounded-full overflow-hidden border border-zinc-800/40">
+                <div className="w-full h-1 bg-[#2c2c2e] rounded-full overflow-hidden">
                   <div className="h-full bg-white rounded-full w-full" />
                 </div>
               </div>

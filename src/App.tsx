@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   INITIAL_ENTITIES,
   INITIAL_TOPICS,
@@ -656,6 +656,32 @@ export default function App() {
   const [hasError, setHasError] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [unreadCount, setUnreadCount] = useState(2);
+  const [isSearchingExternalApis, setIsSearchingExternalApis] = useState(false);
+  const [externalSearchFailed, setExternalSearchFailed] = useState<string | null>(null);
+
+  // Busca real em APIs externas (GNews / World News API) quando o termo não existe no cache local
+  const handleSearchExternalApis = useCallback(async (query: string) => {
+    const q = query.trim();
+    if (!q || q.length < 2 || isSearchingExternalApis) return;
+    setIsSearchingExternalApis(true);
+    setExternalSearchFailed(null);
+    try {
+      const liveResults = await newsIngestionService.searchLiveApis(q, savedEventIds);
+      if (liveResults && liveResults.length > 0) {
+        setEvents((prev) => {
+          const existingIds = new Set(prev.map((e) => e.id));
+          const newOnes = liveResults.filter((e) => !existingIds.has(e.id));
+          return [...newOnes, ...prev];
+        });
+      } else {
+        setExternalSearchFailed(q);
+      }
+    } catch (err) {
+      setExternalSearchFailed(q);
+    } finally {
+      setIsSearchingExternalApis(false);
+    }
+  }, [isSearchingExternalApis, savedEventIds]);
 
   // Handler para abrir detalhe do evento e registrar no histórico real
   const handleOpenEventDetail = (event: Event) => {
@@ -819,7 +845,16 @@ export default function App() {
       return true;
     });
 
-
+  // Disparo automático nas APIs externas caso o termo pesquisado não exista no cache local
+  useEffect(() => {
+    const q = searchQuery.trim();
+    if (q.length >= 3 && visibleEvents.length === 0 && !isSearchingExternalApis && externalSearchFailed !== q) {
+      const timer = setTimeout(() => {
+        handleSearchExternalApis(q);
+      }, 600);
+      return () => clearTimeout(timer);
+    }
+  }, [searchQuery, visibleEvents.length, isSearchingExternalApis, externalSearchFailed, handleSearchExternalApis]);
 
   // Super Admin oficial e contas autorizadas de administração do FatosBR
   const ADMIN_EMAILS = [
@@ -1846,14 +1881,49 @@ export default function App() {
               {/* EMPTY STATE / NO RESULTS */}
               {!isLoading && !hasError && !activeStateSimulation && visibleEvents.length === 0 && (
                 searchQuery.trim().length > 0 ? (
-                  <NoResultsState
-                    query={searchQuery}
-                    onClear={() => setSearchQuery('')}
-                    onExplore={() => {
-                      setSearchQuery('');
-                      setCurrentNav('explore');
-                    }}
-                  />
+                  isSearchingExternalApis ? (
+                    <div className="p-8 rounded-2xl bg-[#0e1117] border border-[#1e2330] text-center space-y-3 animate-fade-in my-6">
+                      <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center justify-center mx-auto">
+                        <RefreshCw className="w-5 h-5 animate-spin text-emerald-400" />
+                      </div>
+                      <div>
+                        <h3 className="text-sm font-bold text-white">
+                          Buscando nas APIs Integradas (GNews & World News API)...
+                        </h3>
+                        <p className="text-xs text-zinc-400 mt-1 max-w-md mx-auto">
+                          O termo &quot;{searchQuery}&quot; não estava no cache local de eventos. Realizando requisição em tempo real às agências e provedores de notícias...
+                        </p>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      <NoResultsState
+                        query={searchQuery}
+                        onClear={() => {
+                          setSearchQuery('');
+                          setExternalSearchFailed(null);
+                        }}
+                        onExplore={() => {
+                          setSearchQuery('');
+                          setExternalSearchFailed(null);
+                          setCurrentNav('explore');
+                        }}
+                      />
+                      <div className="p-4 rounded-xl bg-[#0f121a] border border-[#1b2233] text-center space-y-2 text-xs">
+                        <p className="text-zinc-400">
+                          Não encontrou o que procurava no cache local?
+                        </p>
+                        <button
+                          onClick={() => handleSearchExternalApis(searchQuery)}
+                          disabled={isSearchingExternalApis}
+                          className="px-4 py-2 rounded-xl bg-[#2378D4] hover:bg-[#1e6ac0] text-white text-xs font-bold cursor-pointer transition shadow-md flex items-center justify-center gap-2 mx-auto disabled:opacity-50"
+                        >
+                          <Search className="w-3.5 h-3.5" />
+                          <span>Buscar &quot;{searchQuery}&quot; nas APIs de Notícias</span>
+                        </button>
+                      </div>
+                    </div>
+                  )
                 ) : activeTab === 'following' ? (
                   <EmptyFollowingState onExplore={() => setCurrentNav('explore')} />
                 ) : (
