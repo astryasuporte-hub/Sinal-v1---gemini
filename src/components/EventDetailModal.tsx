@@ -265,47 +265,27 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
           </div>
         </header>
 
-        {/* ================= CORPO EDITORIAL ================= */}
-        <div className="flex-1 overflow-y-auto overscroll-contain px-4 sm:px-8 pt-4 pb-28 space-y-6">
-          {/* Barra de Ações & Metadados Superior */}
-          <div className="flex items-center justify-between gap-3 flex-wrap">
-            <div className="flex items-center gap-2 text-xs font-mono text-zinc-400">
-              <span className="px-2.5 py-0.5 rounded-full bg-zinc-900 border border-zinc-800 text-white font-bold uppercase text-[10px] tracking-wider">
-                {event.category}
-              </span>
-              <span className="text-zinc-600">·</span>
-              <span>{event.relativeTime || 'Hoje'}</span>
-              <span className="text-zinc-600">·</span>
-              <span className="inline-flex items-center gap-1.5 text-zinc-300">
-                <Layers className="w-3.5 h-3.5 text-zinc-400" />
-                <span>{event.sources.length} {event.sources.length === 1 ? 'fonte' : 'fontes'}</span>
-              </span>
-            </div>
-
-            {/* Botão de Resumo/Íntegra */}
-            {readingMode === 'full' ? (
-              <button
-                onClick={() => setReadingMode('summary')}
-                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-zinc-900 border border-zinc-700 hover:border-white text-zinc-200 hover:text-white text-xs font-semibold transition cursor-pointer shadow-sm"
-                title="Resumir a notícia"
-              >
-                <Sparkles className="w-3.5 h-3.5 text-amber-300" />
-                <span>Resumir a notícia</span>
-              </button>
-            ) : (
-              <button
-                onClick={() => setReadingMode('full')}
-                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-white hover:bg-zinc-200 text-black text-xs font-bold transition cursor-pointer shadow-sm"
-                title="Ver notícia completa na íntegra"
-              >
-                <Layers className="w-3.5 h-3.5" />
-                <span>Ver notícia na íntegra</span>
-              </button>
+        {/* ================= CORPO EDITORIAL — MODO LEITURA FOCADO (ZEN) ================= */}
+        <div className="flex-1 overflow-y-auto overscroll-contain px-4 sm:px-8 pt-4 pb-20 space-y-6">
+          {/* Metadados Unboxed (Zero-Pill) */}
+          <div className="flex items-center gap-2 text-xs font-mono text-zinc-400 flex-wrap">
+            <span className="text-white font-bold uppercase tracking-wider text-[11px]">
+              {event.category}
+            </span>
+            <span className="text-zinc-600">·</span>
+            <span>{event.relativeTime || 'Hoje'}</span>
+            <span className="text-zinc-600">·</span>
+            <span>{readingTimeMin} min de leitura</span>
+            {event.sources[0] && (
+              <>
+                <span className="text-zinc-600">·</span>
+                <span className="text-zinc-300 font-semibold">{event.sources[0].sourceName}</span>
+              </>
             )}
           </div>
 
-          {/* Imagem de Capa Cinematográfica (permanece visível no resumo e na íntegra) */}
-          <div className="relative w-full aspect-video sm:h-64 rounded-2xl overflow-hidden border border-[#1f2229] bg-zinc-950 shadow-lg">
+          {/* Imagem de Capa Cinematográfica */}
+          <div className="relative w-full aspect-video sm:h-72 rounded-2xl overflow-hidden border border-[#1f2229] bg-zinc-950 shadow-xl">
             <img
               src={event.imageUrl || defaultFallbackImage}
               alt={event.title}
@@ -314,269 +294,174 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
               }}
               className="w-full h-full object-cover object-center filter brightness-95 contrast-105"
             />
-            <div className="absolute inset-0 bg-gradient-to-t from-[#0c0d10] via-transparent to-black/30" />
-            <div className="absolute bottom-2.5 left-3 px-2 py-0.5 rounded-md bg-black/75 backdrop-blur-sm border border-white/10 text-[10px] text-zinc-300 font-mono">
-              {event.sources[0]?.sourceName || 'Cobertura de Imprensa'}
+            <div className="absolute inset-0 bg-gradient-to-t from-[#0c0d10] via-transparent to-transparent opacity-80" />
+            <div className="absolute bottom-3 left-4 px-2.5 py-1 rounded-md bg-black/75 backdrop-blur-md border border-white/10 text-[11px] text-zinc-300 font-mono">
+              Fonte apurada: {event.sources[0]?.sourceName || 'FatosBR News Engine'}
             </div>
           </div>
 
-          {/* Título Principal & Linha Fina */}
-          <div className="space-y-2.5">
+          {/* Cabeçalho da Notícia: Título Completo e Subtítulo */}
+          <div className="space-y-3 pt-1">
             <h1
               id="event-modal-title"
-              className="text-lg sm:text-2xl lg:text-[26px] font-bold text-white tracking-tight leading-snug break-words"
+              className="text-2xl sm:text-3xl lg:text-[32px] font-bold text-white tracking-tight leading-[1.25] break-words"
             >
               {event.title}
             </h1>
 
-            <p className="text-sm sm:text-base text-zinc-300 font-normal leading-relaxed break-words">
+            <p className="text-base sm:text-lg text-zinc-300 font-normal leading-relaxed break-words border-l-2 border-zinc-700 pl-4 py-1 italic">
               {event.summary}
             </p>
           </div>
 
-          {readingMode === 'summary' ? (
-            /* ================= MODO RESUMIDO ================= */
-            <div className="space-y-5 pt-1">
-              {/* Card 1: Fato Central */}
-              <div className="p-5 rounded-2xl border border-zinc-800 bg-[#0e1014] space-y-2">
-                <div className="flex items-center gap-2 text-xs font-mono uppercase tracking-wider text-zinc-300 font-bold">
-                  <span className="w-2 h-2 rounded-full bg-white" />
-                  <span>1. Fato Central</span>
-                </div>
-                <p className="text-sm sm:text-[15px] text-zinc-200 leading-relaxed font-light">
-                  {event.whatHappened || event.summary}
+          {/* Barra Opcional de Leitura em Áudio */}
+          <div className="flex items-center justify-between p-3.5 rounded-xl bg-[#111216] border border-zinc-800/80 text-xs">
+            <div className="flex items-center gap-2.5">
+              <Headphones className="w-4 h-4 text-emerald-400" />
+              <span className="text-zinc-300 font-medium">Ouvir síntese da matéria ({audioDurationFormatted})</span>
+            </div>
+            <button
+              onClick={handleToggleAudio}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                isPlayingAudio
+                  ? 'bg-emerald-500 text-black hover:bg-emerald-400'
+                  : 'bg-zinc-800 hover:bg-zinc-700 text-white'
+              }`}
+            >
+              {isPlayingAudio ? (
+                <>
+                  <Pause className="w-3.5 h-3.5" />
+                  <span>Pausar</span>
+                </>
+              ) : (
+                <>
+                  <Play className="w-3.5 h-3.5" />
+                  <span>Ouvir</span>
+                </>
+              )}
+            </button>
+          </div>
+
+          {/* Notícia Completa na Íntegra — Leitura Fluída e Tranquila */}
+          <article className="space-y-5 text-[16px] sm:text-[17px] text-zinc-200 leading-[1.85] font-normal selection:bg-zinc-700 selection:text-white pt-2">
+            {/* Parágrafo de Abertura / Fato Principal */}
+            <p className="first-letter:text-3xl first-letter:font-bold first-letter:mr-1 first-letter:float-left first-letter:text-white">
+              {event.whatHappened || event.summary}
+            </p>
+
+            {/* Parágrafo de Aprofundamento Editorial */}
+            {event.summary && event.summary !== event.whatHappened && (
+              <p>
+                {event.summary}
+              </p>
+            )}
+
+            {/* Análise de Contexto e Relevância em Texto Corrido */}
+            {event.whyItMatters && (
+              <div className="my-6 p-5 rounded-2xl bg-[#111216]/80 border-l-4 border-white/60 space-y-2">
+                <span className="text-xs font-mono uppercase tracking-wider text-zinc-400 font-bold block">
+                  Por que este acontecimento é relevante
+                </span>
+                <p className="text-[15px] sm:text-base text-zinc-300 leading-relaxed font-normal">
+                  {event.whyItMatters}
                 </p>
               </div>
+            )}
 
-              {/* Card 2: Impacto no Mercado & Negócios */}
-              <div className="p-5 rounded-2xl border border-zinc-800 bg-black space-y-2">
-                <div className="flex items-center gap-2 text-xs font-mono uppercase tracking-wider text-zinc-300 font-bold">
-                  <span className="w-2 h-2 rounded-full bg-zinc-400" />
-                  <span>2. Impacto Estratégico & nos Mercados</span>
-                </div>
-                <p className="text-sm sm:text-[15px] text-zinc-300 leading-relaxed font-light">
-                  {event.marketImpact || event.whyItMatters || 'Repercussão direta na alocação setorial, avaliação de risco e tomada de decisão estratégica.'}
-                </p>
-              </div>
+            {/* Impacto de Mercado e Regulatório (se disponível) */}
+            {event.marketImpact && (
+              <p>
+                {event.marketImpact}
+              </p>
+            )}
 
-              {/* Card 3: Desdobramentos & O que Monitorar */}
-              <div className="p-5 rounded-2xl border border-zinc-800/80 bg-[#0a0b0e] space-y-2">
-                <div className="flex items-center gap-2 text-xs font-mono uppercase tracking-wider text-zinc-300 font-bold">
-                  <span className="w-2 h-2 rounded-full bg-zinc-500" />
-                  <span>3. Desdobramentos & O que Monitorar</span>
-                </div>
-                <p className="text-sm sm:text-[15px] text-zinc-400 leading-relaxed font-light">
-                  {event.nextSteps || 'Acompanhar desdobramentos nas próximas 24h a 48h, reações de órgãos reguladores e comunicados oficiais ao mercado.'}
-                </p>
-              </div>
+            {/* Próximos Passos e Monitoramento */}
+            {event.nextSteps && (
+              <p className="text-zinc-300">
+                {event.nextSteps}
+              </p>
+            )}
 
-              {/* Fontes Checadas */}
-              <div className="p-4 rounded-2xl border border-zinc-800 bg-[#0e1014] space-y-2.5">
-                <div className="flex items-center justify-between text-xs font-mono text-zinc-400">
-                  <span className="uppercase tracking-wider font-semibold">
-                    Fontes Consultadas ({event.sources.length})
-                  </span>
-                  <span className="text-[11px]">Links originais verificados</span>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {event.sources.map((src) => (
-                    <a
-                      key={src.id}
-                      href={src.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-600 text-xs text-zinc-300 hover:text-white transition cursor-pointer"
-                    >
-                      <span>{src.sourceName}</span>
-                      <ExternalLink className="w-3 h-3 text-zinc-500" />
-                    </a>
+            {/* Linha do Tempo Discreta (se houver histórico) */}
+            {event.timeline && event.timeline.length > 0 && (
+              <div className="pt-6 mt-8 border-t border-zinc-800/80 space-y-4">
+                <h3 className="text-xs sm:text-sm font-bold uppercase tracking-wider text-white">
+                  Cronologia dos acontecimentos
+                </h3>
+                <div className="space-y-3">
+                  {event.timeline.map((item, idx) => (
+                    <div key={item.id || idx} className="flex items-start gap-3 text-xs sm:text-sm">
+                      <span className="font-mono text-zinc-400 shrink-0 mt-0.5 font-semibold">
+                        {item.time || item.date}
+                      </span>
+                      <span className="text-zinc-600">·</span>
+                      <span className="text-zinc-200">
+                        <strong className="text-white font-semibold">{item.title}:</strong> {item.description}
+                      </span>
+                    </div>
                   ))}
                 </div>
               </div>
+            )}
+          </article>
 
-              {/* Botão de Destaque para Ler a Notícia Inteira */}
-              <div className="pt-2">
-                <button
-                  onClick={() => setReadingMode('full')}
-                  className="w-full py-3.5 px-4 rounded-2xl bg-white hover:bg-zinc-200 text-black font-bold text-xs uppercase tracking-wider transition flex items-center justify-center gap-2 shadow-xl cursor-pointer"
-                >
-                  <Layers className="w-4 h-4" />
-                  <span>Ler Notícia Completa na Íntegra</span>
-                </button>
-              </div>
+          {/* Rodapé do Artigo: Fonte Original e Créditos */}
+          <div className="pt-8 border-t border-zinc-800/80 space-y-3">
+            <div className="flex items-center justify-between text-xs font-mono text-zinc-400">
+              <span>Fontes Jornalísticas ({event.sources.length})</span>
+              <span>Cobertura Verificada</span>
             </div>
-          ) : (
-            /* ================= MODO ÍNTEGRA ================= */
-            <div className="space-y-6">
-              {/* Reportagem na Íntegra: O que Aconteceu */}
-              <section className="space-y-3 pt-2">
-                <div className="flex items-center gap-2">
-                  <span className="w-1.5 h-3.5 bg-white rounded-full"></span>
-                  <h2 className="text-xs sm:text-sm font-bold uppercase tracking-wider text-white">
-                    Reportagem Completa & Apuração
-                  </h2>
-                </div>
-                <div className="p-5 rounded-2xl border border-zinc-800 bg-[#0e1014] text-sm sm:text-[15px] text-zinc-200 leading-relaxed font-normal space-y-3">
-                  <p>{event.whatHappened}</p>
-                  {event.summary !== event.whatHappened && (
-                    <p className="text-zinc-300">{event.summary}</p>
-                  )}
-                </div>
-              </section>
-
-              {/* Contexto: Por que isso importa */}
-              {event.whyItMatters && (
-                <section className="space-y-3 pt-2">
-                  <div className="flex items-center gap-2">
-                    <span className="w-1.5 h-3.5 bg-zinc-400 rounded-full"></span>
-                    <h2 className="text-xs sm:text-sm font-bold uppercase tracking-wider text-white">
-                      Análise de Impacto
-                    </h2>
-                  </div>
-                  <div className="p-4 sm:p-5 rounded-2xl border border-[#1f2229] bg-[#121418]/90 text-sm sm:text-[15px] text-zinc-200 leading-relaxed font-normal">
-                    {event.whyItMatters}
-                  </div>
-                </section>
-              )}
-
-              {/* Linha do Tempo e Evolução */}
-              {event.timeline && event.timeline.length > 0 && (
-                <section className="space-y-4 pt-3 border-t border-[#1f2229]">
-                  <div>
-                    <h2 className="text-xs sm:text-sm font-bold uppercase tracking-wider text-white">
-                      Evolução cronológica
-                    </h2>
-                    <p className="text-[11px] text-zinc-400 mt-0.5">
-                      Linha do tempo dos fatos verificados.
-                    </p>
-                  </div>
-
-                  <div className="relative pl-6 space-y-6 before:absolute before:left-2 before:top-2 before:bottom-2 before:w-[2px] before:bg-[#1f2229]">
-                    {event.timeline.map((item, idx) => (
-                      <div key={item.id || idx} className="relative group">
-                        <div className="absolute -left-6 top-1 w-4 h-4 rounded-full bg-[#0c0d10] border-2 border-zinc-400 flex items-center justify-center">
-                          <div className="w-1.5 h-1.5 rounded-full bg-white" />
-                        </div>
-
-                        <div className="space-y-1">
-                          <div className="flex items-center gap-2 text-[11px] font-mono text-zinc-400">
-                            <Clock className="w-3 h-3 text-zinc-400" />
-                            <span>{item.time || item.date}</span>
-                          </div>
-
-                          <h4 className="text-xs sm:text-sm font-bold text-white leading-tight">
-                            {item.title}
-                          </h4>
-
-                          <p className="text-xs text-zinc-300 leading-relaxed">
-                            {item.description}
-                          </p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </section>
-              )}
-
-              {/* Fontes Jornalísticas Detalhadas */}
-              <section id="secao-fontes" className="space-y-4 pt-3 border-t border-[#1f2229]">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h2 className="text-xs sm:text-sm font-bold uppercase tracking-wider text-white">
-                      Fontes Jornalísticas ({event.sources.length})
-                    </h2>
-                    <p className="text-[11px] text-zinc-400 mt-0.5">
-                      Artigos originais consultados para esta cobertura.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="space-y-2.5">
-                  {event.sources.map((src) => {
-                    const badge = getSourceBadge(src.sourceName);
-                    return (
-                      <a
-                        key={src.id}
-                        href={src.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="p-3.5 sm:p-4 rounded-xl border border-[#1f2229] bg-[#121418] hover:bg-[#16181f] hover:border-zinc-700 transition flex items-start justify-between gap-3 group block"
-                      >
-                        <div className="flex items-start gap-3 flex-1 min-w-0">
-                          <div
-                            style={{ backgroundColor: badge.bg, color: badge.text || '#ffffff' }}
-                            className="w-7 h-7 rounded-lg flex items-center justify-center text-[10px] font-extrabold shrink-0 mt-0.5"
-                          >
-                            {badge.label.slice(0, 3)}
-                          </div>
-
-                          <div className="space-y-1 flex-1 min-w-0">
-                            <div className="flex items-center gap-2 text-xs">
-                              <span className="font-semibold text-white group-hover:text-zinc-100">
-                                {src.sourceName}
-                              </span>
-                              <span className="text-[11px] text-zinc-400 font-mono">
-                                · {src.domain}
-                              </span>
-                            </div>
-
-                            <p className="text-xs sm:text-[13px] text-zinc-300 group-hover:text-white leading-snug line-clamp-2">
-                              {src.headline}
-                            </p>
-                          </div>
-                        </div>
-
-                        <div className="p-1 text-zinc-400 group-hover:text-white shrink-0 mt-0.5 transition">
-                          <ExternalLink className="w-3.5 h-3.5" />
-                        </div>
-                      </a>
-                    );
-                  })}
-                </div>
-              </section>
-
-              {/* Botão Inferior para Resumir */}
-              <div className="pt-3 border-t border-zinc-800">
-                <button
-                  onClick={() => setReadingMode('summary')}
-                  className="w-full py-3 rounded-xl border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 hover:text-white font-semibold text-xs tracking-wider transition flex items-center justify-center gap-2 cursor-pointer shadow-sm"
+            <div className="flex flex-wrap gap-2">
+              {event.sources.map((src) => (
+                <a
+                  key={src.id}
+                  href={src.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-[#111216] hover:bg-[#16181f] border border-zinc-800 hover:border-zinc-600 text-xs text-zinc-300 hover:text-white transition cursor-pointer"
                 >
-                  <Sparkles className="w-4 h-4 text-amber-300" />
-                  <span>Resumir a notícia</span>
-                </button>
-              </div>
+                  <span className="font-semibold text-white">{src.sourceName}</span>
+                  <span className="text-zinc-500 font-mono">({src.domain})</span>
+                  <ExternalLink className="w-3.5 h-3.5 text-zinc-400" />
+                </a>
+              ))}
             </div>
-          )}
+          </div>
         </div>
 
-        {/* ================= BARRA INFERIOR FIXA (STICKY BOTTOM BAR) ================= */}
-        <footer className="sticky bottom-0 z-30 px-4 sm:px-6 py-3.5 bg-[#0c0d10]/95 border-t border-[#1f2229] backdrop-blur-md flex items-center justify-between gap-3">
-          <div className="flex items-center gap-1.5">
+        {/* ================= BARRA INFERIOR FIXA TRANQUILA ================= */}
+        <footer className="sticky bottom-0 z-30 px-4 sm:px-6 py-3 bg-[#0c0d10]/98 border-t border-[#1f2229] backdrop-blur-md flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
             <button
               onClick={() => {
                 onToggleSave(event.id);
                 showToast(event.isSaved ? 'Removido dos salvos' : 'Salvo nos seus favoritos');
               }}
-              className={`p-2.5 rounded-xl border transition cursor-pointer ${
+              className={`min-h-[42px] px-3.5 rounded-xl border text-xs font-semibold flex items-center gap-2 transition cursor-pointer ${
                 event.isSaved
                   ? 'bg-white text-black border-white'
-                  : 'bg-zinc-900 text-zinc-300 border-[#1f2229] hover:text-white hover:bg-zinc-800'
+                  : 'bg-zinc-900 text-zinc-300 border-zinc-800 hover:text-white hover:bg-zinc-800'
               }`}
-              title="Salvar"
             >
               {event.isSaved ? (
-                <BookmarkCheck className="w-4 h-4 fill-black" />
+                <>
+                  <BookmarkCheck className="w-4 h-4 fill-black" />
+                  <span>Salvo</span>
+                </>
               ) : (
-                <Bookmark className="w-4 h-4" />
+                <>
+                  <Bookmark className="w-4 h-4" />
+                  <span>Salvar notícia</span>
+                </>
               )}
             </button>
 
             <button
               onClick={handleShare}
-              className="p-2.5 rounded-xl bg-zinc-900 border border-[#1f2229] text-zinc-300 hover:text-white hover:bg-zinc-800 transition cursor-pointer"
-              title="Compartilhar"
+              className="min-h-[42px] px-3.5 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white hover:bg-zinc-800 transition cursor-pointer text-xs font-semibold flex items-center gap-1.5"
             >
-              <Share2 className="w-4 h-4" />
+              <Share2 className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Compartilhar</span>
             </button>
           </div>
 
@@ -584,9 +469,9 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
             href={event.sources[0]?.url || '#'}
             target="_blank"
             rel="noopener noreferrer"
-            className="flex-1 max-w-sm py-2.5 px-4 rounded-xl bg-white hover:bg-zinc-200 text-black text-xs font-bold transition flex items-center justify-center gap-2 shadow-lg cursor-pointer ml-auto"
+            className="min-h-[42px] px-4 rounded-xl bg-white hover:bg-zinc-200 text-black text-xs font-bold transition flex items-center justify-center gap-2 shadow-md cursor-pointer ml-auto"
           >
-            <span>Ver na fonte principal ({event.sources[0]?.sourceName || 'Externa'})</span>
+            <span>Ler matéria na íntegra no {event.sources[0]?.sourceName || 'Veículo Original'}</span>
             <ExternalLink className="w-3.5 h-3.5" />
           </a>
         </footer>

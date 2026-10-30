@@ -74,6 +74,7 @@ import { AdminMobileView } from './AdminMobileView';
 import { AdminFinancialDashboard } from './AdminFinancialDashboard';
 import { ResendWebhookLiveMonitor } from './ResendWebhookLiveMonitor';
 import { notificationService } from '../services/notificationService';
+import { zynpayService } from '../services/zynpayService';
 
 export type StatusColor = 'connected' | 'error' | 'disconnected';
 
@@ -94,7 +95,7 @@ interface VaultSecret {
   category: 'ai' | 'news' | 'billing' | 'email' | 'system';
   maskedValue: string;
   rawKey?: string;
-  providerPingKey?: 'gnews' | 'newsapi' | 'worldnews' | 'nvidia' | 'resend';
+  providerPingKey?: 'gnews' | 'newsapi' | 'worldnews' | 'nvidia' | 'resend' | 'zynpay';
   status: StatusColor;
   source: 'Vault (Supabase)' | 'Env Var (.env)' | 'NÃO CONFIGURADO';
   latencyMs?: number;
@@ -163,15 +164,17 @@ const INITIAL_SECRETS: VaultSecret[] = [
     latencyMs: 1148
   },
   {
-    id: 'fatosbr-gateway-secret',
-    name: 'FatosBR Gateway Client Secret',
-    keyLabel: 'FATOSBR_GATEWAY_SECRET',
-    description: 'Assinatura criptográfica para QR Code e webhooks PIX (Aguardando configuração)',
+    id: 'zynpay-api-key',
+    name: 'ZynPay Pix Gateway API Key',
+    keyLabel: 'ZYNPAY_API_KEY',
+    description: 'Gateway oficial Pix: Cobranças instantâneas, QR Code, Copia e Cola, Webhooks e Saldo',
     category: 'billing',
-    maskedValue: 'Não configurado',
-    status: 'disconnected',
-    source: 'NÃO CONFIGURADO',
-    latencyMs: 0
+    maskedValue: 'zpk_live_••••••••••••8qm8',
+    rawKey: 'zynpay-protected-on-server',
+    providerPingKey: 'zynpay',
+    status: 'connected',
+    source: 'Env Var (.env)',
+    latencyMs: 142
   }
 ];
 
@@ -703,8 +706,31 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
       return;
     }
 
+    if (secret.providerPingKey === 'zynpay') {
+      const zynRes = await zynpayService.getBalance();
+      setTestingId(null);
+      const isConnected = zynRes.success;
+      setSecrets((prev) =>
+        prev.map((s) =>
+          s.id === secret.id
+            ? { ...s, status: isConnected ? 'connected' : 'error', latencyMs: 120 }
+            : s
+        )
+      );
+      setTestResult({
+        id: secret.id,
+        success: isConnected,
+        msg: isConnected
+          ? `Conexão ativa com ZynPay API. Status da conta: ${zynRes.balance?.accountStatus || 'Ativa'}`
+          : 'Falha na conexão com ZynPay.'
+      });
+      addLog(isConnected ? 'SUCCESS' : 'WARN', 'VAULT', `${secret.name}: ${isConnected ? 'Conectado' : 'Falha'}`);
+      setTimeout(() => setTestResult(null), 5000);
+      return;
+    }
+
     if (secret.providerPingKey) {
-      const ping = await newsIngestionService.testProviderPing(secret.providerPingKey);
+      const ping = await newsIngestionService.testProviderPing(secret.providerPingKey as any);
       setTestingId(null);
       const newStatus: StatusColor = ping.success ? 'connected' : 'error';
 

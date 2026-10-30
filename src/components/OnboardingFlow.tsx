@@ -41,7 +41,7 @@ import { usePWAInstall } from '../hooks/usePWAInstall';
 import { searchBrazilLocations, BrazilLocation } from '../data/brazilLocations';
 
 interface OnboardingFlowProps {
-  onComplete: () => void;
+  onComplete: (themes?: string[]) => void;
   onOpenLogin?: () => void;
   entities?: Entity[];
   topics?: Topic[];
@@ -82,9 +82,18 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
     []
   );
 
-  const [selectedThemes, setSelectedThemes] = useState<Set<string>>(
-    new Set(['tech', 'business', 'politics', 'economy', 'science'])
-  );
+  const [selectedThemes, setSelectedThemes] = useState<Set<string>>(() => {
+    try {
+      const saved = localStorage.getItem('fatosbr_user_interests');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return new Set(parsed);
+        }
+      }
+    } catch {}
+    return new Set(['tech', 'business', 'politics', 'economy', 'science']);
+  });
   const [themeSearch, setThemeSearch] = useState('');
 
   const toggleTheme = (id: string) => {
@@ -95,6 +104,11 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
       } else {
         next.add(id);
       }
+      try {
+        const arr = Array.from(next);
+        localStorage.setItem('fatosbr_user_interests', JSON.stringify(arr));
+        window.dispatchEvent(new CustomEvent('fatosbr_interests_updated', { detail: { interests: arr } }));
+      } catch {}
       return next;
     });
   };
@@ -404,7 +418,7 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
                 O que te interessa?
               </h1>
               <p className="text-xs sm:text-sm text-zinc-400 mt-1.5 mb-5">
-                Escolha pelo menos 5 temas para começar a personalizar seu feed.
+                Escolha os temas de seu interesse. O seu feed &quot;Para você&quot; exibirá exatamente as notícias dessas categorias.
               </p>
 
               {/* Barra de Busca de Temas */}
@@ -987,7 +1001,14 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
             <div className="pt-4 pb-2 space-y-3 w-full">
               <button
                 type="button"
-                onClick={onComplete}
+                onClick={() => {
+                  const arr = Array.from(selectedThemes);
+                  try {
+                    localStorage.setItem('fatosbr_user_interests', JSON.stringify(arr));
+                    window.dispatchEvent(new CustomEvent('fatosbr_interests_updated', { detail: { interests: arr } }));
+                  } catch {}
+                  onComplete(arr);
+                }}
                 className="w-full py-4 px-6 bg-white text-black hover:bg-zinc-100 font-semibold text-base rounded-full transition cursor-pointer active:scale-[0.99] shadow-lg shadow-white/10"
               >
                 Acessar a FatosBR

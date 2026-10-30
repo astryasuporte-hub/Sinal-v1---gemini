@@ -155,8 +155,7 @@ export const EventCard: React.FC<EventCardProps> = ({
   return (
     <article
       onClick={() => onOpenDetail(event)}
-      style={{ animationDelay: `${Math.min(index, 10) * 45}ms` }}
-      className="animate-feed-card group relative rounded-2xl bg-[#111215] hover:border-zinc-700/80 transition-all duration-200 overflow-hidden cursor-pointer w-full max-w-full border border-[#1e2025]"
+      className="group relative rounded-2xl bg-[#111215] hover:border-zinc-700/80 transition-all duration-200 overflow-hidden cursor-pointer w-full max-w-full border border-[#1e2025]"
     >
       {/* Imagem sutil integrada à direita com gradiente escuro de fusão editorial */}
       {event.imageUrl && !imgError && (

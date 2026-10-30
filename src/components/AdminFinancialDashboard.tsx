@@ -7,7 +7,7 @@
  * MRR, ARR, Inadimplência, Métodos de Liquidação (PIX, Cartão, Boleto) e Transações.
  */
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import {
   CreditCard,
   TrendingUp,
@@ -25,9 +25,19 @@ import {
   Sparkles,
   ShieldCheck,
   ChevronRight,
-  Wallet
+  Wallet,
+  BarChart3,
+  Activity,
+  QrCode,
+  Copy,
+  Check,
+  Zap,
+  ExternalLink,
+  Play,
+  X
 } from 'lucide-react';
 import { AdminUser } from '../services/adminService';
+import { zynpayService, ZynPayBalance, ZynPayCharge, ZynPayWebhookItem } from '../services/zynpayService';
 import {
   BarChart,
   Bar,
@@ -68,6 +78,89 @@ export const AdminFinancialDashboard: React.FC<AdminFinancialDashboardProps> = (
   const [statusFilter, setStatusFilter] = useState<'all' | 'paid' | 'pending' | 'trial_free'>('all');
   const [searchTerm, setSearchTerm] = useState('');
   const [isExporting, setIsExporting] = useState(false);
+
+  // Estados específicos da integração ZynPay
+  const [dashboardSubTab, setDashboardSubTab] = useState<'overview' | 'zynpay' | 'webhooks'>('overview');
+  const [zynBalance, setZynBalance] = useState<ZynPayBalance | null>(null);
+  const [zynCharges, setZynCharges] = useState<ZynPayCharge[]>([]);
+  const [zynWebhooks, setZynWebhooks] = useState<ZynPayWebhookItem[]>([]);
+  const [loadingZyn, setLoadingZyn] = useState<boolean>(false);
+  const [creatingTestCharge, setCreatingTestCharge] = useState<boolean>(false);
+  const [selectedQrModal, setSelectedQrModal] = useState<ZynPayCharge | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [simulatingPaymentId, setSimulatingPaymentId] = useState<string | null>(null);
+
+  // Sincronização em tempo real dos dados da ZynPay
+  const fetchZynPayData = React.useCallback(async () => {
+    setLoadingZyn(true);
+    try {
+      const [balRes, chgRes, whkRes] = await Promise.all([
+        zynpayService.getBalance(),
+        zynpayService.listCharges(),
+        zynpayService.getWebhookLogs()
+      ]);
+
+      if (balRes.success && balRes.balance) {
+        setZynBalance(balRes.balance);
+      }
+      if (chgRes.success && chgRes.charges) {
+        setZynCharges(chgRes.charges);
+      }
+      if (whkRes.success && whkRes.events) {
+        setZynWebhooks(whkRes.events);
+      }
+    } catch (e) {
+      console.error('[AdminFinancialDashboard] Erro ao carregar ZynPay:', e);
+    } finally {
+      setLoadingZyn(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchZynPayData();
+    const interval = setInterval(fetchZynPayData, 10000);
+    return () => clearInterval(interval);
+  }, [fetchZynPayData]);
+
+  const handleCreateTestCharge = async () => {
+    setCreatingTestCharge(true);
+    try {
+      const res = await zynpayService.createPixCharge({
+        amountCents: 2990,
+        description: 'Assinatura FatosBR Pro - Teste Admin',
+        customer: { name: 'Super Admin FatosBR', email: 'admin@fatosbr.com.br' }
+      });
+      if (res.success && res.charge) {
+        onShowToast?.('Cobrança Pix ZynPay gerada com sucesso!');
+        await fetchZynPayData();
+        setSelectedQrModal(res.charge);
+      } else {
+        onShowToast?.(res.error || 'Erro ao gerar cobrança de teste.');
+      }
+    } finally {
+      setCreatingTestCharge(false);
+    }
+  };
+
+  const handleSimulateWebhook = async (chargeId: string) => {
+    setSimulatingPaymentId(chargeId);
+    try {
+      const ok = await zynpayService.simulateWebhookPayment(chargeId);
+      if (ok) {
+        onShowToast?.(`Notificação de pagamento confirmada para ${chargeId}!`);
+        await fetchZynPayData();
+      }
+    } finally {
+      setSimulatingPaymentId(null);
+    }
+  };
+
+  const copyToClipboard = (text: string, id: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedId(id);
+    onShowToast?.('Código PIX Copia e Cola copiado com sucesso.');
+    setTimeout(() => setCopiedId(null), 2500);
+  };
 
   // Cálculos baseados na base 100% real de leitores
   const metrics = useMemo(() => {
@@ -280,10 +373,124 @@ export const AdminFinancialDashboard: React.FC<AdminFinancialDashboardProps> = (
         </div>
       </div>
 
-      {/* Grid de Métricas Principais (4 Cards Executivos) */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {/* Card 1: Total Faturado */}
-        <div className="p-4 sm:p-5 rounded-2xl bg-[#07111D] border border-[#183047] space-y-2 relative overflow-hidden group hover:border-[#2378D4]/50 transition">
+      {/* Sub-navegação entre Visão Geral, ZynPay Gateway e Webhooks */}
+      <div className="flex flex-wrap items-center justify-between gap-3 p-2 rounded-2xl bg-[#07111D] border border-[#183047]">
+        <div className="flex flex-wrap items-center gap-1.5 text-xs font-semibold">
+          <button
+            onClick={() => setDashboardSubTab('overview')}
+            className={`px-3.5 py-2 rounded-xl transition cursor-pointer flex items-center gap-2 ${
+              dashboardSubTab === 'overview'
+                ? 'bg-[#2378D4] text-white shadow-md'
+                : 'text-[#94A7BC] hover:text-white hover:bg-[#0A1726]'
+            }`}
+          >
+            <BarChart3 className="w-3.5 h-3.5" />
+            <span>Visão Geral & Faturamento</span>
+          </button>
+
+          <button
+            onClick={() => setDashboardSubTab('zynpay')}
+            className={`px-3.5 py-2 rounded-xl transition cursor-pointer flex items-center gap-2 ${
+              dashboardSubTab === 'zynpay'
+                ? 'bg-[#2378D4] text-white shadow-md'
+                : 'text-[#94A7BC] hover:text-white hover:bg-[#0A1726]'
+            }`}
+          >
+            <Zap className="w-3.5 h-3.5 text-emerald-400" />
+            <span>ZynPay Gateway Pix ({zynCharges.length})</span>
+            {zynBalance?.accountStatus === 'VERIFIED' ? (
+              <span className="w-2 h-2 rounded-full bg-emerald-400" />
+            ) : (
+              <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+            )}
+          </button>
+
+          <button
+            onClick={() => setDashboardSubTab('webhooks')}
+            className={`px-3.5 py-2 rounded-xl transition cursor-pointer flex items-center gap-2 ${
+              dashboardSubTab === 'webhooks'
+                ? 'bg-[#2378D4] text-white shadow-md'
+                : 'text-[#94A7BC] hover:text-white hover:bg-[#0A1726]'
+            }`}
+          >
+            <Activity className="w-3.5 h-3.5 text-[#41C8F4]" />
+            <span>Webhooks ZynPay ({zynWebhooks.length})</span>
+          </button>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <button
+            onClick={fetchZynPayData}
+            disabled={loadingZyn}
+            className="px-3 py-1.5 rounded-xl bg-[#0A1726] border border-[#183047] hover:border-[#2378D4] text-xs font-semibold text-[#F4F7FB] flex items-center gap-1.5 transition cursor-pointer"
+            title="Atualizar dados da ZynPay"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 text-[#41C8F4] ${loadingZyn ? 'animate-spin' : ''}`} />
+            <span className="hidden sm:inline">Sincronizar ZynPay</span>
+          </button>
+
+          <button
+            onClick={handleCreateTestCharge}
+            disabled={creatingTestCharge}
+            className="px-3 py-1.5 rounded-xl bg-emerald-500/15 border border-emerald-500/30 hover:bg-emerald-500/25 text-xs font-semibold text-emerald-400 flex items-center gap-1.5 transition cursor-pointer"
+            title="Gerar cobrança Pix real de teste na ZynPay"
+          >
+            <QrCode className="w-3.5 h-3.5" />
+            <span>+ Gerar Pix Teste (R$ 29,90)</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Banner de Saldo e Credenciais ZynPay */}
+      <div className="p-4 sm:p-5 rounded-2xl bg-gradient-to-r from-[#07111D] to-[#0A1726] border border-[#183047] flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              ZynPay API Live Conectada
+            </span>
+            <span className="text-[11px] font-mono text-[#94A7BC]">
+              Chave: <strong className="text-zinc-300">zpk_live_••••••••••••8qm8</strong>
+            </span>
+            {zynBalance?.accountStatus === 'VERIFIED' ? (
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                Conta Verificada
+              </span>
+            ) : (
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                Aguardando Verificação Cadastral (Modo Homologação Ativo)
+              </span>
+            )}
+          </div>
+          <p className="text-xs text-[#94A7BC]">
+            Ambiente de liquidação Pix com conciliação automática, criação de QR Code e webhooks server-side.
+          </p>
+        </div>
+
+        <div className="flex items-center gap-6 w-full lg:w-auto justify-between lg:justify-end border-t lg:border-t-0 border-[#183047] pt-3 lg:pt-0">
+          <div>
+            <div className="text-[11px] text-[#94A7BC] uppercase font-mono">Saldo Disponível</div>
+            <div className="text-xl font-bold font-mono text-[#20D6A0]">
+              {zynpayService.formatCurrency(zynBalance?.available || 0)}
+            </div>
+          </div>
+          <div className="h-8 w-px bg-[#183047]" />
+          <div>
+            <div className="text-[11px] text-[#94A7BC] uppercase font-mono">Saldo a Liberar</div>
+            <div className="text-xl font-bold font-mono text-amber-400">
+              {zynpayService.formatCurrency(zynBalance?.pending || 0)}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ABA 1: VISÃO GERAL */}
+      {dashboardSubTab === 'overview' && (
+        <div className="space-y-6">
+          {/* Grid de Métricas Principais (4 Cards Executivos) */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {/* Card 1: Total Faturado */}
+            <div className="p-4 sm:p-5 rounded-2xl bg-[#07111D] border border-[#183047] space-y-2 relative overflow-hidden group hover:border-[#2378D4]/50 transition">
           <div className="flex items-center justify-between text-[#94A7BC] text-xs">
             <span className="font-semibold uppercase tracking-wider text-[11px]">Total Faturado</span>
             <div className="w-7 h-7 rounded-lg bg-[#20D6A0]/10 border border-[#20D6A0]/20 text-[#20D6A0] flex items-center justify-center">
@@ -565,6 +772,286 @@ export const AdminFinancialDashboard: React.FC<AdminFinancialDashboardProps> = (
           ))}
         </div>
       </div>
+    </div>
+  )}
+
+      {/* ABA 2: ZYNPAY GATEWAY PIX OFICIAL */}
+      {dashboardSubTab === 'zynpay' && (
+        <div className="space-y-6">
+          {/* Métricas Rápidas ZynPay */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="p-4 rounded-2xl bg-[#07111D] border border-[#183047] space-y-1">
+              <span className="text-[11px] text-[#94A7BC] uppercase font-mono">Cobranças Geradas</span>
+              <div className="text-2xl font-bold font-mono text-[#F4F7FB]">{zynCharges.length}</div>
+              <p className="text-[11px] text-zinc-400">Total acumulado na sessão e proxy</p>
+            </div>
+
+            <div className="p-4 rounded-2xl bg-[#07111D] border border-[#183047] space-y-1">
+              <span className="text-[11px] text-[#94A7BC] uppercase font-mono">Cobranças Pagas</span>
+              <div className="text-2xl font-bold font-mono text-[#20D6A0]">
+                {zynCharges.filter((c) => c.status === 'PAID').length}
+              </div>
+              <p className="text-[11px] text-zinc-400">Liquidadas instantaneamente via Pix</p>
+            </div>
+
+            <div className="p-4 rounded-2xl bg-[#07111D] border border-[#183047] space-y-1">
+              <span className="text-[11px] text-[#94A7BC] uppercase font-mono">Volume Total Pix</span>
+              <div className="text-2xl font-bold font-mono text-[#41C8F4]">
+                {zynpayService.formatCurrency(
+                  zynCharges.filter((c) => c.status === 'PAID').reduce((acc, c) => acc + c.amount, 0)
+                )}
+              </div>
+              <p className="text-[11px] text-zinc-400">Volume transacionado no gateway</p>
+            </div>
+          </div>
+
+          {/* Extrato de Cobranças Pix */}
+          <div className="p-4 sm:p-6 rounded-2xl bg-[#07111D] border border-[#183047] space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-[#183047]">
+              <div>
+                <h3 className="text-sm font-bold text-[#F4F7FB] flex items-center gap-2">
+                  <span>Extrato de Cobranças Pix ZynPay</span>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                    Live
+                  </span>
+                </h3>
+                <p className="text-xs text-[#94A7BC] mt-0.5">
+                  Cobranças emitidas via API pública com QR Code e Pix Copia e Cola dinâmicos.
+                </p>
+              </div>
+
+              <button
+                onClick={handleCreateTestCharge}
+                disabled={creatingTestCharge}
+                className="px-3.5 py-2 rounded-xl bg-emerald-500/15 border border-emerald-500/30 hover:bg-emerald-500/25 text-xs font-semibold text-emerald-400 flex items-center gap-1.5 transition cursor-pointer"
+              >
+                <QrCode className="w-3.5 h-3.5" />
+                <span>+ Emitir Nova Cobrança Pix</span>
+              </button>
+            </div>
+
+            {zynCharges.length === 0 ? (
+              <div className="p-8 text-center rounded-xl bg-[#030912] border border-[#183047] text-zinc-400 space-y-3">
+                <QrCode className="w-10 h-10 mx-auto text-zinc-600" />
+                <p className="text-xs">Nenhuma cobrança Pix gerada até o momento.</p>
+                <button
+                  onClick={handleCreateTestCharge}
+                  disabled={creatingTestCharge}
+                  className="px-4 py-2 rounded-xl bg-[#2378D4] text-white text-xs font-bold transition hover:bg-[#1f6dc2] cursor-pointer"
+                >
+                  Gerar primeira cobrança Pix (R$ 29,90)
+                </button>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-[#183047] text-[11px] text-[#94A7BC] uppercase font-mono">
+                      <th className="pb-3 pl-2">ID Cobrança</th>
+                      <th className="pb-3">Descrição / Cliente</th>
+                      <th className="pb-3">Valor</th>
+                      <th className="pb-3">Status</th>
+                      <th className="pb-3">Data</th>
+                      <th className="pb-3 text-right pr-2">Ações</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#183047]/60">
+                    {zynCharges.map((chg) => (
+                      <tr key={chg.id} className="hover:bg-[#0A1726] transition">
+                        <td className="py-3 pl-2 font-mono text-[#41C8F4] font-semibold">
+                          {chg.id}
+                        </td>
+                        <td className="py-3">
+                          <div className="font-semibold text-[#F4F7FB]">{chg.description}</div>
+                          <div className="text-[11px] text-[#94A7BC] font-mono">
+                            {chg.customer?.name || chg.customer?.email || 'FatosBR Pro Reader'}
+                          </div>
+                        </td>
+                        <td className="py-3 font-mono text-[#20D6A0] font-bold">
+                          {zynpayService.formatCurrency(chg.amount)}
+                        </td>
+                        <td className="py-3">
+                          {chg.status === 'PAID' ? (
+                            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-[#20D6A0]/15 text-[#20D6A0] border border-[#20D6A0]/30">
+                              <span className="w-1.5 h-1.5 rounded-full bg-[#20D6A0]" />
+                              Pago
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                              Aguardando Pix
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-3 text-[#94A7BC] font-mono text-[11px]">
+                          {new Date(chg.createdAt).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })}
+                        </td>
+                        <td className="py-3 text-right pr-2">
+                          <div className="flex items-center justify-end gap-1.5">
+                            <button
+                              onClick={() => setSelectedQrModal(chg)}
+                              className="p-1.5 rounded-lg bg-[#0A1726] hover:bg-[#183047] text-zinc-300 hover:text-white border border-[#183047] transition cursor-pointer"
+                              title="Ver QR Code Pix"
+                            >
+                              <QrCode className="w-3.5 h-3.5" />
+                            </button>
+
+                            <button
+                              onClick={() => copyToClipboard(chg.qrCodeText, chg.id)}
+                              className="p-1.5 rounded-lg bg-[#0A1726] hover:bg-[#183047] text-zinc-300 hover:text-white border border-[#183047] transition cursor-pointer"
+                              title="Copiar Pix Copia e Cola"
+                            >
+                              {copiedId === chg.id ? (
+                                <Check className="w-3.5 h-3.5 text-emerald-400" />
+                              ) : (
+                                <Copy className="w-3.5 h-3.5" />
+                              )}
+                            </button>
+
+                            {chg.status !== 'PAID' && (
+                              <button
+                                onClick={() => handleSimulateWebhook(chg.id)}
+                                disabled={simulatingPaymentId === chg.id}
+                                className="px-2 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-400 text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
+                                title="Simular liquidação bancária via Webhook"
+                              >
+                                <Play className="w-2.5 h-2.5" />
+                                <span>{simulatingPaymentId === chg.id ? 'Liquidando...' : 'Liquidar'}</span>
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ABA 3: WEBHOOKS ZYNPAY & NOTIFICAÇÕES */}
+      {dashboardSubTab === 'webhooks' && (
+        <div className="space-y-6">
+          <div className="p-4 sm:p-6 rounded-2xl bg-[#07111D] border border-[#183047] space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-[#183047]">
+              <div>
+                <h3 className="text-sm font-bold text-[#F4F7FB] flex items-center gap-2">
+                  <Activity className="w-4 h-4 text-[#41C8F4]" />
+                  <span>Log de Webhooks ZynPay (/api/zynpay/webhook)</span>
+                </h3>
+                <p className="text-xs text-[#94A7BC] mt-0.5">
+                  Histórico de eventos de conciliação bancária recebidos em tempo real pelo endpoint público de webhooks.
+                </p>
+              </div>
+
+              <button
+                onClick={() => handleSimulateWebhook(`zyn_whk_test_${Date.now()}`)}
+                className="px-3 py-1.5 rounded-xl bg-[#2378D4] hover:bg-[#1f6dc2] text-xs font-semibold text-white flex items-center gap-1.5 transition cursor-pointer"
+              >
+                <Zap className="w-3.5 h-3.5" />
+                <span>Disparar Evento de Webhook Teste</span>
+              </button>
+            </div>
+
+            {zynWebhooks.length === 0 ? (
+              <div className="p-8 text-center rounded-xl bg-[#030912] border border-[#183047] text-zinc-400 space-y-2">
+                <Activity className="w-8 h-8 mx-auto text-zinc-600" />
+                <p className="text-xs">Nenhum evento de webhook recebido ainda.</p>
+                <p className="text-[11px] text-zinc-500">
+                  Os eventos são gravados automaticamente quando a ZynPay notifica o pagamento ou ao simular no painel.
+                </p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-[#183047] text-[11px] text-[#94A7BC] uppercase font-mono">
+                      <th className="pb-3 pl-2">ID Evento</th>
+                      <th className="pb-3">Tipo</th>
+                      <th className="pb-3">Cobrança (Charge ID)</th>
+                      <th className="pb-3">Valor</th>
+                      <th className="pb-3">Status</th>
+                      <th className="pb-3 text-right pr-2">Recebido em</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#183047]/60">
+                    {zynWebhooks.map((ev) => (
+                      <tr key={ev.id} className="hover:bg-[#0A1726] transition font-mono">
+                        <td className="py-3 pl-2 text-[#41C8F4]">{ev.id}</td>
+                        <td className="py-3 text-zinc-300 font-sans">{ev.type}</td>
+                        <td className="py-3 text-zinc-400">{ev.chargeId}</td>
+                        <td className="py-3 text-[#20D6A0] font-bold">
+                          {zynpayService.formatCurrency(ev.amountCents || 2990)}
+                        </td>
+                        <td className="py-3">
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                            {ev.status || 'PAID'}
+                          </span>
+                        </td>
+                        <td className="py-3 text-right pr-2 text-[#94A7BC] text-[11px]">
+                          {new Date(ev.timestamp).toLocaleString('pt-BR')}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* MODAL DE PRÉ-VISUALIZAÇÃO DE QR CODE ZYNPAY */}
+      {selectedQrModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-sm rounded-2xl bg-[#07111D] border border-[#183047] p-6 space-y-4 shadow-2xl relative animate-fadeIn">
+            <button
+              onClick={() => setSelectedQrModal(null)}
+              className="absolute top-4 right-4 text-zinc-400 hover:text-white p-1"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="text-center space-y-1">
+              <h3 className="text-base font-bold text-white">QR Code Pix ZynPay</h3>
+              <p className="text-xs text-zinc-400">
+                {selectedQrModal.description}
+              </p>
+            </div>
+
+            <div className="p-4 rounded-xl bg-white flex items-center justify-center shadow-inner">
+              {selectedQrModal.qrCode ? (
+                <img
+                  src={selectedQrModal.qrCode}
+                  alt="QR Code Pix"
+                  className="w-48 h-48 object-contain"
+                />
+              ) : (
+                <QrCode className="w-32 h-32 text-black" />
+              )}
+            </div>
+
+            <div className="text-center space-y-1">
+              <div className="text-xl font-bold font-mono text-[#20D6A0]">
+                {zynpayService.formatCurrency(selectedQrModal.amount)}
+              </div>
+              <div className="text-[11px] text-zinc-400 font-mono">
+                ID: {selectedQrModal.id}
+              </div>
+            </div>
+
+            <button
+              onClick={() => copyToClipboard(selectedQrModal.qrCodeText, selectedQrModal.id)}
+              className="w-full py-2.5 px-4 rounded-xl bg-[#2378D4] hover:bg-[#1f6dc2] text-white text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer shadow-lg"
+            >
+              <Copy className="w-4 h-4" />
+              <span>Copiar Pix Copia e Cola</span>
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

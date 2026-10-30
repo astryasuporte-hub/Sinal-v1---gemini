@@ -274,6 +274,46 @@ class ResendService {
   }
 
   /**
+   * Dispara um e-mail genérico ou customizado diretamente pelo servidor Resend
+   */
+  async sendEmail(params: {
+    to: string;
+    subject: string;
+    html?: string;
+    text?: string;
+    template?: string;
+    events?: any[];
+  }): Promise<ResendSendResult> {
+    try {
+      const res = await fetch('/api/resend/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params)
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success) {
+        return {
+          success: true,
+          id: data.id,
+          recipient: params.to,
+          message: data.message || `E-mail enviado com sucesso para ${params.to}`
+        };
+      }
+      return {
+        success: false,
+        recipient: params.to,
+        error: data.error || data.message || `Falha no envio (HTTP ${res.status})`
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        recipient: params.to,
+        error: err.message || 'Falha de comunicação com o servidor'
+      };
+    }
+  }
+
+  /**
    * Obtém o HTML compilado da publicação editorial (Resumo Matinal ou Noturno) com os eventos reais
    */
   async getEditorialPreview(type: 'morning' | 'evening' = 'morning', events?: any[]): Promise<string> {

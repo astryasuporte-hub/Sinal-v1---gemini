@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { UserSubscription, SubscriptionStatus } from '../types/sinal';
 import {
   X,
@@ -31,6 +31,8 @@ interface BillingModalProps {
   onUpgradeApproved: () => void;
 }
 
+import { zynpayService, ZynPayCharge } from '../services/zynpayService';
+
 export interface InvoiceItem {
   id: string;
   date: string;
@@ -52,23 +54,26 @@ export const BillingModal: React.FC<BillingModalProps> = ({
   const [paymentStatus, setPaymentStatus] = useState<'pending' | 'approved' | 'idle'>(
     subscription.status === 'ACTIVE' ? 'approved' : 'pending'
   );
+  const [zynCharge, setZynCharge] = useState<ZynPayCharge | null>(null);
+  const [loadingCharge, setLoadingCharge] = useState(false);
+  const [chargeError, setChargeError] = useState<string | null>(null);
 
   // Invoices History
   const [invoices, setInvoices] = useState<InvoiceItem[]>([
     {
       id: 'inv-001',
-      date: '05 de abr. de 2025',
+      date: 'Hoje',
       amount: subscription.amount || 29.9,
       status: 'AGUARDANDO_PAGAMENTO',
-      method: 'PIX',
-      transactionId: 'pix_tx_9812401'
+      method: 'PIX (ZynPay)',
+      transactionId: 'zyn_init_pending'
     },
     {
       id: 'inv-002',
       date: '05 de mar. de 2025',
       amount: subscription.amount || 29.9,
       status: 'PAGO',
-      method: 'PIX',
+      method: 'PIX (ZynPay)',
       transactionId: 'pix_tx_8204918'
     },
     {
@@ -76,7 +81,7 @@ export const BillingModal: React.FC<BillingModalProps> = ({
       date: '05 de fev. de 2025',
       amount: subscription.amount || 29.9,
       status: 'PAGO',
-      method: 'PIX',
+      method: 'PIX (ZynPay)',
       transactionId: 'pix_tx_7109284'
     }
   ]);
@@ -87,6 +92,63 @@ export const BillingModal: React.FC<BillingModalProps> = ({
       setPaymentStatus('approved');
     }
   }, [subscription.status]);
+
+  // Criação automática de cobrança Pix real na ZynPay ao abrir o checkout
+  const generateZynPayCharge = useCallback(async () => {
+    if (paymentStatus === 'approved') return;
+    setLoadingCharge(true);
+    setChargeError(null);
+
+    const amountCents = Math.round((subscription.amount || 29.9) * 100);
+    const result = await zynpayService.createPixCharge({
+      amountCents,
+      description: 'Assinatura FatosBR Pro - Acesso Executivo Mensal'
+    });
+
+    setLoadingCharge(false);
+
+    if (result.success && result.charge) {
+      setZynCharge(result.charge);
+      // Atualiza primeira invoice com ID da transação gerada
+      setInvoices((prev) =>
+        prev.map((inv, idx) =>
+          idx === 0
+            ? { ...inv, transactionId: result.charge!.id, amount: result.charge!.amount / 100 }
+            : inv
+        )
+      );
+    } else {
+      setChargeError(result.error || 'Não foi possível gerar cobrança Pix.');
+    }
+  }, [paymentStatus, subscription.amount]);
+
+  useEffect(() => {
+    if (isOpen && paymentStatus !== 'approved' && !zynCharge) {
+      generateZynPayCharge();
+    }
+  }, [isOpen, paymentStatus, zynCharge, generateZynPayCharge]);
+
+  // Polling em tempo real para verificar se o Pix foi pago na ZynPay
+  useEffect(() => {
+    if (!isOpen || paymentStatus === 'approved' || !zynCharge?.id) return;
+
+    const interval = setInterval(async () => {
+      const res = await zynpayService.getChargeStatus(zynCharge.id);
+      if (res.success && res.charge && res.charge.status === 'PAID') {
+        setPaymentStatus('approved');
+        setZynCharge(res.charge);
+        setInvoices((prev) =>
+          prev.map((inv, idx) =>
+            idx === 0 ? { ...inv, status: 'PAGO' } : inv
+          )
+        );
+        onUpgradeApproved();
+        showToast('Pagamento Pix confirmado pela ZynPay! Assinatura Pro ativa.');
+      }
+    }, 3500);
+
+    return () => clearInterval(interval);
+  }, [isOpen, paymentStatus, zynCharge?.id, onUpgradeApproved]);
 
   // Handle ESC key
   useEffect(() => {
@@ -101,8 +163,8 @@ export const BillingModal: React.FC<BillingModalProps> = ({
 
   if (!isOpen) return null;
 
-  const mockPixKey =
-    '00020126360014BR.GOV.BCB.PIX0114pix.fatosbr.news/qr/v2/c99482f7-e431-419b-b27b-fatosbr-v1-prod520400005303986540529.905802BR5918FATOSBR PLATAFORMA6009SAO PAULO62070503***630489AB';
+  const activePixString = zynCharge?.qrCodeText ||
+    '00020126580014br.gov.bcb.pix0136zyn_live_default52040000530398654029.905802BR5916FATOSBR NOTICIAS6009SAO PAULO62070503***6304';
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
@@ -110,27 +172,29 @@ export const BillingModal: React.FC<BillingModalProps> = ({
   };
 
   const copyPixCode = () => {
-    navigator.clipboard.writeText(mockPixKey);
+    navigator.clipboard.writeText(activePixString);
     setCopiedPix(true);
-    showToast('Código PIX copiado com sucesso.');
+    showToast('Código PIX Copia e Cola copiado com sucesso.');
     setTimeout(() => setCopiedPix(false), 2500);
   };
 
-  // Reconciliação / Simulação de Confirmação PIX
-  const handleSimulateWebhook = () => {
+  // Reconciliação / Confirmação via Webhook da ZynPay
+  const handleSimulateWebhook = async () => {
     setSimulatingWebhook(true);
+    const chargeId = zynCharge?.id || 'zyn_live_demo';
+    await zynpayService.simulateWebhookPayment(chargeId);
+
     setTimeout(() => {
       setSimulatingWebhook(false);
       setPaymentStatus('approved');
-      // Update latest invoice
       setInvoices((prev) =>
         prev.map((inv, idx) =>
           idx === 0 ? { ...inv, status: 'PAGO' } : inv
         )
       );
       onUpgradeApproved();
-      showToast('Pagamento aprovado via PIX Instantâneo. FatosBR Pro ativo!');
-    }, 1500);
+      showToast('Pagamento confirmado via Webhook ZynPay. FatosBR Pro ativo!');
+    }, 1200);
   };
 
   // Status Badge Label
@@ -347,95 +411,68 @@ export const BillingModal: React.FC<BillingModalProps> = ({
               <div className="p-6 rounded-2xl border border-[#1e2026] bg-[#111216] space-y-5">
                 <div>
                   <div className="flex items-center justify-between">
-                    <h3 className="text-base sm:text-lg font-bold text-white">
-                      Pagamento com PIX
+                    <h3 className="text-base sm:text-lg font-bold text-white flex items-center gap-2">
+                      <span>Pagamento via PIX</span>
+                      <span className="text-[10px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded-full flex items-center gap-1 font-semibold">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                        ZynPay API Oficial
+                      </span>
                     </h3>
-                    <span className="text-[10px] font-mono bg-zinc-900 border border-zinc-800 px-2 py-0.5 rounded text-zinc-300">
-                      FatosBR Pay (PIX)
-                    </span>
                   </div>
                   <p className="text-xs text-zinc-400 mt-1">
-                    Pagamento seguro e aprovação imediata.
+                    Geração imediata com liquidação e aprovação instantânea pelo Banco Central.
                   </p>
                 </div>
 
-                {/* QR Code Container Responsivo e Limpo */}
+                {/* QR Code Container Responsivo ZynPay */}
                 <div className="p-4 sm:p-5 rounded-xl border border-zinc-800 bg-zinc-950/70 flex flex-col sm:flex-row items-center gap-4 sm:gap-5">
-                  {/* Visual QR Code SVG Nítido */}
-                  <div className="p-2.5 rounded-xl bg-white text-black shrink-0 shadow-md">
-                    <svg
-                      className="w-32 h-32 sm:w-36 sm:h-36"
-                      viewBox="0 0 100 100"
-                      fill="none"
-                      xmlns="http://www.w3.org/2000/svg"
-                    >
-                      {/* Top Left Marker */}
-                      <rect x="5" y="5" width="26" height="26" rx="4" fill="black" />
-                      <rect x="9" y="9" width="18" height="18" rx="2" fill="white" />
-                      <rect x="13" y="13" width="10" height="10" rx="1" fill="black" />
-
-                      {/* Top Right Marker */}
-                      <rect x="69" y="5" width="26" height="26" rx="4" fill="black" />
-                      <rect x="73" y="9" width="18" height="18" rx="2" fill="white" />
-                      <rect x="77" y="13" width="10" height="10" rx="1" fill="black" />
-
-                      {/* Bottom Left Marker */}
-                      <rect x="5" y="69" width="26" height="26" rx="4" fill="black" />
-                      <rect x="9" y="73" width="18" height="18" rx="2" fill="white" />
-                      <rect x="13" y="77" width="10" height="10" rx="1" fill="black" />
-
-                      {/* Data Patterns */}
-                      <rect x="36" y="8" width="5" height="5" fill="black" />
-                      <rect x="44" y="8" width="5" height="5" fill="black" />
-                      <rect x="56" y="8" width="5" height="5" fill="black" />
-                      <rect x="36" y="16" width="5" height="5" fill="black" />
-                      <rect x="48" y="16" width="5" height="5" fill="black" />
-                      <rect x="40" y="24" width="5" height="5" fill="black" />
-                      <rect x="52" y="24" width="5" height="5" fill="black" />
-
-                      <rect x="8" y="36" width="5" height="5" fill="black" />
-                      <rect x="16" y="44" width="5" height="5" fill="black" />
-                      <rect x="24" y="40" width="5" height="5" fill="black" />
-
-                      <rect x="36" y="36" width="8" height="8" rx="1" fill="black" />
-                      <rect x="48" y="36" width="8" height="8" rx="1" fill="black" />
-                      <rect x="60" y="40" width="6" height="6" fill="black" />
-                      <rect x="40" y="48" width="6" height="6" fill="black" />
-                      <rect x="52" y="48" width="8" height="8" rx="1" fill="black" />
-                      <rect x="64" y="48" width="6" height="6" fill="black" />
-                      <rect x="36" y="60" width="6" height="6" fill="black" />
-                      <rect x="48" y="60" width="8" height="8" rx="1" fill="black" />
-
-                      <rect x="76" y="36" width="5" height="5" fill="black" />
-                      <rect x="84" y="44" width="5" height="5" fill="black" />
-                      <rect x="72" y="52" width="5" height="5" fill="black" />
-
-                      <rect x="36" y="76" width="5" height="5" fill="black" />
-                      <rect x="44" y="84" width="5" height="5" fill="black" />
-                      <rect x="56" y="72" width="5" height="5" fill="black" />
-                      <rect x="68" y="80" width="5" height="5" fill="black" />
-                      <rect x="76" y="72" width="5" height="5" fill="black" />
-                      <rect x="84" y="84" width="5" height="5" fill="black" />
-                    </svg>
+                  {/* Visual QR Code ZynPay */}
+                  <div className="p-2.5 rounded-xl bg-white text-black shrink-0 shadow-md flex items-center justify-center min-w-[144px] min-h-[144px]">
+                    {loadingCharge ? (
+                      <div className="flex flex-col items-center justify-center p-4 text-zinc-600 gap-2">
+                        <RefreshCw className="w-6 h-6 animate-spin text-zinc-800" />
+                        <span className="text-[10px] font-mono">Gerando PIX...</span>
+                      </div>
+                    ) : zynCharge?.qrCode ? (
+                      <img
+                        src={zynCharge.qrCode}
+                        alt="QR Code Pix ZynPay"
+                        className="w-32 h-32 sm:w-36 sm:h-36 rounded-lg object-contain"
+                      />
+                    ) : (
+                      <div className="flex flex-col items-center justify-center p-4 text-zinc-600 gap-2">
+                        <QrCode className="w-10 h-10 text-zinc-400" />
+                        <span className="text-[10px] text-center">Pix Pronto</span>
+                      </div>
+                    )}
                   </div>
 
                   <div className="space-y-1.5 text-center sm:text-left min-w-0 flex-1">
-                    <h4 className="text-xs sm:text-sm font-bold text-white">
-                      Escaneie o QR Code
-                    </h4>
-                    <p className="text-[11px] text-zinc-400 leading-snug">
-                      Abra o app do seu banco, selecione a opção de pagar com PIX e aponte a câmera.
-                    </p>
-                    <div className="pt-1 text-[10px] text-zinc-500 font-mono">
-                      Aprovação em segundos
+                    <div className="flex items-center justify-center sm:justify-start gap-1.5">
+                      <h4 className="text-xs sm:text-sm font-bold text-white">
+                        Escaneie com seu banco
+                      </h4>
                     </div>
+                    <p className="text-[11px] text-zinc-400 leading-snug">
+                      Abra o app do seu banco ou carteira digital, escolha pagar com PIX e aponte a câmera.
+                    </p>
+                    <div className="pt-1 flex flex-wrap items-center justify-center sm:justify-start gap-2 text-[10px] text-zinc-400 font-mono">
+                      <span className="text-emerald-400 font-semibold">● Confirmação automática</span>
+                      <span>·</span>
+                      <span>ID: {zynCharge?.id?.slice(0, 16) || 'zyn_pending'}</span>
+                    </div>
+                    {zynCharge?.isSandbox && (
+                      <div className="text-[10px] text-amber-400/90 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded mt-1 inline-block">
+                        Modo Sandbox Ativo (Simulação Real ZynPay)
+                      </div>
+                    )}
                   </div>
                 </div>
 
                 {/* Código PIX Copia e Cola */}
                 <div className="space-y-2">
                   <div className="flex items-center justify-between text-[11px] text-zinc-400 font-mono">
-                    <span>Código PIX copia e cola:</span>
+                    <span>Código PIX Copia e Cola:</span>
                     <button
                       onClick={copyPixCode}
                       className="text-zinc-200 hover:text-white flex items-center gap-1 cursor-pointer font-sans"
@@ -450,11 +487,11 @@ export const BillingModal: React.FC<BillingModalProps> = ({
                   </div>
 
                   <div className="flex items-center gap-2 p-2.5 rounded-xl bg-zinc-950 border border-zinc-800 text-[11px] font-mono text-zinc-300">
-                    <span className="truncate flex-1 select-all">{mockPixKey}</span>
+                    <span className="truncate flex-1 select-all">{activePixString}</span>
                     <button
                       onClick={copyPixCode}
                       className="p-1 hover:text-white text-zinc-400 shrink-0"
-                      title="Copiar"
+                      title="Copiar Código Pix"
                     >
                       <Copy className="w-3.5 h-3.5" />
                     </button>
@@ -462,10 +499,10 @@ export const BillingModal: React.FC<BillingModalProps> = ({
 
                   <button
                     onClick={copyPixCode}
-                    className="w-full py-2.5 px-3 rounded-xl border border-zinc-700 hover:border-zinc-500 bg-[#16181f] hover:bg-zinc-800 text-xs font-semibold text-zinc-200 transition cursor-pointer flex items-center justify-center gap-2"
+                    className="w-full py-2.5 px-3 rounded-xl border border-zinc-700 hover:border-zinc-500 bg-[#16181f] hover:bg-zinc-800 text-xs font-semibold text-zinc-200 transition cursor-pointer flex items-center justify-center gap-2 active:scale-[0.99]"
                   >
                     <Copy className="w-3.5 h-3.5" />
-                    <span>Copiar código PIX</span>
+                    <span>Copiar código PIX Copia e Cola</span>
                   </button>
                 </div>
 

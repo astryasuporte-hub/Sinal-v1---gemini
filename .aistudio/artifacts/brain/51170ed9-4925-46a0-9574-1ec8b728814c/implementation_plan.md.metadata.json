@@ -1,6 +1,6 @@
 {
-  "summary":  "Plano detalhado para redesenho das telas 1 e 7 do Onboarding de acordo com os mockups do Figma, banner flutuante PWA no Onboarding e botão permanente no Perfil, e script local de validação e recorte de foto de perfil até 6MB.",
-  "updatedAt":  "2026-10-25T17:01:35.158416727Z",
+  "summary":  "Plano de implementação da integração completa da ZynPay no FatosBR:\n- Proxy seguro no servidor com a chave de API fornecida (zpk_live_...) e tratamento de valores em centavos.\n- Geração real de cobranças Pix com QR Code dinâmico e código Copia e Cola no BillingModal (Assinatura Pro).\n- Polling de verificação e Webhook (/api/zynpay/webhook) para ativação automática da assinatura.\n- Painel financeiro ZynPay no AdminPanel com saldo da conta, extrato de cobranças e logs de pagamento.",
+  "updatedAt":  "2026-10-30T16:22:56.450919273Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

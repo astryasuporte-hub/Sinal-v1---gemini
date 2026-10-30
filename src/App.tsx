@@ -96,9 +96,66 @@ import { LoginPage } from './components/LoginPage';
 import { OnboardingFlow } from './components/OnboardingFlow';
 import { LanguageSelector } from './components/LanguageSelector';
 import { useI18n, useTranslation } from './i18n';
+import { RecalibrateInterestsModal, ALL_ONBOARDING_THEMES } from './components/RecalibrateInterestsModal';
 
 const HISTORY_STORAGE_KEY = 'sinal_history_items_v1';
 const MAX_HISTORY_ITEMS = 50;
+
+export const THEME_LABEL_MAP: Record<string, string> = {
+  tech: 'Tecnologia',
+  business: 'Negócios',
+  politics: 'Política',
+  economy: 'Economia',
+  world: 'Mundo',
+  science: 'Ciência',
+  health: 'Saúde',
+  sports: 'Esportes',
+  culture: 'Cultura',
+  entertainment: 'Entretenimento',
+  environment: 'Meio Ambiente',
+  education: 'Educação'
+};
+
+export function eventMatchesAnyUserTheme(
+  category: string,
+  title: string,
+  summary: string,
+  themeIds: string[]
+): boolean {
+  if (!themeIds || themeIds.length === 0) return true;
+  const combined = `${category || ''} ${title || ''} ${summary || ''}`.toLowerCase();
+
+  return themeIds.some((themeId) => {
+    switch (themeId) {
+      case 'tech':
+        return combined.includes('tec') || combined.includes('ia') || combined.includes('ai') || combined.includes('inteligência artificial') || combined.includes('software') || combined.includes('computa') || combined.includes('nvidia') || combined.includes('openai') || combined.includes('apple') || combined.includes('google') || combined.includes('microsoft');
+      case 'politics':
+        return combined.includes('polític') || combined.includes('politic') || combined.includes('congress') || combined.includes('governo') || combined.includes('stf') || combined.includes('senado') || combined.includes('câmara') || combined.includes('eleiç') || combined.includes('ministr') || combined.includes('lula') || combined.includes('bolsonaro') || combined.includes('planalto') || combined.includes('lei') || combined.includes('reforma') || combined.includes('orçamento') || combined.includes('gastos públicos');
+      case 'business':
+        return combined.includes('negócios') || combined.includes('negocios') || combined.includes('empresa') || combined.includes('corpora') || combined.includes('m&a') || combined.includes('fusão') || combined.includes('aquisi') || combined.includes('ceo') || combined.includes('startup') || combined.includes('mercado') || combined.includes('varejo');
+      case 'economy':
+        return combined.includes('economi') || combined.includes('finanç') || combined.includes('financ') || combined.includes('selic') || combined.includes('banco central') || combined.includes('inflação') || combined.includes('inflacao') || combined.includes('dólar') || combined.includes('dolar') || combined.includes('câmbio') || combined.includes('pib') || combined.includes('juros') || combined.includes('ibovespa') || combined.includes('bolsa') || combined.includes('fiscal');
+      case 'world':
+        return combined.includes('mundo') || combined.includes('internacional') || combined.includes('geopolític') || combined.includes('ucrânia') || combined.includes('rússia') || combined.includes('eua') || combined.includes('china') || combined.includes('europa') || combined.includes('oriente médio') || combined.includes('onu') || combined.includes('donetsk');
+      case 'science':
+        return combined.includes('ciência') || combined.includes('ciencia') || combined.includes('pesquisa') || combined.includes('espacial') || combined.includes('nasa') || combined.includes('física') || combined.includes('astronom') || combined.includes('laboratório') || combined.includes('estudo') || combined.includes('científ');
+      case 'health':
+        return combined.includes('saúde') || combined.includes('saude') || combined.includes('medic') || combined.includes('vacina') || combined.includes('sus') || combined.includes('anvisa') || combined.includes('doença') || combined.includes('hospital') || combined.includes('dengue') || combined.includes('oms');
+      case 'sports':
+        return combined.includes('esporte') || combined.includes('futebol') || combined.includes('brasileirão') || combined.includes('libertadores') || combined.includes('champions') || combined.includes('flamengo') || combined.includes('palmeiras') || combined.includes('olimpíad') || combined.includes('fifa') || combined.includes('jogo');
+      case 'culture':
+        return combined.includes('cultura') || combined.includes('arte') || combined.includes('música') || combined.includes('musica') || combined.includes('livro') || combined.includes('literatur') || combined.includes('teatro') || combined.includes('museu');
+      case 'entertainment':
+        return combined.includes('entretenimento') || combined.includes('cinema') || combined.includes('filme') || combined.includes('série') || combined.includes('serie') || combined.includes('netflix') || combined.includes('streaming') || combined.includes('hollywood') || combined.includes('oscar');
+      case 'environment':
+        return combined.includes('ambiente') || combined.includes('clima') || combined.includes('sustentab') || combined.includes('energia') || combined.includes('solar') || combined.includes('amazônia') || combined.includes('aquecimento') || combined.includes('desmatamento');
+      case 'education':
+        return combined.includes('educação') || combined.includes('educacao') || combined.includes('universidade') || combined.includes('enem') || combined.includes('escola') || combined.includes('ensino') || combined.includes('estudante') || combined.includes('profess');
+      default:
+        return combined.includes(themeId.toLowerCase());
+    }
+  });
+}
 
 export default function App() {
   const [currentNav, setCurrentNav] = useState<
@@ -152,6 +209,42 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState<SupabaseUser | null>(null);
   const [, setAvatarSyncCounter] = useState<number>(0);
   const [historyCheckToast, setHistoryCheckToast] = useState<{ id: string; title: string } | null>(null);
+
+  // Interesses selecionados no Onboarding para filtrar estritamente o feed "Para você"
+  const [userInterests, setUserInterests] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('fatosbr_user_interests');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {}
+    return ['tech', 'business', 'politics', 'economy', 'science'];
+  });
+  const [isRecalibrateModalOpen, setIsRecalibrateModalOpen] = useState<boolean>(false);
+
+  // Sincronização reativa de interesses do leitor entre abas e componentes
+  useEffect(() => {
+    const handleInterestsUpdated = (e: any) => {
+      if (Array.isArray(e.detail?.interests)) {
+        setUserInterests(e.detail.interests);
+      }
+    };
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === 'fatosbr_user_interests' && e.newValue) {
+        try {
+          const parsed = JSON.parse(e.newValue);
+          if (Array.isArray(parsed)) setUserInterests(parsed);
+        } catch {}
+      }
+    };
+    window.addEventListener('fatosbr_interests_updated', handleInterestsUpdated);
+    window.addEventListener('storage', handleStorage);
+    return () => {
+      window.removeEventListener('fatosbr_interests_updated', handleInterestsUpdated);
+      window.removeEventListener('storage', handleStorage);
+    };
+  }, []);
 
   // Sincronização automática do avatar em todos os componentes reativos via fatosbr_avatar_updated e storage
   useEffect(() => {
@@ -833,6 +926,13 @@ export default function App() {
       if (activeTab === 'trending') {
         return e.relevanceScore >= 90;
       }
+      if (activeTab === 'for-you') {
+        // Filtragem estrita pelas categorias escolhidas no Onboarding / Recalibração
+        if (userInterests && userInterests.length > 0) {
+          return eventMatchesAnyUserTheme(e.category, e.title, e.summary, userInterests);
+        }
+        return true;
+      }
       return true;
     })
     .filter((e) => {
@@ -941,7 +1041,10 @@ export default function App() {
         topics={topics}
         sources={sources}
         onOpenLogin={() => setCurrentNav('login')}
-        onComplete={() => {
+        onComplete={(newThemes) => {
+          if (Array.isArray(newThemes) && newThemes.length > 0) {
+            setUserInterests(newThemes);
+          }
           const userKey = currentUser?.id || currentUser?.email || 'guest';
           localStorage.setItem('sinal_onboarded_' + userKey, 'true');
           setCurrentNav('home');
@@ -1563,7 +1666,7 @@ export default function App() {
               onOpenLanding={() => setCurrentNav('landing')}
               onOpenAuth={() => setCurrentNav('login')}
               onOpenAdmin={() => setCurrentNav('admin')}
-              onOpenOnboarding={() => setCurrentNav('onboarding')}
+              onOpenOnboarding={() => setIsRecalibrateModalOpen(true)}
               isSuperAdmin={isSuperAdmin}
               onProfileUpdated={(updated) => setCurrentUserAvatar(updated.avatarUrl)}
               onClearCacheAndSync={async () => {
@@ -1631,40 +1734,36 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Subtabs: "Para você", "Seguindo", "Em alta" */}
-              <div className="flex items-center space-x-2 pb-1">
-                <button
-                  onClick={() => setActiveTab('for-you')}
-                  className={`px-3.5 sm:px-4 py-1.5 rounded-full text-xs font-semibold transition cursor-pointer ${
-                    activeTab === 'for-you'
-                      ? 'bg-white text-black shadow-sm'
-                      : 'bg-[#111216] text-zinc-400 hover:text-white border border-[#1e2026]'
-                  }`}
-                >
-                  {t('feed.forYou')}
-                </button>
-
-                <button
-                  onClick={() => setActiveTab('following')}
-                  className={`px-3.5 sm:px-4 py-1.5 rounded-full text-xs font-semibold transition cursor-pointer ${
-                    activeTab === 'following'
-                      ? 'bg-white text-black shadow-sm'
-                      : 'bg-[#111216] text-zinc-400 hover:text-white border border-[#1e2026]'
-                  }`}
-                >
-                  {t('feed.following')}
-                </button>
-
-                <button
-                  onClick={() => setActiveTab('trending')}
-                  className={`px-3.5 sm:px-4 py-1.5 rounded-full text-xs font-semibold transition cursor-pointer ${
-                    activeTab === 'trending'
-                      ? 'bg-white text-black shadow-sm'
-                      : 'bg-[#111216] text-zinc-400 hover:text-white border border-[#1e2026]'
-                  }`}
-                >
-                  {t('feed.trending')}
-                </button>
+              {/* Subtabs: "Para você", "Seguindo", "Em alta" com transições Framer Motion */}
+              <div className="flex items-center space-x-2 pb-1 relative">
+                {[
+                  { id: 'for-you', label: t('feed.forYou') },
+                  { id: 'following', label: t('feed.following') },
+                  { id: 'trending', label: t('feed.trending') }
+                ].map((tab) => {
+                  const isActive = activeTab === tab.id;
+                  return (
+                    <motion.button
+                      key={tab.id}
+                      onClick={() => setActiveTab(tab.id as any)}
+                      whileTap={{ scale: 0.96 }}
+                      className={`relative px-3.5 sm:px-4 py-1.5 rounded-full text-xs font-semibold transition-colors duration-150 cursor-pointer ${
+                        isActive
+                          ? 'text-black font-bold'
+                          : 'text-zinc-400 hover:text-white bg-[#111216] border border-[#1e2026] hover:border-zinc-700'
+                      }`}
+                    >
+                      {isActive && (
+                        <motion.div
+                          layoutId="activeFeedSubtabIndicator"
+                          className="absolute inset-0 bg-white rounded-full shadow-sm z-0"
+                          transition={{ type: 'spring', stiffness: 500, damping: 35 }}
+                        />
+                      )}
+                      <span className="relative z-10 select-none">{tab.label}</span>
+                    </motion.button>
+                  );
+                })}
               </div>
 
               {/* Sistema de Filtro por Categorias (Seleção única: Todas, Tech, Política, Negócios, Ciência) */}
@@ -1692,6 +1791,24 @@ export default function App() {
                   );
                 })}
               </div>
+
+              {/* Status do Filtro do Onboarding para a aba "Para você" */}
+              {activeTab === 'for-you' && (
+                <div className="flex items-center justify-between px-3.5 py-2 rounded-xl bg-[#0e1015] border border-zinc-800/80 text-xs">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0 animate-pulse" />
+                    <span className="text-zinc-300 text-[11px] truncate">
+                      Feed filtrado por seus temas ({userInterests.map((id) => THEME_LABEL_MAP[id] || id).slice(0, 3).join(', ')}{userInterests.length > 3 ? ` +${userInterests.length - 3}` : ''})
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => setIsRecalibrateModalOpen(true)}
+                    className="text-[11px] font-semibold text-white hover:text-zinc-300 underline shrink-0 ml-2 cursor-pointer"
+                  >
+                    Recalibrar
+                  </button>
+                </div>
+              )}
 
               {/* Banner de separação entre idioma da interface e idioma original das notícias */}
               {language !== 'pt-BR' && (
@@ -1821,114 +1938,186 @@ export default function App() {
                 </div>
               )}
 
-              {/* TIMELINE DE ACONTECIMENTOS */}
-              {!isLoading && !hasError && !activeStateSimulation && visibleEvents.length > 0 && (
-                <div
-                  key={`feed-container-${feedAnimationKey}-${activeTab}-${homeCategoryFilter}-${searchQuery}`}
-                  className="space-y-4 animate-feed-fade"
-                >
-                  {visibleEvents.map((event, index) => (
-                    <EventCard
-                      key={`${event.id}-${feedAnimationKey}-${activeTab}-${homeCategoryFilter}`}
-                      event={event}
-                      index={index}
-                      onOpenDetail={(ev) => handleOpenEventDetail(ev)}
-                      onToggleSave={handleToggleSave}
-                      onHideEvent={handleHideEvent}
-                      onOpenEntity={(entity) => setActiveEntityModal(entity)}
-                    />
-                  ))}
-
-                  {/* Status em Tempo Real & Botão de Atualização com Rate Limit (5/5) ao final das matérias */}
-                  <div className="pt-8 pb-24 sm:pb-12 flex flex-col items-center justify-center gap-2.5 text-center">
-                    <button
-                      onClick={() => loadRealTimeNews(true)}
-                      disabled={isFeedRefreshing || isLoading}
-                      className={`inline-flex items-center gap-2.5 px-5 py-3 rounded-2xl border text-xs sm:text-sm font-semibold transition cursor-pointer disabled:opacity-60 shadow-lg ${
-                        dailyRefreshRemaining === 0
-                          ? 'border-amber-500/40 bg-amber-500/10 text-amber-300'
-                          : 'bg-[#111215] hover:bg-[#181a20] border-[#1e2026] hover:border-zinc-700 text-zinc-200 hover:text-white'
-                      }`}
-                      title={`Atualizar feed de notícias (${dailyRefreshRemaining} de 5 atualizações restantes hoje)`}
+              {/* TIMELINE DE ACONTECIMENTOS COM TRANSIÇÕES SUAVES FRAMER MOTION */}
+              {!isLoading && !hasError && !activeStateSimulation && (
+                <AnimatePresence mode="wait">
+                  {visibleEvents.length > 0 ? (
+                    <motion.div
+                      key={`feed-tab-${activeTab}-${homeCategoryFilter}-${searchQuery}`}
+                      initial={{ opacity: 0, y: 8 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -6 }}
+                      transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+                      className="space-y-4"
                     >
-                      <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
-                      <span className="font-mono">
-                        {lastSyncTime ? `Ao vivo (${lastSyncTime})` : 'Ao vivo'}
-                      </span>
-                      <span
-                        className={`text-xs font-mono px-2 py-0.5 rounded-lg ${
-                          dailyRefreshRemaining === 0
-                            ? 'bg-amber-500/20 text-amber-300 font-bold'
-                            : 'bg-zinc-800 text-zinc-300'
-                        }`}
+                      <motion.div
+                        variants={{
+                          hidden: { opacity: 0 },
+                          show: {
+                            opacity: 1,
+                            transition: {
+                              staggerChildren: 0.035,
+                              delayChildren: 0.01
+                            }
+                          }
+                        }}
+                        initial="hidden"
+                        animate="show"
+                        className="space-y-4"
                       >
-                        {dailyRefreshRemaining}/5
-                      </span>
-                      <RefreshCw
-                        className={`w-4 h-4 ${
-                          isFeedRefreshing ? 'animate-spin text-emerald-400' : 'text-zinc-400'
-                        }`}
-                      />
-                      <span>Atualizar feed de notícias</span>
-                    </button>
-                    <p className="text-[11px] text-zinc-500 font-mono">
-                      {dailyRefreshRemaining} de 5 atualizações manuais restantes hoje
-                    </p>
-                  </div>
-                </div>
-              )}
+                        {visibleEvents.map((event, index) => (
+                          <motion.div
+                            key={`${event.id}-${activeTab}-${homeCategoryFilter}`}
+                            variants={{
+                              hidden: { opacity: 0, y: 8 },
+                              show: {
+                                opacity: 1,
+                                y: 0,
+                                transition: { duration: 0.22, ease: [0.16, 1, 0.3, 1] }
+                              }
+                            }}
+                            style={{ willChange: 'transform, opacity' }}
+                          >
+                            <EventCard
+                              event={event}
+                              index={index}
+                              onOpenDetail={(ev) => handleOpenEventDetail(ev)}
+                              onToggleSave={handleToggleSave}
+                              onHideEvent={handleHideEvent}
+                              onOpenEntity={(entity) => setActiveEntityModal(entity)}
+                            />
+                          </motion.div>
+                        ))}
+                      </motion.div>
 
-              {/* EMPTY STATE / NO RESULTS */}
-              {!isLoading && !hasError && !activeStateSimulation && visibleEvents.length === 0 && (
-                searchQuery.trim().length > 0 ? (
-                  isSearchingExternalApis ? (
-                    <div className="p-8 rounded-2xl bg-[#0e1117] border border-[#1e2330] text-center space-y-3 animate-fade-in my-6">
-                      <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center justify-center mx-auto">
-                        <RefreshCw className="w-5 h-5 animate-spin text-emerald-400" />
-                      </div>
-                      <div>
-                        <h3 className="text-sm font-bold text-white">
-                          Buscando nas APIs Integradas (GNews & World News API)...
-                        </h3>
-                        <p className="text-xs text-zinc-400 mt-1 max-w-md mx-auto">
-                          O termo &quot;{searchQuery}&quot; não estava no cache local de eventos. Realizando requisição em tempo real às agências e provedores de notícias...
-                        </p>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="space-y-4">
-                      <NoResultsState
-                        query={searchQuery}
-                        onClear={() => {
-                          setSearchQuery('');
-                          setExternalSearchFailed(null);
-                        }}
-                        onExplore={() => {
-                          setSearchQuery('');
-                          setExternalSearchFailed(null);
-                          setCurrentNav('explore');
-                        }}
-                      />
-                      <div className="p-4 rounded-xl bg-[#0f121a] border border-[#1b2233] text-center space-y-2 text-xs">
-                        <p className="text-zinc-400">
-                          Não encontrou o que procurava no cache local?
-                        </p>
+                      {/* Status em Tempo Real & Botão de Atualização com Rate Limit (5/5) ao final das matérias */}
+                      <div className="pt-8 pb-24 sm:pb-12 flex flex-col items-center justify-center gap-2.5 text-center">
                         <button
-                          onClick={() => handleSearchExternalApis(searchQuery)}
-                          disabled={isSearchingExternalApis}
-                          className="px-4 py-2 rounded-xl bg-[#2378D4] hover:bg-[#1e6ac0] text-white text-xs font-bold cursor-pointer transition shadow-md flex items-center justify-center gap-2 mx-auto disabled:opacity-50"
+                          onClick={() => loadRealTimeNews(true)}
+                          disabled={isFeedRefreshing || isLoading}
+                          className={`inline-flex items-center gap-2.5 px-5 py-3 rounded-2xl border text-xs sm:text-sm font-semibold transition cursor-pointer disabled:opacity-60 shadow-lg ${
+                            dailyRefreshRemaining === 0
+                              ? 'border-amber-500/40 bg-amber-500/10 text-amber-300'
+                              : 'bg-[#111215] hover:bg-[#181a20] border-[#1e2026] hover:border-zinc-700 text-zinc-200 hover:text-white'
+                          }`}
+                          title={`Atualizar feed de notícias (${dailyRefreshRemaining} de 5 atualizações restantes hoje)`}
                         >
-                          <Search className="w-3.5 h-3.5" />
-                          <span>Buscar &quot;{searchQuery}&quot; nas APIs de Notícias</span>
+                          <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
+                          <span className="font-mono">
+                            {lastSyncTime ? `Ao vivo (${lastSyncTime})` : 'Ao vivo'}
+                          </span>
+                          <span
+                            className={`text-xs font-mono px-2 py-0.5 rounded-lg ${
+                              dailyRefreshRemaining === 0
+                                ? 'bg-amber-500/20 text-amber-300 font-bold'
+                                : 'bg-zinc-800 text-zinc-300'
+                            }`}
+                          >
+                            {dailyRefreshRemaining}/5
+                          </span>
+                          <RefreshCw
+                            className={`w-4 h-4 ${
+                              isFeedRefreshing ? 'animate-spin text-emerald-400' : 'text-zinc-400'
+                            }`}
+                          />
+                          <span>Atualizar feed de notícias</span>
                         </button>
+                        <p className="text-[11px] text-zinc-500 font-mono">
+                          {dailyRefreshRemaining} de 5 atualizações manuais restantes hoje
+                        </p>
                       </div>
-                    </div>
-                  )
-                ) : activeTab === 'following' ? (
-                  <EmptyFollowingState onExplore={() => setCurrentNav('explore')} />
-                ) : (
-                  <EmptyFeedState onExplore={() => setCurrentNav('explore')} />
-                )
+                    </motion.div>
+                  ) : (
+                    <motion.div
+                      key={`empty-${activeTab}-${searchQuery}`}
+                      initial={{ opacity: 0, y: 8 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -6 }}
+                      transition={{ duration: 0.18 }}
+                    >
+                      {searchQuery.trim().length > 0 ? (
+                        isSearchingExternalApis ? (
+                          <div className="p-8 rounded-2xl bg-[#0e1117] border border-[#1e2330] text-center space-y-3 animate-fade-in my-6">
+                            <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center justify-center mx-auto">
+                              <RefreshCw className="w-5 h-5 animate-spin text-emerald-400" />
+                            </div>
+                            <div>
+                              <h3 className="text-sm font-bold text-white">
+                                Buscando nas APIs Integradas (GNews & World News API)...
+                              </h3>
+                              <p className="text-xs text-zinc-400 mt-1 max-w-md mx-auto">
+                                O termo &quot;{searchQuery}&quot; não estava no cache local de eventos. Realizando requisição em tempo real às agências e provedores de notícias...
+                              </p>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="space-y-4">
+                            <NoResultsState
+                              query={searchQuery}
+                              onClear={() => {
+                                setSearchQuery('');
+                                setExternalSearchFailed(null);
+                              }}
+                              onExplore={() => {
+                                setSearchQuery('');
+                                setExternalSearchFailed(null);
+                                setCurrentNav('explore');
+                              }}
+                            />
+                            <div className="p-4 rounded-xl bg-[#0f121a] border border-[#1b2233] text-center space-y-2 text-xs">
+                              <p className="text-zinc-400">
+                                Não encontrou o que procurava no cache local?
+                              </p>
+                              <button
+                                onClick={() => handleSearchExternalApis(searchQuery)}
+                                disabled={isSearchingExternalApis}
+                                className="px-4 py-2 rounded-xl bg-[#2378D4] hover:bg-[#1e6ac0] text-white text-xs font-bold cursor-pointer transition shadow-md flex items-center justify-center gap-2 mx-auto disabled:opacity-50"
+                              >
+                                <Search className="w-3.5 h-3.5" />
+                                <span>Buscar &quot;{searchQuery}&quot; nas APIs de Notícias</span>
+                              </button>
+                            </div>
+                          </div>
+                        )
+                      ) : activeTab === 'following' ? (
+                        <EmptyFollowingState onExplore={() => setCurrentNav('explore')} />
+                      ) : activeTab === 'for-you' ? (
+                        <div className="p-8 rounded-2xl bg-[#0e1015] border border-zinc-800/80 text-center space-y-4 my-6">
+                          <div className="w-12 h-12 rounded-2xl bg-zinc-900 border border-zinc-800 text-zinc-400 flex items-center justify-center mx-auto">
+                            <Sparkles className="w-6 h-6 text-zinc-300" />
+                          </div>
+                          <div className="space-y-1.5 max-w-md mx-auto">
+                            <h3 className="text-sm font-bold text-white">
+                              Nenhuma notícia recente para as categorias selecionadas
+                            </h3>
+                            <p className="text-xs text-zinc-400 leading-relaxed">
+                              Seu feed está filtrado estritamente por:{' '}
+                              <strong className="text-zinc-200">
+                                {userInterests.map((id) => THEME_LABEL_MAP[id] || id).join(', ')}
+                              </strong>.
+                            </p>
+                          </div>
+                          <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+                            <button
+                              onClick={() => setIsRecalibrateModalOpen(true)}
+                              className="px-4 py-2 rounded-xl bg-white text-black font-bold text-xs hover:bg-zinc-200 transition cursor-pointer"
+                            >
+                              Recalibrar categorias
+                            </button>
+                            <button
+                              onClick={() => setActiveTab('trending')}
+                              className="px-4 py-2 rounded-xl bg-zinc-900 border border-zinc-800 hover:border-zinc-700 text-zinc-200 text-xs font-semibold transition cursor-pointer"
+                            >
+                              Ver em alta
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <EmptyFeedState onExplore={() => setCurrentNav('explore')} />
+                      )}
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               )}
             </main>
 
@@ -2150,10 +2339,23 @@ export default function App() {
         }}
       />
 
-      {/* ================= 9. MODAL DE ATALHOS GLOBAIS DE TECLADO ================= */}
       <KeyboardShortcutsModal
         isOpen={isShortcutsModalOpen}
         onClose={() => setIsShortcutsModalOpen(false)}
+      />
+
+      {/* ================= 9.1 MODAL DE RECALIBRAÇÃO DE INTERESSES DO LEITOR ================= */}
+      <RecalibrateInterestsModal
+        isOpen={isRecalibrateModalOpen}
+        currentInterests={userInterests}
+        onClose={() => setIsRecalibrateModalOpen(false)}
+        onSave={(newInterests) => {
+          setUserInterests(newInterests);
+        }}
+        onFullOnboarding={() => {
+          setIsRecalibrateModalOpen(false);
+          setCurrentNav('onboarding');
+        }}
       />
 
       {/* ================= 10. TOAST FLUTUANTE DE RATE LIMIT ================= */}

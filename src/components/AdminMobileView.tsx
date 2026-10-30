@@ -54,7 +54,10 @@ import {
   Play,
   Send,
   Terminal,
-  ExternalLink
+  ExternalLink,
+  Instagram,
+  Mail,
+  MessageSquare
 } from 'lucide-react';
 import { Event, Source, Topic, Entity } from '../types/sinal';
 import { AdminUser, AdminMetrics, SystemLog } from '../services/adminService';
@@ -65,6 +68,14 @@ import { aiSummarizerService } from '../services/aiSummarizerService';
 import { newsIngestionService } from '../services/newsIngestionService';
 import { notificationService } from '../services/notificationService';
 import { ResendWebhookLiveMonitor } from './ResendWebhookLiveMonitor';
+import { FatosBRControlView } from './FatosBRControlView';
+import { InstagramCarouselStudio } from './InstagramCarouselStudio';
+import { ApiHealthDashboard } from './ApiHealthDashboard';
+import { ApiHealthModal } from './ApiHealthModal';
+import { AdminBriefingCustomizer } from './AdminBriefingCustomizer';
+import { ResendTelemetryCard } from './ResendTelemetryCard';
+import { ticketService, SupportTicket } from '../services/ticketService';
+import { resendService } from '../services/resendService';
 
 export interface ProviderItem {
   id: string;
@@ -86,7 +97,12 @@ export type MobileScreen =
   | 'companies'      // Gestão Real de Empresas e Logotipos
   | 'ai'             // Provedores de IA & NVIDIA NIM
   | 'logs'           // Console e Auditoria
-  | 'webhooks';      // Telemetria e Webhooks Resend
+  | 'webhooks'       // Telemetria e Webhooks Resend
+  | 'control'        // FatosBR Control (Automação Instagram & Graph API)
+  | 'instagram'      // Estúdio de Carrosséis Instagram (P&B 4:5)
+  | 'api-health'     // Saúde das APIs & Pings em Tempo Real
+  | 'briefings'      // E-mails, Morning/Evening Briefings & Resend
+  | 'tickets';       // Tickets e Atendimento ao Usuário
 
 export interface AdminMobileViewProps {
   events?: Event[];
@@ -373,6 +389,46 @@ export const AdminMobileView: React.FC<AdminMobileViewProps> = ({
     return systemLogs.filter((l) => l.level === logFilter);
   }, [systemLogs, logFilter]);
 
+  // Estados de Saúde da API, Briefings, Resend e Tickets no Mobile
+  const [isApiHealthModalOpen, setIsApiHealthModalOpen] = useState(false);
+  const [isTestingMorningDispatch, setIsTestingMorningDispatch] = useState(false);
+  const [isTestingEveningDispatch, setIsTestingEveningDispatch] = useState(false);
+  const [tickets, setTickets] = useState<SupportTicket[]>(() => ticketService.getAllTickets());
+  const [selectedTicketId, setSelectedTicketId] = useState<string | null>(() => {
+    const list = ticketService.getAllTickets();
+    return list.length > 0 ? list[0].id : null;
+  });
+  const [ticketFilter, setTicketFilter] = useState<'all' | 'open' | 'answered' | 'resolved'>('all');
+  const [replyText, setReplyText] = useState('');
+  const [isSendingReply, setIsSendingReply] = useState(false);
+  const [testEmailRecipient, setTestEmailRecipient] = useState('astryasuporte@gmail.com');
+  const [isSendingTestEmail, setIsSendingTestEmail] = useState(false);
+
+  const renderStatusBadge = (status: 'connected' | 'error' | 'disconnected', customText?: string) => {
+    if (status === 'connected') {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-mono font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
+          <span>{customText || 'Conectado'}</span>
+        </span>
+      );
+    }
+    if (status === 'error') {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-mono font-medium bg-red-500/10 text-red-400 border border-red-500/20">
+          <span className="w-1.5 h-1.5 rounded-full bg-red-500 shrink-0" />
+          <span>{customText || 'Erro'}</span>
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-mono font-medium bg-zinc-800 text-zinc-400 border border-zinc-700">
+        <span className="w-1.5 h-1.5 rounded-full bg-zinc-500 shrink-0" />
+        <span>{customText || 'Não conectado'}</span>
+      </span>
+    );
+  };
+
   // Atividades recentes 100% reais geradas do sistema
   const recentActivities = useMemo(() => {
     const list: { id: string; title: string; time: string; icon: any }[] = [];
@@ -459,48 +515,123 @@ export const AdminMobileView: React.FC<AdminMobileViewProps> = ({
             </div>
           </div>
 
-          {/* Avatar / Identificação Super Admin Pill */}
-          <div className="relative">
+          {/* Ações Rápidas no Cabeçalho & Perfil Super Admin */}
+          <div className="flex items-center gap-1.5 sm:gap-2">
+            {/* Atalho: Saúde da API */}
             <button
-              onClick={() => setIsProfileDropdownOpen(!isProfileDropdownOpen)}
-              className="min-h-[44px] px-3 rounded-full bg-[#07111D] border border-[#183047] hover:border-[#2378D4] flex items-center gap-1.5 transition cursor-pointer"
-              aria-label="Menu do administrador"
+              onClick={() => setCurrentScreen('api-health')}
+              className="px-2.5 py-1.5 min-h-[36px] rounded-full bg-[#07111D] border border-[#183047] hover:border-[#20D6A0] text-[#20D6A0] text-[10px] font-mono font-bold flex items-center gap-1.5 transition cursor-pointer"
+              title="Saúde das APIs e cotas em tempo real"
             >
-              <div className="w-6 h-6 rounded-full bg-[#2378D4] text-white text-[11px] font-bold flex items-center justify-center">
-                SA
-              </div>
-              <ChevronDown className="w-3.5 h-3.5 text-[#94A7BC]" />
+              <span className="w-1.5 h-1.5 rounded-full bg-[#20D6A0] animate-pulse" />
+              <span className="hidden xs:inline">Saúde</span>
+              <Activity className="w-3.5 h-3.5" />
             </button>
 
-            {/* Dropdown do Administrador */}
-            {isProfileDropdownOpen && (
-              <div className="absolute right-0 top-12 w-52 rounded-2xl bg-[#0A1726] border border-[#183047] shadow-2xl p-2 z-50 animate-fadeIn text-xs space-y-1">
-                <div className="p-2 border-b border-[#183047]/60">
-                  <div className="font-bold text-[#F4F7FB]">Super Admin</div>
-                  <div className="text-[11px] text-[#94A7BC] truncate">admin@fatosbr.com</div>
+            {/* Atalho: Instagram / Control */}
+            <button
+              onClick={() => setCurrentScreen('control')}
+              className="min-h-[36px] min-w-[36px] rounded-full bg-[#07111D] border border-[#183047] hover:border-emerald-500/40 text-emerald-400 hover:text-white flex items-center justify-center transition cursor-pointer"
+              title="Central FatosBR Control (Instagram)"
+            >
+              <Instagram className="w-3.5 h-3.5" />
+            </button>
+
+            {/* Atalho: Briefings & Resend */}
+            <button
+              onClick={() => setCurrentScreen('briefings')}
+              className="min-h-[36px] min-w-[36px] rounded-full bg-[#07111D] border border-[#183047] hover:border-[#41C8F4]/40 text-[#41C8F4] hover:text-white flex items-center justify-center transition cursor-pointer"
+              title="E-mails & Briefings Resend"
+            >
+              <Mail className="w-3.5 h-3.5" />
+            </button>
+
+            {/* Avatar / Identificação Super Admin Pill */}
+            <div className="relative">
+              <button
+                onClick={() => setIsProfileDropdownOpen(!isProfileDropdownOpen)}
+                className="min-h-[36px] px-2.5 rounded-full bg-[#07111D] border border-[#183047] hover:border-[#2378D4] flex items-center gap-1.5 transition cursor-pointer"
+                aria-label="Menu do administrador"
+              >
+                <div className="w-5 h-5 rounded-full bg-[#2378D4] text-white text-[10px] font-bold flex items-center justify-center">
+                  SA
                 </div>
+                <ChevronDown className="w-3 h-3 text-[#94A7BC]" />
+              </button>
 
-                <button
-                  onClick={() => {
-                    setIsProfileDropdownOpen(false);
-                    setCurrentScreen('settings');
-                  }}
-                  className="w-full text-left px-3 py-2 rounded-xl hover:bg-[#183047]/40 text-[#F4F7FB] flex items-center gap-2"
-                >
-                  <User className="w-3.5 h-3.5 text-[#41C8F4]" />
-                  <span>Configurações & Idiomas</span>
-                </button>
+              {/* Dropdown do Administrador */}
+              {isProfileDropdownOpen && (
+                <div className="absolute right-0 top-11 w-56 rounded-2xl bg-[#0A1726] border border-[#183047] shadow-2xl p-2 z-50 animate-fadeIn text-xs space-y-1">
+                  <div className="p-2 border-b border-[#183047]/60">
+                    <div className="font-bold text-[#F4F7FB]">Super Admin</div>
+                    <div className="text-[11px] text-[#94A7BC] truncate">admin@fatosbr.com</div>
+                  </div>
 
-                <button
-                  onClick={() => {
-                    setIsProfileDropdownOpen(false);
-                    setCurrentScreen('financial');
-                  }}
-                  className="w-full text-left px-3 py-2 rounded-xl hover:bg-[#183047]/40 text-[#F4F7FB] flex items-center gap-2"
-                >
-                  <CreditCard className="w-3.5 h-3.5 text-[#20D6A0]" />
-                  <span>Dashboard Financeiro</span>
-                </button>
+                  <button
+                    onClick={() => {
+                      setIsProfileDropdownOpen(false);
+                      setCurrentScreen('control');
+                    }}
+                    className="w-full text-left px-3 py-2 rounded-xl hover:bg-[#183047]/40 text-[#F4F7FB] flex items-center gap-2"
+                  >
+                    <Instagram className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>FatosBR Control (Instagram)</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setIsProfileDropdownOpen(false);
+                      setCurrentScreen('api-health');
+                    }}
+                    className="w-full text-left px-3 py-2 rounded-xl hover:bg-[#183047]/40 text-[#F4F7FB] flex items-center gap-2"
+                  >
+                    <Activity className="w-3.5 h-3.5 text-[#20D6A0]" />
+                    <span>Saúde das APIs</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setIsProfileDropdownOpen(false);
+                      setCurrentScreen('briefings');
+                    }}
+                    className="w-full text-left px-3 py-2 rounded-xl hover:bg-[#183047]/40 text-[#F4F7FB] flex items-center gap-2"
+                  >
+                    <Mail className="w-3.5 h-3.5 text-[#41C8F4]" />
+                    <span>E-mails & Briefings</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setIsProfileDropdownOpen(false);
+                      setCurrentScreen('tickets');
+                    }}
+                    className="w-full text-left px-3 py-2 rounded-xl hover:bg-[#183047]/40 text-[#F4F7FB] flex items-center gap-2"
+                  >
+                    <MessageSquare className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Tickets de Suporte</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setIsProfileDropdownOpen(false);
+                      setCurrentScreen('settings');
+                    }}
+                    className="w-full text-left px-3 py-2 rounded-xl hover:bg-[#183047]/40 text-[#F4F7FB] flex items-center gap-2"
+                  >
+                    <User className="w-3.5 h-3.5 text-[#41C8F4]" />
+                    <span>Configurações & Idiomas</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setIsProfileDropdownOpen(false);
+                      setCurrentScreen('financial');
+                    }}
+                    className="w-full text-left px-3 py-2 rounded-xl hover:bg-[#183047]/40 text-[#F4F7FB] flex items-center gap-2"
+                  >
+                    <CreditCard className="w-3.5 h-3.5 text-[#20D6A0]" />
+                    <span>Dashboard Financeiro</span>
+                  </button>
 
                 <button
                   onClick={() => {
@@ -526,8 +657,9 @@ export const AdminMobileView: React.FC<AdminMobileViewProps> = ({
               </div>
             )}
           </div>
-        </header>
-      )}
+        </div>
+      </header>
+    )}
 
       {/* ============================================================== */}
       {/* TELA 1 — VISÃO GERAL (OVERVIEW)                                */}
@@ -816,6 +948,120 @@ export const AdminMobileView: React.FC<AdminMobileViewProps> = ({
                     </div>
                     <div className="text-[11px] text-[#94A7BC]">
                       Auditoria operacional em tempo real ({systemLogs.length} registros)
+                    </div>
+                  </div>
+                </div>
+                <ChevronRight className="w-4 h-4 text-[#94A7BC] group-hover:text-white transition" />
+              </button>
+
+              {/* Ação: FatosBR Control (Instagram) */}
+              <button
+                onClick={() => setCurrentScreen('control')}
+                className="w-full p-3.5 rounded-2xl bg-[#07111D] border border-emerald-500/40 hover:border-emerald-400 transition flex items-center justify-between text-left cursor-pointer group active:scale-[0.99] shadow-md shadow-emerald-950/20"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 flex items-center justify-center shrink-0">
+                    <Instagram className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <div className="text-xs font-bold text-[#F4F7FB] group-hover:text-emerald-300 transition flex items-center gap-2">
+                      <span>FatosBR Control (Instagram)</span>
+                      <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                        Ativo
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-[#94A7BC]">
+                      Automação de comentários, agendamento de posts e Graph API
+                    </div>
+                  </div>
+                </div>
+                <ChevronRight className="w-4 h-4 text-[#94A7BC] group-hover:text-white transition" />
+              </button>
+
+              {/* Ação: Estúdio de Carrosséis Instagram */}
+              <button
+                onClick={() => setCurrentScreen('instagram')}
+                className="w-full p-3.5 rounded-2xl bg-[#07111D] border border-[#183047] hover:border-[#2378D4] transition flex items-center justify-between text-left cursor-pointer group active:scale-[0.99]"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-xl bg-white/10 border border-white/20 text-white flex items-center justify-center shrink-0">
+                    <Layers className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <div className="text-xs font-bold text-[#F4F7FB] group-hover:text-[#41C8F4] transition">
+                      Estúdio de Carrosséis (P&B 4:5)
+                    </div>
+                    <div className="text-[11px] text-[#94A7BC]">
+                      Criar, editar slides e exportar postagens oficiais da FatosBR
+                    </div>
+                  </div>
+                </div>
+                <ChevronRight className="w-4 h-4 text-[#94A7BC] group-hover:text-white transition" />
+              </button>
+
+              {/* Ação: Saúde das APIs & Telemetria */}
+              <button
+                onClick={() => setCurrentScreen('api-health')}
+                className="w-full p-3.5 rounded-2xl bg-[#07111D] border border-[#183047] hover:border-[#20D6A0] transition flex items-center justify-between text-left cursor-pointer group active:scale-[0.99]"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-xl bg-[#20D6A0]/10 border border-[#20D6A0]/30 text-[#20D6A0] flex items-center justify-center shrink-0">
+                    <Activity className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <div className="text-xs font-bold text-[#F4F7FB] group-hover:text-[#20D6A0] transition flex items-center gap-2">
+                      <span>Saúde das APIs & Telemetria</span>
+                      <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                        Live
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-[#94A7BC]">
+                      Pings ao vivo de GNews, NewsAPI, World News e NVIDIA NIM
+                    </div>
+                  </div>
+                </div>
+                <ChevronRight className="w-4 h-4 text-[#94A7BC] group-hover:text-white transition" />
+              </button>
+
+              {/* Ação: E-mails & Briefings Resend */}
+              <button
+                onClick={() => setCurrentScreen('briefings')}
+                className="w-full p-3.5 rounded-2xl bg-[#07111D] border border-[#183047] hover:border-[#41C8F4] transition flex items-center justify-between text-left cursor-pointer group active:scale-[0.99]"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-xl bg-[#41C8F4]/10 border border-[#41C8F4]/20 text-[#41C8F4] flex items-center justify-center shrink-0">
+                    <Mail className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <div className="text-xs font-bold text-[#F4F7FB] group-hover:text-[#41C8F4] transition">
+                      E-mails & Briefings Resend
+                    </div>
+                    <div className="text-[11px] text-[#94A7BC]">
+                      Disparar Morning Briefing (07h), Evening (20h) e testes de envio
+                    </div>
+                  </div>
+                </div>
+                <ChevronRight className="w-4 h-4 text-[#94A7BC] group-hover:text-white transition" />
+              </button>
+
+              {/* Ação: Tickets de Suporte */}
+              <button
+                onClick={() => setCurrentScreen('tickets')}
+                className="w-full p-3.5 rounded-2xl bg-[#07111D] border border-[#183047] hover:border-amber-400/60 transition flex items-center justify-between text-left cursor-pointer group active:scale-[0.99]"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-400 flex items-center justify-center shrink-0">
+                    <MessageSquare className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <div className="text-xs font-bold text-[#F4F7FB] group-hover:text-amber-300 transition flex items-center gap-2">
+                      <span>Tickets de Suporte & Atendimento</span>
+                      <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                        {tickets.filter((t) => t.status === 'open').length} abertos
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-[#94A7BC]">
+                      Atender chamados dos usuários e despachar respostas por e-mail
                     </div>
                   </div>
                 </div>
@@ -1890,6 +2136,427 @@ export const AdminMobileView: React.FC<AdminMobileViewProps> = ({
       )}
 
       {/* ============================================================== */}
+      {/* TELA: FATOSBR CONTROL (INSTAGRAM & META GRAPH API)             */}
+      {/* ============================================================== */}
+      {currentScreen === 'control' && (
+        <main className="animate-fade-in pb-16">
+          <div className="sticky top-0 z-30 bg-[#030912]/95 backdrop-blur-md border-b border-[#183047] px-4 py-2.5 flex items-center justify-between">
+            <button
+              onClick={() => setCurrentScreen('overview')}
+              className="flex items-center gap-1.5 text-xs font-bold text-[#F4F7FB] hover:text-[#41C8F4] cursor-pointer"
+            >
+              <ArrowLeft className="w-4 h-4" />
+              <span>Voltar ao Painel</span>
+            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setCurrentScreen('instagram')}
+                className="px-3 py-1.5 rounded-xl bg-white text-black font-bold text-xs flex items-center gap-1.5 cursor-pointer shadow-sm"
+              >
+                <Layers className="w-3.5 h-3.5" />
+                <span>Estúdio 4:5</span>
+              </button>
+            </div>
+          </div>
+          <FatosBRControlView
+            onBackToApp={() => setCurrentScreen('overview')}
+            onOpenCarouselStudio={() => setCurrentScreen('instagram')}
+          />
+        </main>
+      )}
+
+      {/* ============================================================== */}
+      {/* TELA: ESTÚDIO DE CARROSSÉIS INSTAGRAM (P&B 4:5)                */}
+      {/* ============================================================== */}
+      {currentScreen === 'instagram' && (
+        <main className="animate-fade-in pb-16">
+          <div className="sticky top-0 z-30 bg-[#030912]/95 backdrop-blur-md border-b border-[#183047] px-4 py-2.5 flex items-center justify-between">
+            <button
+              onClick={() => setCurrentScreen('control')}
+              className="flex items-center gap-1.5 text-xs font-bold text-[#F4F7FB] hover:text-[#41C8F4] cursor-pointer"
+            >
+              <ArrowLeft className="w-4 h-4" />
+              <span>Voltar ao Control</span>
+            </button>
+            <span className="text-xs font-bold text-white flex items-center gap-1.5">
+              <Instagram className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Estúdio 4:5</span>
+            </span>
+          </div>
+          <InstagramCarouselStudio
+            events={events}
+            entities={entities}
+            onBack={() => setCurrentScreen('control')}
+          />
+        </main>
+      )}
+
+      {/* ============================================================== */}
+      {/* TELA: SAÚDE DAS APIS & TELEMETRIA                              */}
+      {/* ============================================================== */}
+      {currentScreen === 'api-health' && (
+        <main className="p-4 space-y-4 max-w-lg mx-auto animate-fade-in pb-16">
+          <div className="flex items-center justify-between pb-2 border-b border-[#183047]">
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setCurrentScreen('overview')}
+                className="p-1.5 rounded-xl text-[#94A7BC] hover:text-[#41C8F4] cursor-pointer"
+              >
+                <ArrowLeft className="w-5 h-5" />
+              </button>
+              <div>
+                <h1 className="text-base font-bold text-[#F4F7FB] flex items-center gap-2">
+                  <span>Saúde das APIs</span>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                    Live
+                  </span>
+                </h1>
+                <p className="text-[10px] text-[#94A7BC]">Telemetria, cotas e pings em tempo real</p>
+              </div>
+            </div>
+
+            <button
+              onClick={() => setIsApiHealthModalOpen(true)}
+              className="px-3 py-1.5 rounded-xl bg-[#2378D4] hover:bg-[#1f6cc0] text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-md"
+            >
+              <Activity className="w-3.5 h-3.5" />
+              <span>Modal</span>
+            </button>
+          </div>
+
+          <ApiHealthDashboard
+            renderStatusBadge={renderStatusBadge}
+            onBackToOverview={() => setCurrentScreen('overview')}
+          />
+        </main>
+      )}
+
+      {/* ============================================================== */}
+      {/* TELA: E-MAILS & BRIEFINGS RESEND                               */}
+      {/* ============================================================== */}
+      {currentScreen === 'briefings' && (
+        <main className="p-4 space-y-5 max-w-lg mx-auto animate-fade-in pb-16">
+          <div className="flex items-center justify-between pb-2 border-b border-[#183047]">
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setCurrentScreen('overview')}
+                className="p-1.5 rounded-xl text-[#94A7BC] hover:text-[#41C8F4] cursor-pointer"
+              >
+                <ArrowLeft className="w-5 h-5" />
+              </button>
+              <div>
+                <h1 className="text-base font-bold text-[#F4F7FB] flex items-center gap-2">
+                  <Mail className="w-4 h-4 text-[#41C8F4]" />
+                  <span>E-mails & Briefings Resend</span>
+                </h1>
+                <p className="text-[10px] text-[#94A7BC]">Disparos matinais, noturnos e testes com Resend API</p>
+              </div>
+            </div>
+
+            <button
+              onClick={() => setCurrentScreen('webhooks')}
+              className="px-2.5 py-1.5 rounded-xl bg-[#07111D] border border-[#183047] hover:border-[#20D6A0] text-[#20D6A0] text-[10px] font-mono font-bold flex items-center gap-1 cursor-pointer"
+            >
+              <Activity className="w-3.5 h-3.5" />
+              <span>Webhooks</span>
+            </button>
+          </div>
+
+          {/* Cards de Disparo Rápido: Morning e Evening */}
+          <div className="space-y-3">
+            <h2 className="text-xs font-bold text-[#94A7BC] uppercase font-mono tracking-wider">
+              Automações de Briefing
+            </h2>
+
+            {/* Morning Briefing */}
+            <div className="p-4 rounded-2xl bg-[#07111D] border border-[#183047] space-y-2.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-amber-400 flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5" />
+                  <span>Morning Briefing (07h00)</span>
+                </span>
+                {renderStatusBadge('connected', 'Agendado')}
+              </div>
+              <p className="text-[11px] text-[#94A7BC]">
+                Síntese matinal dos acontecimentos críticos e movimentações de mercado antes da abertura.
+              </p>
+              <button
+                onClick={async () => {
+                  setIsTestingMorningDispatch(true);
+                  try {
+                    const res = await resendService.sendEmail({
+                      to: 'astryasuporte@gmail.com',
+                      subject: 'FatosBR • Morning Briefing (Disparo Manual)',
+                      html: `<div style="font-family:sans-serif;padding:20px;background:#030912;color:#fff;">
+                        <h2>FatosBR • Radar Executivo Matinal</h2>
+                        <p>Disparo executado diretamente pelo Painel Mobile via Resend API.</p>
+                      </div>`
+                    });
+                    if (res.success) {
+                      onShowToast('Morning Briefing despachado com sucesso via Resend!');
+                    } else {
+                      onShowToast(`Erro: ${res.error || 'Falha no disparo'}`);
+                    }
+                  } catch (e: any) {
+                    onShowToast(`Erro: ${e.message}`);
+                  } finally {
+                    setIsTestingMorningDispatch(false);
+                  }
+                }}
+                disabled={isTestingMorningDispatch}
+                className="w-full py-2.5 rounded-xl bg-gradient-to-r from-amber-500/20 to-blue-500/20 hover:from-amber-500/30 border border-amber-500/40 text-amber-300 font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer disabled:opacity-50"
+              >
+                <Send className={`w-3.5 h-3.5 ${isTestingMorningDispatch ? 'animate-spin' : ''}`} />
+                <span>{isTestingMorningDispatch ? 'Despachando...' : 'Disparar Morning Briefing Agora'}</span>
+              </button>
+            </div>
+
+            {/* Evening Briefing */}
+            <div className="p-4 rounded-2xl bg-[#07111D] border border-[#183047] space-y-2.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-blue-400 flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5" />
+                  <span>Evening Briefing (20h00)</span>
+                </span>
+                {renderStatusBadge('connected', 'Agendado')}
+              </div>
+              <p className="text-[11px] text-[#94A7BC]">
+                Fechamento do dia, impactos regulatórios e desdobramentos de IA.
+              </p>
+              <button
+                onClick={async () => {
+                  setIsTestingEveningDispatch(true);
+                  try {
+                    const res = await resendService.sendEmail({
+                      to: 'astryasuporte@gmail.com',
+                      subject: 'FatosBR • Evening Briefing (Disparo Manual)',
+                      html: `<div style="font-family:sans-serif;padding:20px;background:#030912;color:#fff;">
+                        <h2>FatosBR • Fechamento Executivo Noturno</h2>
+                        <p>Disparo executado diretamente pelo Painel Mobile via Resend API.</p>
+                      </div>`
+                    });
+                    if (res.success) {
+                      onShowToast('Evening Briefing despachado com sucesso via Resend!');
+                    } else {
+                      onShowToast(`Erro: ${res.error || 'Falha no disparo'}`);
+                    }
+                  } catch (e: any) {
+                    onShowToast(`Erro: ${e.message}`);
+                  } finally {
+                    setIsTestingEveningDispatch(false);
+                  }
+                }}
+                disabled={isTestingEveningDispatch}
+                className="w-full py-2.5 rounded-xl bg-gradient-to-r from-blue-500/20 to-purple-500/20 hover:from-blue-500/30 border border-blue-500/40 text-blue-300 font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer disabled:opacity-50"
+              >
+                <Send className={`w-3.5 h-3.5 ${isTestingEveningDispatch ? 'animate-spin' : ''}`} />
+                <span>{isTestingEveningDispatch ? 'Despachando...' : 'Disparar Evening Briefing Agora'}</span>
+              </button>
+            </div>
+
+            {/* Envio de Teste de E-mail via Resend API */}
+            <div className="p-4 rounded-2xl bg-[#07111D] border border-[#183047] space-y-3">
+              <h3 className="text-xs font-bold text-[#F4F7FB] flex items-center gap-2">
+                <Mail className="w-4 h-4 text-[#41C8F4]" />
+                <span>Enviar E-mail de Teste (Resend API)</span>
+              </h3>
+              <div className="space-y-2">
+                <input
+                  type="email"
+                  value={testEmailRecipient}
+                  onChange={(e) => setTestEmailRecipient(e.target.value)}
+                  placeholder="E-mail destinatário (ex: astryasuporte@gmail.com)"
+                  className="w-full bg-[#030912] border border-[#183047] rounded-xl px-3 py-2 text-xs text-[#F4F7FB] focus:outline-none focus:border-[#2378D4]"
+                />
+                <button
+                  onClick={async () => {
+                    if (!testEmailRecipient.trim() || isSendingTestEmail) return;
+                    setIsSendingTestEmail(true);
+                    try {
+                      const res = await resendService.sendEmail({
+                        to: testEmailRecipient.trim(),
+                        subject: 'FatosBR • E-mail de Teste do Administrador',
+                        html: `<div style="font-family:sans-serif;padding:20px;background:#030912;color:#fff;">
+                          <h2>Teste de Conexão Resend — FatosBR</h2>
+                          <p>Se você recebeu este e-mail, a integração direta via Resend API está 100% operacional.</p>
+                          <hr style="border-color:#183047;margin:15px 0;"/>
+                          <p style="font-size:12px;color:#94A7BC;">Ambiente Mobile FatosBR</p>
+                        </div>`
+                      });
+                      if (res.success) {
+                        onShowToast(`E-mail de teste enviado para ${testEmailRecipient}!`);
+                      } else {
+                        onShowToast(`Falha: ${res.error || 'Erro no envio'}`);
+                      }
+                    } catch (e: any) {
+                      onShowToast(`Erro: ${e.message}`);
+                    } finally {
+                      setIsSendingTestEmail(false);
+                    }
+                  }}
+                  disabled={isSendingTestEmail}
+                  className="w-full py-2.5 rounded-xl bg-[#2378D4] hover:bg-[#1f6cc0] text-white text-xs font-bold flex items-center justify-center gap-2 transition cursor-pointer disabled:opacity-50"
+                >
+                  <Send className={`w-3.5 h-3.5 ${isSendingTestEmail ? 'animate-spin' : ''}`} />
+                  <span>{isSendingTestEmail ? 'Enviando E-mail...' : 'Disparar E-mail Real via Resend'}</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Customizador Oficial de Briefings */}
+            <AdminBriefingCustomizer events={events} onShowToast={onShowToast} />
+          </div>
+        </main>
+      )}
+
+      {/* ============================================================== */}
+      {/* TELA: TICKETS DE SUPORTE & ATENDIMENTO                         */}
+      {/* ============================================================== */}
+      {currentScreen === 'tickets' && (() => {
+        const filteredTicketList = tickets.filter((t) => {
+          if (ticketFilter !== 'all' && t.status !== ticketFilter) return false;
+          return true;
+        });
+        const currentTicket = tickets.find((t) => t.id === selectedTicketId) || filteredTicketList[0] || null;
+
+        return (
+          <main className="p-4 space-y-4 max-w-lg mx-auto animate-fade-in pb-16">
+            <div className="flex items-center justify-between pb-2 border-b border-[#183047]">
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => setCurrentScreen('overview')}
+                  className="p-1.5 rounded-xl text-[#94A7BC] hover:text-[#41C8F4] cursor-pointer"
+                >
+                  <ArrowLeft className="w-5 h-5" />
+                </button>
+                <div>
+                  <h1 className="text-base font-bold text-[#F4F7FB] flex items-center gap-2">
+                    <MessageSquare className="w-4 h-4 text-amber-400" />
+                    <span>Tickets de Suporte</span>
+                  </h1>
+                  <p className="text-[10px] text-[#94A7BC]">{tickets.length} chamados registrados</p>
+                </div>
+              </div>
+
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20">
+                Resend Ativo
+              </span>
+            </div>
+
+            {/* Filtros de Ticket */}
+            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
+              {(['all', 'open', 'answered', 'resolved'] as const).map((st) => (
+                <button
+                  key={st}
+                  onClick={() => setTicketFilter(st)}
+                  className={`px-3 py-1 rounded-full text-[11px] font-mono font-bold whitespace-nowrap transition cursor-pointer ${
+                    ticketFilter === st
+                      ? 'bg-[#2378D4] text-white shadow-sm'
+                      : 'bg-[#07111D] text-[#94A7BC] border border-[#183047]'
+                  }`}
+                >
+                  {st === 'all' ? `Todos (${tickets.length})` : st === 'open' ? `Abertos (${tickets.filter((t) => t.status === 'open').length})` : st === 'answered' ? 'Respondidos' : 'Resolvidos'}
+                </button>
+              ))}
+            </div>
+
+            {/* Lista e Detalhe de Tickets */}
+            <div className="space-y-3">
+              {filteredTicketList.length === 0 ? (
+                <div className="p-8 text-center text-xs text-[#94A7BC] bg-[#07111D] rounded-2xl border border-[#183047]">
+                  Nenhum chamado encontrado nesta categoria.
+                </div>
+              ) : (
+                filteredTicketList.map((t) => {
+                  const isSelected = currentTicket?.id === t.id;
+                  return (
+                    <div
+                      key={t.id}
+                      onClick={() => setSelectedTicketId(t.id)}
+                      className={`p-3.5 rounded-2xl border transition cursor-pointer space-y-2 ${
+                        isSelected
+                          ? 'bg-[#0A1726] border-[#2378D4] shadow-lg'
+                          : 'bg-[#07111D] border-[#183047]'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-mono text-[#94A7BC]">#{t.id}</span>
+                        <span
+                          className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-full ${
+                            t.status === 'open'
+                              ? 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+                              : t.status === 'answered'
+                              ? 'bg-blue-500/15 text-blue-300 border border-blue-500/30'
+                              : 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                          }`}
+                        >
+                          {t.status === 'open' ? 'Aberto' : t.status === 'answered' ? 'Respondido' : 'Resolvido'}
+                        </span>
+                      </div>
+                      <div className="text-xs font-bold text-[#F4F7FB]">{t.subject}</div>
+                      <p className="text-[11px] text-[#94A7BC] line-clamp-2">{t.message}</p>
+                      <div className="text-[10px] text-[#94A7BC] pt-1 border-t border-[#183047]/60 flex items-center justify-between">
+                        <span>{t.userName} ({t.userEmail})</span>
+                        <span>{new Date(t.createdAt).toLocaleDateString('pt-BR')}</span>
+                      </div>
+
+                      {/* Caixa de Resposta Expandida se Selecionado */}
+                      {isSelected && (
+                        <div className="pt-2 border-t border-[#183047] space-y-2" onClick={(e) => e.stopPropagation()}>
+                          <textarea
+                            rows={2}
+                            value={replyText}
+                            onChange={(e) => setReplyText(e.target.value)}
+                            placeholder="Escreva a resposta para o usuário..."
+                            className="w-full bg-[#030912] border border-[#183047] rounded-xl p-2.5 text-xs text-[#F4F7FB] placeholder:text-[#94A7BC] focus:outline-none focus:border-[#2378D4]"
+                          />
+                          <div className="flex items-center justify-end gap-2">
+                            {t.status !== 'resolved' && (
+                              <button
+                                onClick={async () => {
+                                  await ticketService.resolveTicket(t.id);
+                                  setTickets(ticketService.getAllTickets());
+                                  onShowToast(`Ticket #${t.id} marcado como resolvido!`);
+                                }}
+                                className="px-3 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-bold transition cursor-pointer"
+                              >
+                                Resolver
+                              </button>
+                            )}
+                            <button
+                              onClick={async () => {
+                                if (!replyText.trim() || isSendingReply) return;
+                                setIsSendingReply(true);
+                                try {
+                                  await ticketService.replyTicket(t.id, replyText.trim(), 'Equipe FatosBR Suporte');
+                                  setTickets(ticketService.getAllTickets());
+                                  setReplyText('');
+                                  onShowToast('Resposta enviada e e-mail despachado via Resend!');
+                                } catch {
+                                  onShowToast('Erro ao enviar resposta.');
+                                } finally {
+                                  setIsSendingReply(false);
+                                }
+                              }}
+                              disabled={isSendingReply || !replyText.trim()}
+                              className="px-3 py-1.5 rounded-xl bg-[#2378D4] hover:bg-[#1f6cc0] text-white text-xs font-bold flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
+                            >
+                              <Send className="w-3.5 h-3.5" />
+                              <span>{isSendingReply ? 'Enviando...' : 'Responder (Resend)'}</span>
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </main>
+        );
+      })()}
+
+      {/* ============================================================== */}
       {/* TELA 2 — MENU DE NAVEGAÇÃO ADMINISTRATIVA (DRAWER OVERLAY)     */}
       {/* ============================================================== */}
       {isMenuOpen && (
@@ -1964,6 +2631,106 @@ export const AdminMobileView: React.FC<AdminMobileViewProps> = ({
                     <Home className="w-4 h-4 text-[#41C8F4]" />
                     <span>Visão geral</span>
                   </div>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setCurrentScreen('control');
+                    setIsMenuOpen(false);
+                  }}
+                  className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl transition cursor-pointer ${
+                    currentScreen === 'control'
+                      ? 'bg-[#07111D] text-emerald-400 font-bold border border-emerald-500/40'
+                      : 'text-[#94A7BC] hover:text-white hover:bg-[#07111D]'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5">
+                    <Instagram className="w-4 h-4 text-emerald-400" />
+                    <span>FatosBR Control (Instagram)</span>
+                  </div>
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300">
+                    Ativo
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setCurrentScreen('instagram');
+                    setIsMenuOpen(false);
+                  }}
+                  className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl transition cursor-pointer ${
+                    currentScreen === 'instagram'
+                      ? 'bg-[#07111D] text-[#41C8F4] font-bold border border-[#183047]'
+                      : 'text-[#94A7BC] hover:text-white hover:bg-[#07111D]'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5">
+                    <Layers className="w-4 h-4 text-white" />
+                    <span>Estúdio de Carrosséis 4:5</span>
+                  </div>
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-white/10 text-white">
+                    P&B
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setCurrentScreen('api-health');
+                    setIsMenuOpen(false);
+                  }}
+                  className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl transition cursor-pointer ${
+                    currentScreen === 'api-health'
+                      ? 'bg-[#07111D] text-[#20D6A0] font-bold border border-[#183047]'
+                      : 'text-[#94A7BC] hover:text-white hover:bg-[#07111D]'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5">
+                    <Activity className="w-4 h-4 text-[#20D6A0]" />
+                    <span>Saúde das APIs</span>
+                  </div>
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400">
+                    Live
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setCurrentScreen('briefings');
+                    setIsMenuOpen(false);
+                  }}
+                  className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl transition cursor-pointer ${
+                    currentScreen === 'briefings'
+                      ? 'bg-[#07111D] text-[#41C8F4] font-bold border border-[#183047]'
+                      : 'text-[#94A7BC] hover:text-white hover:bg-[#07111D]'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5">
+                    <Mail className="w-4 h-4 text-[#41C8F4]" />
+                    <span>E-mails & Briefings</span>
+                  </div>
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400">
+                    Resend
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setCurrentScreen('tickets');
+                    setIsMenuOpen(false);
+                  }}
+                  className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl transition cursor-pointer ${
+                    currentScreen === 'tickets'
+                      ? 'bg-[#07111D] text-amber-400 font-bold border border-[#183047]'
+                      : 'text-[#94A7BC] hover:text-white hover:bg-[#07111D]'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5">
+                    <MessageSquare className="w-4 h-4 text-amber-400" />
+                    <span>Tickets de Suporte</span>
+                  </div>
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300">
+                    {tickets.filter((t) => t.status === 'open').length}
+                  </span>
                 </button>
 
                 <button
@@ -2326,6 +3093,12 @@ export const AdminMobileView: React.FC<AdminMobileViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* Modal de Detalhes de Saúde das APIs */}
+      <ApiHealthModal
+        isOpen={isApiHealthModalOpen}
+        onClose={() => setIsApiHealthModalOpen(false)}
+      />
 
       {/* ============================================================== */}
       {/* BARRA INFERIOR DE NAVEGAÇÃO MOBILE (BOTTOM NAV)                */}
