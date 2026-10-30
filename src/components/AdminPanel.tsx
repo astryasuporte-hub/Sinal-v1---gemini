@@ -72,6 +72,7 @@ import { AdminCompanyManager } from './AdminCompanyManager';
 import { AdminBriefingCustomizer } from './AdminBriefingCustomizer';
 import { AdminMobileView } from './AdminMobileView';
 import { AdminFinancialDashboard } from './AdminFinancialDashboard';
+import { AdminFinancialZynPayPanel } from './AdminFinancialZynPayPanel';
 import { ResendWebhookLiveMonitor } from './ResendWebhookLiveMonitor';
 import { notificationService } from '../services/notificationService';
 import { zynpayService } from '../services/zynpayService';
@@ -2149,6 +2150,9 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
         {/* ================= TAB 5: ASSINATURAS & PIX (DASHBOARD FINANCEIRO FATURADO / NÃO FATURADO) ================= */}
         {activeAdminTab === 'billing' && (
           <div className="space-y-6">
+            {/* Painel Financeiro Oficial ZynPay: Saldo em centavos, Volume e Últimos 20 Webhooks */}
+            <AdminFinancialZynPayPanel onShowToast={showToast} />
+
             {/* Dashboard Financeiro Completo: MRR, Faturado vs Não Faturado, Gráfico e Exportação CSV */}
             <AdminFinancialDashboard users={usersList} onShowToast={showToast} />
 

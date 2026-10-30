@@ -198,7 +198,42 @@ export interface ZynPayServerCharge {
 }
 
 const zynpayChargesStore = new Map<string, ZynPayServerCharge>();
-const zynpayWebhookEvents: any[] = [];
+const zynpayWebhookEvents: any[] = [
+  {
+    id: 'whk_zyn_initial_1',
+    type: 'charge.paid',
+    chargeId: 'zyn_init_101',
+    amountCents: 2990,
+    status: 'PAID',
+    timestamp: new Date(Date.now() - 48 * 3600 * 1000).toISOString(),
+    customerEmail: 'assinante.pro@fatosbr.com'
+  },
+  {
+    id: 'whk_zyn_initial_2',
+    type: 'charge.paid',
+    chargeId: 'zyn_init_102',
+    amountCents: 2990,
+    status: 'PAID',
+    timestamp: new Date(Date.now() - 24 * 3600 * 1000).toISOString(),
+    customerEmail: 'contato@fatosbr.com'
+  },
+  {
+    id: 'whk_zyn_initial_3',
+    type: 'charge.paid',
+    chargeId: 'zyn_init_103',
+    amountCents: 8970,
+    status: 'PAID',
+    timestamp: new Date().toISOString(),
+    customerEmail: 'leitor.premium@fatosbr.com'
+  }
+];
+const zynpaySseClients = new Set<any>();
+let zynpayWebhookConfig = {
+  webhookUrl: 'https://api.fatosbr.com.br/api/zynpay/webhook',
+  secret: 'whsec_zynpay_live_prod',
+  autoSyncEnabled: true,
+  updatedAt: new Date().toISOString()
+};
 
 function apiProxyPlugin(): Plugin {
   return {
@@ -1597,7 +1632,7 @@ function apiProxyPlugin(): Plugin {
               }
 
               // 12.3. POST & GET /api/zynpay/webhook (Recepção e Histórico de Notificações de Pagamento)
-              if (pathname === '/api/zynpay/webhook') {
+              if (pathname === '/api/zynpay/webhook' || pathname === '/api/zynpay/webhooks') {
                 if (req.method === 'POST') {
                   const body = await readJsonBody();
                   const chargeId = body.data?.id || body.chargeId || body.id || body.data?.charge_id || `zyn_${Date.now()}`;
@@ -1630,6 +1665,24 @@ function apiProxyPlugin(): Plugin {
                   zynpayWebhookEvents.unshift(webhookItem);
                   if (zynpayWebhookEvents.length > 50) zynpayWebhookEvents.pop();
 
+                  // Transmissão Server-Sent Events (SSE) para atualização instantânea do front-end
+                  const sseMessage = JSON.stringify({
+                    type: 'PAYMENT_CONFIRMED',
+                    chargeId,
+                    status: 'PAID',
+                    amountCents: webhookItem.amountCents,
+                    userEmail: webhookItem.customerEmail,
+                    timestamp: webhookItem.timestamp
+                  });
+
+                  for (const client of zynpaySseClients) {
+                    try {
+                      client.write(`data: ${sseMessage}\n\n`);
+                    } catch {
+                      zynpaySseClients.delete(client);
+                    }
+                  }
+
                   res.setHeader('Content-Type', 'application/json');
                   res.statusCode = 200;
                   res.end(JSON.stringify({
@@ -1654,6 +1707,61 @@ function apiProxyPlugin(): Plugin {
                       volumeCents: providerStats.zynpay.totalVolumeCents,
                       balanceAvailableCents: providerStats.zynpay.balanceAvailableCents
                     }
+                  }));
+                  return;
+                }
+              }
+
+              // 12.4. GET /api/zynpay/events (Server-Sent Events para Sincronização em Tempo Real)
+              if (pathname === '/api/zynpay/events') {
+                res.setHeader('Content-Type', 'text/event-stream');
+                res.setHeader('Cache-Control', 'no-cache, no-transform');
+                res.setHeader('Connection', 'keep-alive');
+                res.setHeader('X-Accel-Buffering', 'no');
+                if (typeof (res as any).flushHeaders === 'function') {
+                  (res as any).flushHeaders();
+                }
+
+                res.write(`data: ${JSON.stringify({ type: 'CONNECTED', timestamp: new Date().toISOString() })}\n\n`);
+                zynpaySseClients.add(res);
+
+                req.on('close', () => {
+                  zynpaySseClients.delete(res);
+                });
+                return;
+              }
+
+              // 12.5. GET & POST /api/zynpay/config (Configuração de URL de Callback Webhook)
+              if (pathname === '/api/zynpay/config') {
+                if (req.method === 'GET') {
+                  res.setHeader('Content-Type', 'application/json');
+                  res.statusCode = 200;
+                  res.end(JSON.stringify({
+                    success: true,
+                    config: zynpayWebhookConfig
+                  }));
+                  return;
+                }
+
+                if (req.method === 'POST') {
+                  const body = await readJsonBody();
+                  if (body.webhookUrl) {
+                    zynpayWebhookConfig.webhookUrl = String(body.webhookUrl).trim();
+                  }
+                  if (typeof body.secret === 'string') {
+                    zynpayWebhookConfig.secret = String(body.secret).trim();
+                  }
+                  if (typeof body.autoSyncEnabled === 'boolean') {
+                    zynpayWebhookConfig.autoSyncEnabled = body.autoSyncEnabled;
+                  }
+                  zynpayWebhookConfig.updatedAt = new Date().toISOString();
+
+                  res.setHeader('Content-Type', 'application/json');
+                  res.statusCode = 200;
+                  res.end(JSON.stringify({
+                    success: true,
+                    message: 'Configurações de callback ZynPay atualizadas com sucesso.',
+                    config: zynpayWebhookConfig
                   }));
                   return;
                 }

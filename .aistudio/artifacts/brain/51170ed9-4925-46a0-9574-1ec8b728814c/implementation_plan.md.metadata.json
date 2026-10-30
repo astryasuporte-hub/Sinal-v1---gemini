@@ -1,6 +1,6 @@
 {
-  "summary":  "Plano de implementação da integração completa da ZynPay no FatosBR:\n- Proxy seguro no servidor com a chave de API fornecida (zpk_live_...) e tratamento de valores em centavos.\n- Geração real de cobranças Pix com QR Code dinâmico e código Copia e Cola no BillingModal (Assinatura Pro).\n- Polling de verificação e Webhook (/api/zynpay/webhook) para ativação automática da assinatura.\n- Painel financeiro ZynPay no AdminPanel com saldo da conta, extrato de cobranças e logs de pagamento.",
-  "updatedAt":  "2026-10-30T16:22:56.450919273Z",
+  "summary":  "Plano de implementação detalhado para redesign monocromático estrito (preto e branco), gaveta lateral minimalista de temas (3 barrinhas), remoção dos botões de topo e avisos verdes, otimização responsiva móvel para Samsung Galaxy A35, formulário e endpoint de configuração do webhook ZynPay, hook SSE em tempo real e gráfico de linhas de volume de transações Pix diárias.",
+  "updatedAt":  "2026-10-30T19:46:17.845370294Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

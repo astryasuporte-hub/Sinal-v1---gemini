@@ -77,6 +77,7 @@ interface ProfileViewProps {
   onLogout?: () => void;
   onProfileUpdated?: (updatedProfile: UserProfileData) => void;
   onClearCacheAndSync?: () => Promise<void> | void;
+  onOpenLegal?: (tab?: 'terms' | 'lgpd' | 'cdc' | 'owner-rights' | 'dpo') => void;
 }
 
 export interface UserProfileData {
@@ -105,7 +106,8 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   isSuperAdmin = false,
   onLogout,
   onProfileUpdated,
-  onClearCacheAndSync
+  onClearCacheAndSync,
+  onOpenLegal
 }) => {
   // Sincronização Dinâmica do Perfil com o Usuário Autenticado
   const [profile, setProfile] = useState<UserProfileData>(() => {
@@ -1338,28 +1340,55 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
               </div>
 
               <div
-                onClick={() => setActiveModal('terms')}
+                onClick={() => {
+                  if (onOpenLegal) onOpenLegal('terms');
+                  else setActiveModal('terms');
+                }}
                 className="p-3 rounded-xl hover:bg-[#16181f] transition cursor-pointer flex items-center justify-between group"
               >
                 <div className="flex items-center gap-3">
                   <Layers className="w-4 h-4 text-zinc-400 group-hover:text-white" />
                   <div>
-                    <div className="font-semibold text-white">Termos de uso</div>
-                    <div className="text-[11px] text-zinc-400">Leia nossos termos de uso</div>
+                    <div className="font-semibold text-white">Termos de uso & Marco Civil</div>
+                    <div className="text-[11px] text-zinc-400">Lei 12.965/14 e salvaguardas da plataforma</div>
                   </div>
                 </div>
                 <ChevronRight className="w-4 h-4 text-zinc-500 group-hover:text-white transition" />
               </div>
 
               <div
-                onClick={() => setActiveModal('privacy')}
+                onClick={() => {
+                  if (onOpenLegal) onOpenLegal('lgpd');
+                  else setActiveModal('privacy');
+                }}
                 className="p-3 rounded-xl hover:bg-[#16181f] transition cursor-pointer flex items-center justify-between group"
               >
                 <div className="flex items-center gap-3">
-                  <Shield className="w-4 h-4 text-zinc-400 group-hover:text-white" />
+                  <Shield className="w-4 h-4 text-emerald-400 group-hover:text-emerald-300" />
                   <div>
-                    <div className="font-semibold text-white">Política de privacidade</div>
-                    <div className="text-[11px] text-zinc-400">Como tratamos seus dados</div>
+                    <div className="font-semibold text-white flex items-center gap-1.5">
+                      <span>Privacidade & LGPD</span>
+                      <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                        Lei 13.709/18
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-zinc-400">Seus direitos como titular de dados</div>
+                  </div>
+                </div>
+                <ChevronRight className="w-4 h-4 text-zinc-500 group-hover:text-white transition" />
+              </div>
+
+              <div
+                onClick={() => {
+                  if (onOpenLegal) onOpenLegal('dpo');
+                }}
+                className="p-3 rounded-xl hover:bg-[#16181f] transition cursor-pointer flex items-center justify-between group"
+              >
+                <div className="flex items-center gap-3">
+                  <User className="w-4 h-4 text-blue-400 group-hover:text-blue-300" />
+                  <div>
+                    <div className="font-semibold text-white">Canal do Encarregado (DPO)</div>
+                    <div className="text-[11px] text-zinc-400">Solicitar exclusão, acesso ou cópia de dados</div>
                   </div>
                 </div>
                 <ChevronRight className="w-4 h-4 text-zinc-500 group-hover:text-white transition" />

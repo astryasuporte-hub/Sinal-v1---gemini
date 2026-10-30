@@ -10,6 +10,7 @@ interface LandingPageProps {
   onStartFreeTrial: () => void;
   onEnterApp: () => void;
   onOpenAuth?: () => void;
+  onOpenLegal?: (tab?: 'terms' | 'lgpd' | 'cdc' | 'owner-rights' | 'dpo') => void;
 }
 
 const LANDING_CSS = `
@@ -1109,7 +1110,8 @@ const LANDING_CSS = `
 export const LandingPage: React.FC<LandingPageProps> = ({
   onStartFreeTrial,
   onEnterApp,
-  onOpenAuth
+  onOpenAuth,
+  onOpenLegal
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -2567,9 +2569,11 @@ export const LandingPage: React.FC<LandingPageProps> = ({
               <li><a href="#faq">Perguntas frequentes</a></li>
               <li><a href="#faq">Contato</a></li>
             </ul></div>
-            <div className="foot-col"><h4>Legal</h4><ul>
-              <li><a href="#faq">Termos de uso</a></li>
-              <li><a href="#faq">Política de privacidade</a></li>
+            <div className="foot-col"><h4>Legal & Leis</h4><ul>
+              <li><a onClick={() => onOpenLegal ? onOpenLegal('terms') : null} style={{ cursor: 'pointer' }}>Termos de uso</a></li>
+              <li><a onClick={() => onOpenLegal ? onOpenLegal('lgpd') : null} style={{ cursor: 'pointer' }}>Privacidade & LGPD</a></li>
+              <li><a onClick={() => onOpenLegal ? onOpenLegal('cdc') : null} style={{ cursor: 'pointer' }}>Consumidor (CDC) & Pix</a></li>
+              <li><a onClick={() => onOpenLegal ? onOpenLegal('dpo') : null} style={{ cursor: 'pointer' }}>Canal do DPO</a></li>
             </ul></div>
           </div>
           <div className="foot-bottom">

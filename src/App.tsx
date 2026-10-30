@@ -97,6 +97,8 @@ import { OnboardingFlow } from './components/OnboardingFlow';
 import { LanguageSelector } from './components/LanguageSelector';
 import { useI18n, useTranslation } from './i18n';
 import { RecalibrateInterestsModal, ALL_ONBOARDING_THEMES } from './components/RecalibrateInterestsModal';
+import { LegalCenterModal } from './components/LegalCenterModal';
+import { CookieConsentBanner } from './components/CookieConsentBanner';
 
 const HISTORY_STORAGE_KEY = 'sinal_history_items_v1';
 const MAX_HISTORY_ITEMS = 50;
@@ -575,6 +577,13 @@ export default function App() {
   const [isBillingModalOpen, setIsBillingModalOpen] = useState(false);
   const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [isLegalModalOpen, setIsLegalModalOpen] = useState(false);
+  const [legalModalTab, setLegalModalTab] = useState<'terms' | 'lgpd' | 'cdc' | 'owner-rights' | 'dpo'>('terms');
+
+  const handleOpenLegal = (tab: 'terms' | 'lgpd' | 'cdc' | 'owner-rights' | 'dpo' = 'terms') => {
+    setLegalModalTab(tab);
+    setIsLegalModalOpen(true);
+  };
 
   // Salva última rota visitada para persistência consistente
   useEffect(() => {
@@ -984,6 +993,12 @@ export default function App() {
           onStartFreeTrial={() => setCurrentNav('login')}
           onEnterApp={() => setCurrentNav(currentUser ? 'home' : 'login')}
           onOpenAuth={() => setCurrentNav('login')}
+          onOpenLegal={handleOpenLegal}
+        />
+        <LegalCenterModal
+          isOpen={isLegalModalOpen}
+          onClose={() => setIsLegalModalOpen(false)}
+          initialTab={legalModalTab}
         />
         <BillingModal
           isOpen={isBillingModalOpen}
@@ -1668,6 +1683,7 @@ export default function App() {
               onOpenAdmin={() => setCurrentNav('admin')}
               onOpenOnboarding={() => setIsRecalibrateModalOpen(true)}
               isSuperAdmin={isSuperAdmin}
+              onOpenLegal={handleOpenLegal}
               onProfileUpdated={(updated) => setCurrentUserAvatar(updated.avatarUrl)}
               onClearCacheAndSync={async () => {
                 rateLimitService.clearCache();
@@ -2178,6 +2194,42 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Rodapé Jurídico & Compliance (LGPD, Marco Civil, CDC) */}
+              <div className="pt-4 border-t border-[#1a1c22] space-y-2 text-[11px] text-zinc-500">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <button
+                    onClick={() => handleOpenLegal('terms')}
+                    className="hover:text-zinc-300 transition cursor-pointer"
+                  >
+                    Termos de Uso
+                  </button>
+                  <span>•</span>
+                  <button
+                    onClick={() => handleOpenLegal('lgpd')}
+                    className="hover:text-zinc-300 transition cursor-pointer text-emerald-400/90 hover:text-emerald-300"
+                  >
+                    Privacidade & LGPD
+                  </button>
+                  <span>•</span>
+                  <button
+                    onClick={() => handleOpenLegal('cdc')}
+                    className="hover:text-zinc-300 transition cursor-pointer"
+                  >
+                    CDC & Pix
+                  </button>
+                  <span>•</span>
+                  <button
+                    onClick={() => handleOpenLegal('dpo')}
+                    className="hover:text-zinc-300 transition cursor-pointer text-blue-400/90 hover:text-blue-300"
+                  >
+                    Canal DPO
+                  </button>
+                </div>
+                <div className="text-[10px] text-zinc-600 leading-tight">
+                  © 2026 FatosBR • Em conformidade com a Legislação Federal Brasileira (ctresb/leis).
+                </div>
+              </div>
+
             </aside>
           </div>
         )}
@@ -2379,6 +2431,17 @@ export default function App() {
           <span>Atalho G +: <strong>H</strong> Início · <strong>E</strong> Explorar · <strong>F</strong> Seguindo · <strong>B</strong> Briefings · <strong>N</strong> Notif. · <strong>P</strong> Perfil</span>
         </div>
       )}
+
+      {/* ================= 12. CENTRAL DE CONFORMIDADE LEGAL & BANNER LGPD ================= */}
+      <LegalCenterModal
+        isOpen={isLegalModalOpen}
+        onClose={() => setIsLegalModalOpen(false)}
+        initialTab={legalModalTab}
+      />
+
+      <CookieConsentBanner
+        onOpenLegal={handleOpenLegal}
+      />
 
     </div>
   );

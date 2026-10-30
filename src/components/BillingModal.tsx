@@ -32,6 +32,7 @@ interface BillingModalProps {
 }
 
 import { zynpayService, ZynPayCharge } from '../services/zynpayService';
+import { usePixPolling } from '../hooks/usePixPolling';
 
 export interface InvoiceItem {
   id: string;
@@ -128,27 +129,23 @@ export const BillingModal: React.FC<BillingModalProps> = ({
     }
   }, [isOpen, paymentStatus, zynCharge, generateZynPayCharge]);
 
-  // Polling em tempo real para verificar se o Pix foi pago na ZynPay
-  useEffect(() => {
-    if (!isOpen || paymentStatus === 'approved' || !zynCharge?.id) return;
-
-    const interval = setInterval(async () => {
-      const res = await zynpayService.getChargeStatus(zynCharge.id);
-      if (res.success && res.charge && res.charge.status === 'PAID') {
-        setPaymentStatus('approved');
-        setZynCharge(res.charge);
-        setInvoices((prev) =>
-          prev.map((inv, idx) =>
-            idx === 0 ? { ...inv, status: 'PAGO' } : inv
-          )
-        );
-        onUpgradeApproved();
-        showToast('Pagamento Pix confirmado pela ZynPay! Assinatura Pro ativa.');
-      }
-    }, 3500);
-
-    return () => clearInterval(interval);
-  }, [isOpen, paymentStatus, zynCharge?.id, onUpgradeApproved]);
+  // Hook de polling no BillingModal que consulta a cada 5 segundos o status da cobrança Pix pendente até que seja alterado para 'PAID'
+  usePixPolling({
+    chargeId: zynCharge?.id,
+    enabled: isOpen && paymentStatus !== 'approved' && Boolean(zynCharge?.id),
+    intervalMs: 5000,
+    onSuccess: (paidCharge) => {
+      setPaymentStatus('approved');
+      setZynCharge(paidCharge);
+      setInvoices((prev) =>
+        prev.map((inv, idx) =>
+          idx === 0 ? { ...inv, status: 'PAGO' } : inv
+        )
+      );
+      onUpgradeApproved();
+      showToast('Pagamento Pix confirmado pela ZynPay! Assinatura Pro ativa.');
+    }
+  });
 
   // Handle ESC key
   useEffect(() => {

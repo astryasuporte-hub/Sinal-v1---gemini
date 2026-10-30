@@ -43,6 +43,97 @@ export interface ZynPayWebhookItem {
 }
 
 class ZynPayService {
+  private eventSource: EventSource | null = null;
+  private paymentListeners: Set<(payload: any) => void> = new Set();
+
+  constructor() {
+    this.initRealtimeEventListener();
+  }
+
+  /**
+   * Conecta ao canal SSE /api/zynpay/events para receber confirmações instantâneas de webhooks
+   * e atualiza o localStorage do front-end automaticamente.
+   */
+  private initRealtimeEventListener() {
+    if (typeof window === 'undefined' || !('EventSource' in window)) return;
+
+    try {
+      this.eventSource = new EventSource('/api/zynpay/events');
+
+      this.eventSource.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'PAYMENT_CONFIRMED') {
+            // Atualiza automaticamente o status da assinatura do usuário no localStorage do front-end
+            this.handlePaymentConfirmedLocalStorageUpdate(data);
+
+            // Notifica listeners registrados na aplicação
+            this.paymentListeners.forEach((listener) => {
+              try { listener(data); } catch {}
+            });
+          }
+        } catch (e) {
+          console.error('[ZynPayService] Erro ao processar mensagem SSE:', e);
+        }
+      };
+
+      this.eventSource.onerror = () => {
+        // EventSource reconecta automaticamente
+      };
+    } catch (err) {
+      console.warn('[ZynPayService] EventSource não pôde ser iniciado:', err);
+    }
+  }
+
+  /**
+   * Grava no localStorage e emite eventos de atualização para todos os componentes
+   */
+  public handlePaymentConfirmedLocalStorageUpdate(data: any) {
+    try {
+      localStorage.setItem('fatosbr_pro_active', 'true');
+      localStorage.setItem('fatosbr_session_active', 'true');
+
+      const currentSub = localStorage.getItem('sinal_subscription');
+      let updatedSub = {
+        status: 'ACTIVE',
+        planName: 'FatosBR Pro (Ativo)',
+        amount: (data.amountCents || 2990) / 100,
+        billingCycle: 'MONTHLY',
+        nextBillingAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toLocaleDateString('pt-BR')
+      };
+
+      if (currentSub) {
+        try {
+          const parsed = JSON.parse(currentSub);
+          updatedSub = { ...parsed, ...updatedSub };
+        } catch {}
+      }
+
+      localStorage.setItem('sinal_subscription', JSON.stringify(updatedSub));
+
+      // Dispara eventos locais e globais
+      window.dispatchEvent(new CustomEvent('fatosbr_subscription_updated', {
+        detail: { ...data, subscription: updatedSub }
+      }));
+      window.dispatchEvent(new StorageEvent('storage', {
+        key: 'fatosbr_pro_active',
+        newValue: 'true'
+      }));
+    } catch (err) {
+      console.error('[ZynPayService] Erro ao sincronizar localStorage:', err);
+    }
+  }
+
+  /**
+   * Permite que componentes escutem confirmações de pagamento em tempo real
+   */
+  public onPaymentConfirmed(callback: (payload: any) => void): () => void {
+    this.paymentListeners.add(callback);
+    return () => {
+      this.paymentListeners.delete(callback);
+    };
+  }
+
   /**
    * Converte valor monetário em reais para centavos inteiros da ZynPay
    */
@@ -194,6 +285,7 @@ class ZynPayService {
           data: {
             id: chargeId,
             status: 'PAID',
+            amount: 2990,
             paidAt: new Date().toISOString()
           }
         })
@@ -203,6 +295,44 @@ class ZynPayService {
       return false;
     }
   }
+
+  /**
+   * Obtém as configurações atuais de callback webhook da ZynPay
+   */
+  public async getWebhookConfig(): Promise<{ success: boolean; config?: ZynPayWebhookConfig; error?: string }> {
+    try {
+      const response = await fetch('/api/zynpay/config');
+      const data = await response.json();
+      return { success: response.ok, config: data.config, error: data.error };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  }
+
+  /**
+   * Salva as configurações de endpoint de callback webhook da ZynPay no servidor
+   */
+  public async saveWebhookConfig(config: Partial<ZynPayWebhookConfig>): Promise<{ success: boolean; config?: ZynPayWebhookConfig; error?: string }> {
+    try {
+      const response = await fetch('/api/zynpay/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(config)
+      });
+      const data = await response.json();
+      return { success: response.ok, config: data.config, error: data.error };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  }
+}
+
+export interface ZynPayWebhookConfig {
+  webhookUrl: string;
+  secret: string;
+  autoSyncEnabled: boolean;
+  updatedAt: string;
 }
 
 export const zynpayService = new ZynPayService();
+
