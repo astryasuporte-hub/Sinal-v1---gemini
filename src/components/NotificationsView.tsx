@@ -49,27 +49,111 @@ interface NotificationsViewProps {
   entities?: Entity[];
   onOpenEvent?: (event: Event) => void;
   onOpenEntity?: (entity: Entity) => void;
+  onBack?: () => void;
+}
+
+export function buildDefaultNotifications(events: Event[] = [], entities: Entity[] = []): SinalNotificationItem[] {
+  if (!events || events.length === 0) {
+    return [
+      {
+        id: 'notif-welcome',
+        category: 'atualizacoes',
+        dateGroup: 'Hoje',
+        title: 'Bem-vindo ao FatosBR',
+        subtitle: 'Notícias em tempo real, auditadas e sem ruído visual.',
+        timestamp: 'há 10 min',
+        read: false
+      },
+      {
+        id: 'notif-briefing-ready',
+        category: 'atualizacoes',
+        dateGroup: 'Hoje',
+        title: 'Briefing Executivo Matinal Disponível',
+        subtitle: 'Confira as principais notícias e análises consolidadas do dia.',
+        timestamp: 'há 1 hora',
+        read: false
+      }
+    ];
+  }
+
+  const items: SinalNotificationItem[] = [];
+
+  // Notificações geradas dos acontecimentos reais mais recentes
+  events.slice(0, 5).forEach((ev, idx) => {
+    items.push({
+      id: `notif-evt-${ev.id}`,
+      category: idx === 0 || idx === 2 ? 'acontecimentos' : 'temas',
+      dateGroup: idx < 3 ? 'Hoje' : 'Ontem',
+      title: ev.title,
+      subtitle: ev.summary,
+      timestamp: ev.relativeTime || (idx === 0 ? 'há 15 min' : idx === 1 ? 'há 1 hora' : 'há 3 horas'),
+      read: idx >= 2,
+      thumbnailUrl: ev.imageUrl,
+      eventId: ev.id
+    });
+  });
+
+  // Notificação corporativa / de entidade se houver
+  const primaryEnt = entities[0] || (events[0]?.entities && events[0].entities[0]);
+  if (primaryEnt) {
+    items.push({
+      id: `notif-ent-${primaryEnt.id}`,
+      category: 'entidades',
+      dateGroup: 'Hoje',
+      title: `${primaryEnt.name}: Nova movimentação registrada`,
+      subtitle: `Cobertura em tempo real de múltiplas fontes verificadas sobre ${primaryEnt.name}.`,
+      timestamp: 'há 2 horas',
+      read: true,
+      entityId: primaryEnt.id
+    });
+  }
+
+  // Notificação de briefing executivo
+  items.push({
+    id: 'notif-briefing-daily',
+    category: 'atualizacoes',
+    dateGroup: 'Hoje',
+    title: 'Briefing Executivo FatosBR pronto',
+    subtitle: 'Síntese das principais notícias com fontes auditadas e sem ruído.',
+    timestamp: 'há 4 horas',
+    read: true
+  });
+
+  return items;
 }
 
 export const NotificationsView: React.FC<NotificationsViewProps> = ({
   events = [],
   entities = [],
   onOpenEvent,
-  onOpenEntity
+  onOpenEntity,
+  onBack
 }) => {
-  // Notificações reais: inicia vazio na fase beta conforme solicitado
+  // Notificações reais persistidas ou geradas dos eventos atuais
   const [notifications, setNotifications] = useState<SinalNotificationItem[]>(() => {
     try {
       const saved = localStorage.getItem('sinal_notifications_v1');
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) return parsed;
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
       }
     } catch {
       // Ignorar erro de parse
     }
-    return [];
+    return buildDefaultNotifications(events, entities);
   });
+
+  // Atualiza ou popula as notificações assim que os eventos carregam
+  React.useEffect(() => {
+    if (notifications.length === 0 && events.length > 0) {
+      const generated = buildDefaultNotifications(events, entities);
+      setNotifications(generated);
+      try {
+        localStorage.setItem('sinal_notifications_v1', JSON.stringify(generated));
+        window.dispatchEvent(new CustomEvent('fatosbr_notifications_updated'));
+      } catch {}
+    }
+  }, [events, entities, notifications.length]);
 
   const [activeTab, setActiveTab] = useState<NotificationCategory>('todas');
   const [searchQuery, setSearchQuery] = useState('');
@@ -113,6 +197,7 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
     setNotifications(updated);
     try {
       localStorage.setItem('sinal_notifications_v1', JSON.stringify(updated));
+      window.dispatchEvent(new CustomEvent('fatosbr_notifications_updated'));
     } catch {}
 
     if (item.eventId && onOpenEvent) {
@@ -137,6 +222,7 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
     setNotifications(updated);
     try {
       localStorage.setItem('sinal_notifications_v1', JSON.stringify(updated));
+      window.dispatchEvent(new CustomEvent('fatosbr_notifications_updated'));
     } catch {}
     setFilterOnlyUnread(false);
   };
@@ -186,6 +272,18 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
     <div className="flex-1 flex flex-col lg:flex-row w-full max-w-7xl mx-auto text-zinc-100">
       {/* ================= COLUNA PRINCIPAL ================= */}
       <main className="flex-1 max-w-3xl w-full mx-auto px-4 sm:px-6 py-4 sm:py-6 space-y-6">
+        {/* Voltar ao feed (Mobile & Desktop) */}
+        {onBack && (
+          <button
+            onClick={onBack}
+            className="inline-flex items-center gap-2 text-xs font-semibold text-zinc-300 hover:text-white px-3.5 py-2 rounded-xl bg-[#111216] border border-[#1e2026] hover:border-zinc-700 transition cursor-pointer min-h-[44px] active:scale-95"
+            aria-label="Voltar para a página inicial"
+          >
+            <ChevronLeft className="w-4 h-4 text-zinc-300" />
+            <span>Voltar ao feed</span>
+          </button>
+        )}
+
         {/* Header do Título & Subtítulo */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div>
@@ -311,7 +409,7 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
           >
             <span>Não lidas</span>
             {unreadCount > 0 && (
-              <span className="w-1.5 h-1.5 rounded-full bg-red-500 shrink-0" />
+              <span className="w-1.5 h-1.5 rounded-full bg-white shrink-0" />
             )}
           </button>
         </div>
@@ -364,11 +462,7 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
                     >
                       {!item.read && (
                         <div className="absolute left-2.5 top-1/2 -translate-y-1/2 flex items-center justify-center">
-                          <span
-                            className={`w-2 h-2 rounded-full ${
-                              item.unreadDotColor === 'blue' ? 'bg-blue-500' : 'bg-red-500'
-                            }`}
-                          />
+                          <span className="w-2 h-2 rounded-full bg-white shadow-sm ring-2 ring-[#111216]" />
                         </div>
                       )}
 

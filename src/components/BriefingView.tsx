@@ -202,10 +202,10 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
 
   return (
     <div className="w-full max-w-[1240px] mx-auto px-4 sm:px-8 py-6 sm:py-8 text-zinc-100 font-sans">
-      {/* Toast */}
+      {/* Toast Monocromático */}
       {toastMsg && (
-        <div className="fixed top-5 right-5 z-50 bg-[#161922] border border-emerald-500/40 text-emerald-100 px-4 py-2.5 rounded-xl shadow-2xl text-xs flex items-center gap-2 animate-fade-in font-medium">
-          <Check className="w-4 h-4 text-emerald-400" />
+        <div className="fixed top-5 right-5 z-50 bg-[#161820] border border-zinc-700 text-white px-4 py-2.5 rounded-xl shadow-2xl text-xs flex items-center gap-2 animate-fade-in font-medium">
+          <Check className="w-4 h-4 text-white" />
           <span>{toastMsg}</span>
         </div>
       )}
@@ -304,7 +304,7 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
                         {briefing.type === 'evening' ? (
                           <Moon className="w-4 h-4 text-zinc-300" />
                         ) : (
-                          <Sun className="w-4 h-4 text-amber-300" />
+                          <Sun className="w-4 h-4 text-zinc-300" />
                         )}
                         <span>{briefing.type === 'evening' ? 'Resumo da noite' : 'Resumo da manhã'}</span>
                       </span>
@@ -567,12 +567,12 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
                   className="pt-4 hover:bg-zinc-900/40 p-2.5 rounded-xl transition cursor-pointer group"
                 >
                   <div className="flex items-center gap-2 text-[11px] text-zinc-400 font-mono mb-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                    <span className="w-1.5 h-1.5 rounded-full bg-zinc-300" />
                     <span className="uppercase">{ev.category}</span>
                     <span>·</span>
                     <span>{ev.sources?.length || 2} fontes apuradas</span>
                   </div>
-                  <h4 className="text-sm font-bold text-white group-hover:text-blue-400 transition leading-snug">
+                  <h4 className="text-sm font-bold text-white group-hover:text-zinc-200 transition leading-snug">
                     {ev.title}
                   </h4>
                   <p className="text-xs text-zinc-400 mt-1 line-clamp-2 leading-relaxed">
@@ -634,7 +634,7 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
                 <label className="text-xs font-medium text-zinc-300 flex items-center gap-1.5">
-                  <Sun className="w-3.5 h-3.5 text-amber-300" />
+                  <Sun className="w-3.5 h-3.5 text-zinc-300" />
                   <span>Horário Matinal</span>
                 </label>
                 <input
@@ -662,7 +662,7 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
             {/* Teste Imediato com Resend API */}
             <div className="p-4 rounded-xl bg-zinc-950/70 border border-zinc-800/80 space-y-3">
               <div className="flex items-center gap-2 text-xs font-bold text-white">
-                <Sparkles className="w-4 h-4 text-emerald-400" />
+                <Sparkles className="w-4 h-4 text-zinc-300" />
                 <span>Testar entrega imediata na sua caixa postal</span>
               </div>
               <p className="text-[11px] text-zinc-400 leading-relaxed">
@@ -672,7 +672,7 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
                 type="button"
                 onClick={handleSendTest}
                 disabled={isSendingTest}
-                className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-white hover:bg-zinc-200 text-black text-xs font-bold transition cursor-pointer disabled:opacity-50"
+                className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-white hover:bg-zinc-200 text-black text-xs font-bold transition cursor-pointer disabled:opacity-50 min-h-[44px]"
               >
                 {isSendingTest ? (
                   <span>Enviando pelo Resend...</span>
@@ -692,7 +692,7 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
                   setIsPreferencesOpen(false);
                   showToast('Preferências salvas com sucesso!');
                 }}
-                className="px-5 py-2 bg-emerald-500 hover:bg-emerald-400 text-black font-bold text-xs rounded-xl transition cursor-pointer"
+                className="px-5 py-2.5 bg-white hover:bg-zinc-200 text-black font-bold text-xs rounded-xl transition cursor-pointer min-h-[44px]"
               >
                 Salvar preferências
               </button>

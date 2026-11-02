@@ -1,6 +1,6 @@
 {
-  "summary":  "Plano de implementação detalhado para redesign monocromático estrito (preto e branco), gaveta lateral minimalista de temas (3 barrinhas), remoção dos botões de topo e avisos verdes, otimização responsiva móvel para Samsung Galaxy A35, formulário e endpoint de configuração do webhook ZynPay, hook SSE em tempo real e gráfico de linhas de volume de transações Pix diárias.",
-  "updatedAt":  "2026-10-30T19:46:17.845370294Z",
-  "requestFeedback":  true,
-  "userFacing":  true
+  "summary": "Plano de implementação para o carrossel de manchetes em destaque no topo do feed Home e a reestruturação da Central de Privacidade e LGPD com visual simplificado em tela cheia mobile e seções colapsáveis em preto e branco.",
+  "updatedAt": "2026-11-02T20:16:18.456861664Z",
+  "requestFeedback": true,
+  "userFacing": true
 }

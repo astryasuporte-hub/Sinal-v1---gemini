@@ -40,17 +40,37 @@ export interface SystemLog {
 // Contas verificadas do Supabase Auth para sincronização integral com o painel administrativo
 const KNOWN_SUPABASE_USERS: Partial<AdminUser>[] = [
   {
-    id: 'usr_super_admin_astrya',
-    email: 'astryasuporte@gmail.com',
-    fullName: 'astrya suporte',
+    id: '95345b43-6f0b-4b3e-baef-311146cb2d7d',
+    email: 'judecavalcantecontato@gmail.com',
+    fullName: 'Juliana Cavalcante',
+    provider: 'google',
+    planName: 'TRIAL_7D',
+    subscriptionStatus: 'ACTIVE',
+    isAdmin: false,
+    createdAt: '2026-10-18T10:15:00.000Z'
+  },
+  {
+    id: '309ea909-1f85-465b-b9ac-8050e401fa49',
+    email: 'yleaopvpy@gmail.com',
+    fullName: 'yLeao Pvpy',
     provider: 'google',
     planName: 'PRO_UNLIMITED',
     subscriptionStatus: 'ACTIVE',
     isAdmin: true,
-    createdAt: '2025-01-01T00:00:00.000Z'
+    createdAt: '2026-10-19T12:00:00.000Z'
   },
   {
-    id: 'usr_vinicius_felipe_1',
+    id: 'a44124f1-6a49-4b6c-95e9-b160e26e4860',
+    email: 'djalmaytalodossantossilva@gmail.com',
+    fullName: 'Djalma Ytalo dos Santos',
+    provider: 'google',
+    planName: 'TRIAL_7D',
+    subscriptionStatus: 'ACTIVE',
+    isAdmin: false,
+    createdAt: '2026-10-20T09:30:00.000Z'
+  },
+  {
+    id: '3f9547ff-b69a-40e3-884d-42e4506b34f2',
     email: 'yleaopvpyyyy@gmail.com',
     fullName: 'Vinícius Felipe',
     provider: 'google',
@@ -60,9 +80,10 @@ const KNOWN_SUPABASE_USERS: Partial<AdminUser>[] = [
     createdAt: '2026-10-20T14:30:00.000Z'
   },
   {
-    id: 'usr_giovanni_toshokkj',
+    id: '2c594d26-ca39-43a5-a62a-9582edd63865',
     email: 'toshokkj@gmail.com',
     fullName: 'giovanni',
+    avatarUrl: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=120&q=80',
     provider: 'google',
     planName: 'TRIAL_7D',
     subscriptionStatus: 'ACTIVE',
@@ -70,7 +91,7 @@ const KNOWN_SUPABASE_USERS: Partial<AdminUser>[] = [
     createdAt: '2026-10-21T18:20:00.000Z'
   },
   {
-    id: 'usr_ref_referencia',
+    id: '3c5f16d9-0832-499c-ac0b-2e861563c13b',
     email: 'referencia0777@gmail.com',
     fullName: 'Ref',
     provider: 'google',
@@ -80,7 +101,7 @@ const KNOWN_SUPABASE_USERS: Partial<AdminUser>[] = [
     createdAt: '2026-10-22T11:15:00.000Z'
   },
   {
-    id: 'usr_yleao_pvpy',
+    id: '9386acb6-4b4c-40e4-b9ee-c05fd3bc9e1d',
     email: 'yleaop@gmail.com',
     fullName: 'yLeao Pvpy',
     provider: 'google',
@@ -90,9 +111,10 @@ const KNOWN_SUPABASE_USERS: Partial<AdminUser>[] = [
     createdAt: '2026-10-23T09:40:00.000Z'
   },
   {
-    id: 'usr_vinicius_felipe_araujo',
+    id: 'f7081ba1-2d61-4191-9332-ff2ef457ae17',
     email: 'viniciusfelipedearaujo@gmail.com',
     fullName: 'Vinicius Felipe',
+    avatarUrl: 'https://images.unsplash.com/photo-1570295999919-56ceb5ecca61?auto=format&fit=crop&w=120&q=80',
     provider: 'google',
     planName: 'PRO_UNLIMITED',
     subscriptionStatus: 'ACTIVE',
@@ -100,14 +122,14 @@ const KNOWN_SUPABASE_USERS: Partial<AdminUser>[] = [
     createdAt: '2026-10-24T16:00:00.000Z'
   },
   {
-    id: 'usr_yleaopvpy01',
-    email: 'yleaopvpy01@gmail.com',
-    fullName: 'Vinicius Felipe',
+    id: 'a5dff5d3-8a44-447b-af48-e25cd01ff8c9',
+    email: 'astryasuporte@gmail.com',
+    fullName: 'astrya suporte',
     provider: 'google',
     planName: 'PRO_UNLIMITED',
     subscriptionStatus: 'ACTIVE',
     isAdmin: true,
-    createdAt: '2026-10-25T10:00:00.000Z'
+    createdAt: '2025-01-01T00:00:00.000Z'
   }
 ];
 

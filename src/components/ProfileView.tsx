@@ -219,6 +219,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
     | 'terms'
     | 'paymentMethod'
     | 'invoices'
+    | 'logoutConfirm'
   >(null);
 
   // Form states for modals
@@ -571,7 +572,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   // Handle Delete Account
   const handleDeleteAccount = () => {
     if (deleteConfirmationText !== 'EXCLUIR') {
-      alert('Por favor, digite EXCLUIR para confirmar a exclusão da conta.');
+      showToast('Digite EXCLUIR para confirmar a exclusão da conta.');
       return;
     }
     setActiveModal(null);
@@ -1417,19 +1418,12 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
       {/* ================= 5. BOTÃO SAIR DA CONTA (RODAPÉ) ================= */}
       <div className="pt-2 pb-12 sm:pb-6 flex justify-center">
         <button
-          onClick={() => {
-            if (confirm('Deseja realmente sair da sua conta no FatosBR?')) {
-              try {
-                localStorage.removeItem('fatosbr_session_active');
-                localStorage.removeItem('sinal_user_profile');
-              } catch {}
-              showToast('Sessão encerrada com sucesso.');
-              if (onLogout) onLogout();
-            }
-          }}
-          className="w-full sm:w-auto px-8 py-3 rounded-xl border border-red-950/60 bg-red-950/10 hover:bg-red-950/30 text-red-400 text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer shadow-sm"
+          type="button"
+          onClick={() => setActiveModal('logoutConfirm')}
+          className="w-full sm:w-auto px-8 py-3 rounded-xl border border-zinc-800 bg-[#111216] hover:bg-zinc-900 hover:border-zinc-700 text-zinc-300 hover:text-white text-xs font-semibold transition flex items-center justify-center gap-2 cursor-pointer shadow-sm min-h-[44px] active:scale-95"
+          title="Encerrar sessão no FatosBR"
         >
-          <LogOut className="w-4 h-4" />
+          <LogOut className="w-4 h-4 text-zinc-400" />
           <span>Sair da conta</span>
         </button>
       </div>
@@ -2721,6 +2715,85 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
             >
               Fechar
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* ================= MODAL DE CONFIRMAÇÃO DE ENCERRAMENTO DE SESSÃO ================= */}
+      {activeModal === 'logoutConfirm' && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-sm p-4 animate-fade-in">
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="relative w-full max-w-sm rounded-2xl border border-zinc-800 bg-[#0c0d10] p-6 text-zinc-100 shadow-2xl space-y-5"
+          >
+            {/* Topo com Ícone e Botão Fechar */}
+            <div className="flex items-start justify-between">
+              <div className="w-12 h-12 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center text-white shadow-inner">
+                <LogOut className="w-5 h-5 text-white" />
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveModal(null)}
+                className="p-2 text-zinc-400 hover:text-white rounded-xl hover:bg-zinc-850 transition cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center"
+                aria-label="Cancelar e fechar"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Cabeçalho Textual */}
+            <div className="space-y-1.5">
+              <h3 className="text-base sm:text-lg font-bold text-white tracking-tight">
+                Deseja realmente sair?
+              </h3>
+              <p className="text-xs text-zinc-400 leading-relaxed">
+                Você precisará fazer login novamente para acessar suas preferências de feed, artigos salvos e notificações.
+              </p>
+            </div>
+
+            {/* Detalhes da Conta Conectada */}
+            <div className="p-3.5 rounded-xl bg-[#111216] border border-zinc-800/80 flex items-center gap-3">
+              <div className="w-10 h-10 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-xs font-bold text-white shrink-0 overflow-hidden">
+                {profile.avatarUrl ? (
+                  <img src={profile.avatarUrl} alt={profile.name} className="w-full h-full object-cover" />
+                ) : (
+                  <span>{getInitials(profile.name)}</span>
+                )}
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-bold text-white truncate">{profile.name}</div>
+                <div className="text-[11px] text-zinc-400 truncate font-mono">{profile.email}</div>
+              </div>
+            </div>
+
+            {/* Ações (Cancelar vs Confirmar Saída) */}
+            <div className="grid grid-cols-2 gap-2.5 pt-1">
+              <button
+                type="button"
+                onClick={() => setActiveModal(null)}
+                className="w-full py-2.5 px-4 rounded-xl border border-zinc-700 bg-transparent hover:bg-zinc-900 text-zinc-300 hover:text-white text-xs font-semibold transition cursor-pointer min-h-[44px] flex items-center justify-center active:scale-95"
+              >
+                Cancelar
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveModal(null);
+                  try {
+                    localStorage.removeItem('fatosbr_session_active');
+                    localStorage.removeItem('sinal_user_profile');
+                  } catch {}
+                  showToast('Sessão encerrada com sucesso.');
+                  if (onLogout) {
+                    onLogout();
+                  }
+                }}
+                className="w-full py-2.5 px-4 rounded-xl bg-white text-black hover:bg-zinc-200 text-xs font-bold transition cursor-pointer shadow-md min-h-[44px] flex items-center justify-center active:scale-95"
+              >
+                Sim, sair
+              </button>
+            </div>
           </div>
         </div>
       )}

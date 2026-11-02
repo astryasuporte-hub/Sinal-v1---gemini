@@ -17,6 +17,7 @@ import {
   Share2,
   Check
 } from 'lucide-react';
+import { motion } from 'motion/react';
 import { CompanyLogoBadge } from './CompanyLogoBadge';
 
 export function formatDetailedRelativeTime(publishedAt?: string, fallback?: string): string {
@@ -78,12 +79,13 @@ export const EventCard: React.FC<EventCardProps> = ({
   const [isCopied, setIsCopied] = useState(false);
   const [shareTooltip, setShareTooltip] = useState<string | null>(null);
 
+  // Botão de Compartilhar: Gera e copia o deep link oficial da notícia em fatosbr.com.br
   const handleShareClick = async (e: React.MouseEvent) => {
     e.stopPropagation();
-    const eventUrl = `${window.location.origin}/?event=${encodeURIComponent(event.id)}`;
+    const eventUrl = `https://fatosbr.com.br/?event=${encodeURIComponent(event.id)}`;
     const shareData = {
       title: `${event.title} — FatosBR`,
-      text: event.summary,
+      text: `${event.summary}\n\nLeia no FatosBR:`,
       url: eventUrl
     };
 
@@ -91,32 +93,32 @@ export const EventCard: React.FC<EventCardProps> = ({
       try {
         await navigator.share(shareData);
         setIsCopied(true);
-        setShareTooltip('Compartilhado!');
+        setShareTooltip('Link fatosbr.com.br compartilhado!');
         setTimeout(() => {
           setIsCopied(false);
           setShareTooltip(null);
         }, 2200);
         return;
       } catch {
-        // Fallback para clipboard
+        // Fallback caso o usuário feche a gaveta nativa
       }
     }
 
     try {
       await navigator.clipboard.writeText(eventUrl);
       setIsCopied(true);
+      setShareTooltip('Link fatosbr.com.br copiado!');
+      setTimeout(() => {
+        setIsCopied(false);
+        setShareTooltip(null);
+      }, 2500);
+    } catch {
+      setIsCopied(true);
       setShareTooltip('Link copiado!');
       setTimeout(() => {
         setIsCopied(false);
         setShareTooltip(null);
-      }, 2200);
-    } catch {
-      setIsCopied(true);
-      setShareTooltip('Link gerado!');
-      setTimeout(() => {
-        setIsCopied(false);
-        setShareTooltip(null);
-      }, 2200);
+      }, 2500);
     }
   };
 
@@ -133,48 +135,51 @@ export const EventCard: React.FC<EventCardProps> = ({
     onHideEvent?.(event.id);
   };
 
-  const renderSourceBadge = (source: { name: string; color: string; label: string }, idx: number) => {
+  const renderSourceBadge = (source: { name: string; color?: string; label: string }, idx: number) => {
     return (
       <div
         key={idx}
         title={source.name}
-        className="w-5 h-5 rounded-full flex items-center justify-center text-[8px] font-bold text-white shrink-0 shadow-sm border border-black/40 overflow-hidden"
-        style={{ backgroundColor: source.color }}
+        className="w-5 h-5 rounded-full flex items-center justify-center text-[8px] font-bold text-white shrink-0 shadow-sm border border-zinc-700 bg-zinc-800 overflow-hidden font-mono"
       >
         {source.label}
       </div>
     );
   };
 
-  const wordCount = (event.title + ' ' + event.summary + ' ' + (event.whyItMatters || '')).split(/\s+/).length;
-  const readingTimeMin = Math.max(1, Math.ceil(wordCount / 160));
+  // Cálculo do tempo estimado de leitura (em minutos) baseado estritamente na extensão do resumo (summary)
+  const summaryWords = (event.summary || '').trim().split(/\s+/).filter(Boolean).length;
+  const readingTimeMin = Math.max(1, Math.ceil(summaryWords / 45));
 
   const displayTime = formatDetailedRelativeTime(event.publishedAt, event.relativeTime);
   const primaryEntity = event.entities && event.entities[0];
 
   return (
-    <article
+    <motion.article
       onClick={() => onOpenDetail(event)}
-      className="group relative rounded-2xl bg-[#111215] hover:border-zinc-700/80 transition-all duration-200 overflow-hidden cursor-pointer w-full max-w-full border border-[#1e2025]"
+      whileHover={{ scale: 1.015, y: -2 }}
+      whileTap={{ scale: 0.988 }}
+      transition={{ type: 'tween', duration: 0.2, ease: [0.25, 1, 0.5, 1] }}
+      className="group relative rounded-2xl bg-[#111215] hover:border-zinc-700/80 transition-[border-color,box-shadow] duration-200 overflow-hidden cursor-pointer w-full max-w-full border border-[#1e2025] hover:shadow-2xl hover:shadow-black/60 transform-gpu will-change-transform"
+      style={{ backfaceVisibility: 'hidden', WebkitFontSmoothing: 'subpixel-antialiased' }}
     >
-      {/* Imagem sutil integrada à direita com gradiente escuro de fusão editorial */}
+      {/* Banner Amplo no Topo do Card de Notícia */}
       {event.imageUrl && !imgError && (
-        <div className="absolute right-0 top-0 bottom-0 w-2/5 sm:w-1/2 pointer-events-none overflow-hidden opacity-30 sm:opacity-45 group-hover:opacity-60 transition-opacity">
+        <div className="relative w-full h-44 sm:h-52 overflow-hidden bg-zinc-900 border-b border-zinc-800/80">
           <img
             src={event.imageUrl}
             alt={event.title}
             onError={() => setImgError(true)}
             referrerPolicy="no-referrer"
-            className="w-full h-full object-cover object-center filter saturate-[0.85]"
+            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
           />
-          <div className="absolute inset-0 bg-gradient-to-r from-[#111215] via-[#111215]/85 to-transparent" />
-          <div className="absolute inset-0 bg-gradient-to-t from-[#111215] via-transparent to-[#111215]/60" />
+          <div className="absolute inset-0 bg-gradient-to-t from-[#111215] via-black/20 to-transparent" />
         </div>
       )}
 
       {/* Conteúdo do Card */}
       <div className="relative z-10 p-4 sm:p-6 space-y-3.5 w-full max-w-full overflow-hidden">
-        {/* Top Header: Categoria, Tempo Preciso e Ações (Bookmark + Menu + Share) */}
+        {/* Top Header: Categoria, Tempo Preciso, Tempo Estimado de Leitura e Ações */}
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0 flex-wrap">
             {/* Logo da Entidade/Empresa em Destaque */}
@@ -203,11 +208,12 @@ export const EventCard: React.FC<EventCardProps> = ({
               </div>
             )}
 
-            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-zinc-900/90 text-zinc-300 text-[11px] font-mono border border-zinc-800/80 shrink-0">
+            {/* Metadados: Horário Relativo e Tempo Estimado de Leitura (calculado pelo resumo) */}
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-900/90 text-zinc-300 text-[11px] font-mono border border-zinc-800/80 shrink-0">
               <Clock className="w-3 h-3 text-zinc-400 shrink-0" />
               <span>{displayTime}</span>
-              <span className="text-zinc-600 hidden sm:inline">·</span>
-              <span className="text-zinc-400 hidden sm:inline">{readingTimeMin} min</span>
+              <span className="text-zinc-600 select-none">·</span>
+              <span className="text-zinc-300 font-medium">{readingTimeMin} min de leitura</span>
             </span>
           </div>
 
@@ -230,7 +236,7 @@ export const EventCard: React.FC<EventCardProps> = ({
               )}
             </button>
 
-            {/* Botão Compartilhar */}
+            {/* Botão Compartilhar com Deep Link oficial fatosbr.com.br */}
             <div className="relative">
               <button
                 onClick={handleShareClick}
@@ -239,8 +245,8 @@ export const EventCard: React.FC<EventCardProps> = ({
                     ? 'bg-white text-black font-bold scale-105 shadow-md'
                     : 'text-zinc-400 hover:text-white hover:bg-zinc-800/60 active:bg-zinc-700'
                 }`}
-                title={isCopied ? 'Link copiado!' : 'Compartilhar acontecimento'}
-                aria-label="Compartilhar acontecimento"
+                title={isCopied ? 'Link fatosbr.com.br copiado!' : 'Copiar link fatosbr.com.br'}
+                aria-label="Compartilhar notícia"
               >
                 {isCopied ? (
                   <Check className="w-4 h-4 text-black stroke-[2.5]" />
@@ -249,7 +255,7 @@ export const EventCard: React.FC<EventCardProps> = ({
                 )}
               </button>
               {shareTooltip && (
-                <div className="absolute -top-8 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded bg-white text-black font-mono text-[10px] font-bold whitespace-nowrap shadow-lg animate-fade-in pointer-events-none z-50">
+                <div className="absolute -top-8 left-1/2 -translate-x-1/2 px-2.5 py-1 rounded-lg bg-white text-black font-mono text-[10px] font-bold whitespace-nowrap shadow-xl animate-fadeIn pointer-events-none z-50">
                   {shareTooltip}
                 </div>
               )}
@@ -268,9 +274,20 @@ export const EventCard: React.FC<EventCardProps> = ({
 
               {showMenu && (
                 <div
-                  className="absolute right-0 top-11 w-56 rounded-xl border border-zinc-800 bg-zinc-950/98 backdrop-blur-md shadow-2xl p-1.5 z-40 text-xs space-y-1"
+                  className="absolute right-0 top-11 w-60 rounded-xl border border-zinc-800 bg-zinc-950/98 backdrop-blur-md shadow-2xl p-1.5 z-40 text-xs space-y-1"
                   onClick={(e) => e.stopPropagation()}
                 >
+                  <button
+                    onClick={(e) => {
+                      setShowMenu(false);
+                      handleShareClick(e);
+                    }}
+                    className="w-full min-h-[40px] flex items-center gap-2.5 px-3 py-2 rounded-lg text-left text-zinc-300 hover:text-white hover:bg-zinc-900 transition-colors cursor-pointer"
+                  >
+                    <Share2 className="w-4 h-4 text-zinc-400 shrink-0" />
+                    <span>Copiar link da notícia (fatosbr.com.br)</span>
+                  </button>
+
                   <button
                     onClick={handleHideClick}
                     className="w-full min-h-[40px] flex items-center gap-2.5 px-3 py-2 rounded-lg text-left text-zinc-300 hover:text-white hover:bg-zinc-900 transition-colors cursor-pointer"
@@ -332,13 +349,13 @@ export const EventCard: React.FC<EventCardProps> = ({
               {event.sources?.length || 1} fontes
             </span>
 
-            {/* Mini Logos / Badges dos Veículos Jornalísticos */}
+            {/* Mini Logos / Badges dos Veículos Jornalísticos (Monocromáticos) */}
             <div className="flex items-center -space-x-1 ml-0.5 overflow-hidden">
               {event.featuredSourceLogos?.slice(0, 3).map((srcLogo, i) =>
                 renderSourceBadge(srcLogo, i)
               )}
               {(event.sources?.length || 0) > 3 && (
-                <div className="w-5 h-5 rounded-full bg-zinc-800 border border-black/40 flex items-center justify-center text-[9px] text-zinc-300 font-mono font-medium shrink-0">
+                <div className="w-5 h-5 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-[9px] text-zinc-300 font-mono font-medium shrink-0">
                   +{event.sources.length - 3}
                 </div>
               )}
@@ -365,6 +382,6 @@ export const EventCard: React.FC<EventCardProps> = ({
           </div>
         </div>
       </div>
-    </article>
+    </motion.article>
   );
 };

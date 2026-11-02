@@ -447,6 +447,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       const q = userSearchTerm.trim().toLowerCase();
       const matchesSearch =
         !q ||
+        (u.id && u.id.toLowerCase().includes(q)) ||
         (u.fullName && u.fullName.toLowerCase().includes(q)) ||
         (u.email && u.email.toLowerCase().includes(q));
       if (!matchesSearch) return false;
@@ -2480,16 +2481,63 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
               )}
             </div>
 
-            {/* 3. TABELA COMPLETA DE USUÁRIOS COM FILTROS & BUSCA */}
+            {/* 3. GUIA OFICIAL DE URLS DE REDIRECIONAMENTO E SERVIDOR OAUTH SUPABASE */}
+            <div className="p-4 rounded-2xl bg-[#0a0d14] border border-[#1a2337] space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <Globe2 className="w-4 h-4 text-white" />
+                  <h3 className="text-xs sm:text-sm font-bold text-white">
+                    URLs de Redirecionamento & Servidor OAuth (Supabase)
+                  </h3>
+                </div>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 border border-zinc-700">
+                  Site Oficial: https://fatosbr.com.br
+                </span>
+              </div>
+              <p className="text-[11px] text-zinc-400">
+                Para que o login Google OAuth e o link de confirmação funcionem sem erros de redirecionamento, adicione estas URLs em <strong className="text-zinc-200">Supabase &gt; Authentication &gt; URL Configuration &gt; Redirect URLs</strong>:
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] font-mono">
+                {[
+                  { label: 'Site URL Principal', url: 'https://fatosbr.com.br' },
+                  { label: 'Wildcard Geral', url: 'https://fatosbr.com.br/**' },
+                  { label: 'Callback OAuth', url: 'https://fatosbr.com.br/auth/callback' },
+                  { label: 'Confirmação E-mail', url: 'https://fatosbr.com.br/auth/confirm' },
+                  { label: 'Caminho de Autorização (OAuth Server)', url: 'https://fatosbr.com.br/oauth/consent' },
+                  { label: 'Redefinição de Senha', url: 'https://fatosbr.com.br/reset-password' },
+                  { label: 'Onboarding Inicial', url: 'https://fatosbr.com.br/onboarding' },
+                  { label: 'Localhost Dev', url: 'http://localhost:3000/**' }
+                ].map((item, idx) => (
+                  <div key={idx} className="flex items-center justify-between p-2 rounded-xl bg-[#05070b] border border-zinc-800">
+                    <div className="min-w-0 pr-2">
+                      <div className="text-[9px] text-zinc-500 uppercase">{item.label}</div>
+                      <div className="text-zinc-200 truncate">{item.url}</div>
+                    </div>
+                    <button
+                      onClick={() => {
+                        navigator.clipboard?.writeText(item.url);
+                        showToast(`Copiado: ${item.url}`);
+                      }}
+                      className="p-1 rounded hover:bg-zinc-800 text-zinc-400 hover:text-white shrink-0 cursor-pointer"
+                      title="Copiar URL"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* 4. TABELA COMPLETA DE USUÁRIOS COM FILTROS & BUSCA */}
             <div className="p-4 sm:p-5 rounded-2xl bg-[#0e1320] border border-[#182136] space-y-4">
               <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-3 border-b border-[#182136]">
                 <div>
                   <h2 className="text-sm sm:text-base font-bold text-white flex items-center gap-2">
-                    <Users className="w-5 h-5 text-blue-400 shrink-0" />
-                    <span>Tabela Consolidada de Leitores & Contas</span>
+                    <Users className="w-5 h-5 text-white shrink-0" />
+                    <span>Tabela Consolidada de Leitores & Contas (Supabase)</span>
                   </h2>
                   <p className="text-xs text-zinc-400 mt-0.5">
-                    Visualização em tempo real de novos registros, provedor (Google / E-mail), plano e status.
+                    Visualização em tempo real de novos registros, provedor (Google / E-mail), UID e status de sessão.
                   </p>
                 </div>
 
@@ -2502,11 +2550,11 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
                     disabled={isLoadingUsers}
                     className="px-3.5 py-1.5 rounded-xl border border-[#1a2337] bg-[#0a0d14] hover:bg-[#121826] text-zinc-200 text-xs font-semibold transition flex items-center gap-2 cursor-pointer disabled:opacity-50"
                   >
-                    <RefreshCw className={`w-3.5 h-3.5 ${isLoadingUsers ? 'animate-spin text-blue-400' : 'text-zinc-400'}`} />
+                    <RefreshCw className={`w-3.5 h-3.5 ${isLoadingUsers ? 'animate-spin text-white' : 'text-zinc-400'}`} />
                     <span>Sincronizar Lista</span>
                   </button>
 
-                  <span className="text-[11px] px-2.5 py-1 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20 font-mono">
+                  <span className="text-[11px] px-2.5 py-1 rounded-full bg-zinc-800 text-zinc-200 border border-zinc-700 font-mono">
                     {filteredUsers.length} de {usersList.length} contas
                   </span>
                 </div>
@@ -2519,10 +2567,10 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
                   <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-zinc-500" />
                   <input
                     type="text"
-                    placeholder="Buscar por nome ou e-mail..."
+                    placeholder="Buscar por UID, nome ou e-mail..."
                     value={userSearchTerm}
                     onChange={(e) => setUserSearchTerm(e.target.value)}
-                    className="w-full bg-[#0a0d14] border border-[#1a2337] rounded-xl pl-9 pr-3 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-500 focus:outline-none focus:border-blue-500"
+                    className="w-full bg-[#0a0d14] border border-[#1a2337] rounded-xl pl-9 pr-3 py-1.5 text-xs text-zinc-200 placeholder:text-zinc-500 focus:outline-none focus:border-zinc-500"
                   />
                   {userSearchTerm && (
                     <button
@@ -2552,7 +2600,7 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
                       onClick={() => setUserPlanFilter('trial')}
                       className={`px-2 py-0.5 rounded-lg text-[11px] transition cursor-pointer ${
                         userPlanFilter === 'trial'
-                          ? 'bg-emerald-500/20 text-emerald-400 font-bold border border-emerald-500/30'
+                          ? 'bg-zinc-700 text-white font-bold'
                           : 'text-zinc-400 hover:text-white'
                       }`}
                     >
@@ -2562,7 +2610,7 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
                       onClick={() => setUserPlanFilter('pro')}
                       className={`px-2 py-0.5 rounded-lg text-[11px] transition cursor-pointer ${
                         userPlanFilter === 'pro'
-                          ? 'bg-purple-500/20 text-purple-400 font-bold border border-purple-500/30'
+                          ? 'bg-zinc-700 text-white font-bold'
                           : 'text-zinc-400 hover:text-white'
                       }`}
                     >
@@ -2586,7 +2634,7 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
                       onClick={() => setUserProviderFilter('google')}
                       className={`px-2 py-0.5 rounded-lg text-[11px] transition cursor-pointer ${
                         userProviderFilter === 'google'
-                          ? 'bg-blue-500/20 text-blue-400 font-bold border border-blue-500/30'
+                          ? 'bg-zinc-700 text-white font-bold'
                           : 'text-zinc-400 hover:text-white'
                       }`}
                     >
@@ -2639,25 +2687,40 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
                           </div>
 
                           {isUserAdmin ? (
-                            <span className="text-[9px] font-mono px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 uppercase font-bold">
+                            <span className="text-[9px] font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-200 border border-zinc-700 uppercase font-bold">
                               SUPER ADMIN
                             </span>
                           ) : isTrial ? (
-                            <span className="text-[9px] font-mono px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 font-bold">
+                            <span className="text-[9px] font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 border border-zinc-700 font-bold">
                               - 7D TRIAL
                             </span>
                           ) : (
-                            <span className="text-[9px] font-mono px-2 py-0.5 rounded bg-purple-500/15 text-purple-400 border border-purple-500/30 font-bold">
+                            <span className="text-[9px] font-mono px-2 py-0.5 rounded bg-white text-black font-bold">
                               PRO
                             </span>
                           )}
+                        </div>
+
+                        {/* UID com botão de cópia */}
+                        <div className="flex items-center justify-between text-[10px] font-mono text-zinc-400 bg-black/40 px-2.5 py-1.5 rounded-lg border border-[#182136]">
+                          <span className="truncate max-w-[210px]">UID: {u.id}</span>
+                          <button
+                            onClick={() => {
+                              navigator.clipboard?.writeText(u.id);
+                              showToast(`UID copiado!`);
+                            }}
+                            className="p-1 text-zinc-400 hover:text-white cursor-pointer"
+                            title="Copiar UID"
+                          >
+                            <Copy className="w-3 h-3" />
+                          </button>
                         </div>
 
                         <div className="flex items-center justify-between text-[11px] pt-2 border-t border-[#141b2c]">
                           <div className="flex items-center gap-2">
                             {/* Badge do Provedor */}
                             {isGoogle ? (
-                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-blue-500/10 text-blue-300 border border-blue-500/20 text-[10px] font-mono">
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 border border-zinc-700 text-[10px] font-mono">
                                 <span>G</span> Google
                               </span>
                             ) : (
@@ -2688,19 +2751,20 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
                 <table className="w-full text-left text-xs">
                   <thead>
                     <tr className="border-b border-[#182136] text-[11px] text-zinc-400 uppercase font-mono">
-                      <th className="pb-3 pl-2">Leitor</th>
+                      <th className="pb-3 pl-2">UID (Supabase)</th>
+                      <th className="pb-3">Display Name / E-mail</th>
                       <th className="pb-3">Provedor</th>
                       <th className="pb-3">Papel / Acesso</th>
                       <th className="pb-3">Plano Atual</th>
-                      <th className="pb-3">Status da Sessão</th>
-                      <th className="pb-3">Data de Cadastro</th>
+                      <th className="pb-3">Status</th>
+                      <th className="pb-3">Data Cadastro</th>
                       <th className="pb-3 text-right pr-2">Ação</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#151d2e]">
                     {filteredUsers.length === 0 ? (
                       <tr>
-                        <td colSpan={7} className="py-8 text-center text-zinc-500 text-xs font-mono">
+                        <td colSpan={8} className="py-8 text-center text-zinc-500 text-xs font-mono">
                           Nenhum usuário cadastrado encontrado com esses filtros.
                         </td>
                       </tr>
@@ -2712,7 +2776,26 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
 
                         return (
                           <tr key={u.id} className="hover:bg-[#12192b]/40 transition-colors">
-                            <td className="py-3.5 pl-2">
+                            {/* UID */}
+                            <td className="py-3.5 pl-2 font-mono text-[11px] text-zinc-400">
+                              <div className="flex items-center gap-1.5">
+                                <span className="truncate max-w-[140px] xl:max-w-[180px]" title={u.id}>
+                                  {u.id}
+                                </span>
+                                <button
+                                  onClick={() => {
+                                    navigator.clipboard?.writeText(u.id);
+                                    showToast(`UID ${u.id.substring(0, 8)}... copiado!`);
+                                  }}
+                                  title="Copiar UID"
+                                  className="p-1 rounded hover:bg-zinc-800 text-zinc-500 hover:text-white transition cursor-pointer"
+                                >
+                                  <Copy className="w-3 h-3" />
+                                </button>
+                              </div>
+                            </td>
+
+                            <td className="py-3.5">
                               <div className="flex items-center gap-3">
                                 <div className="w-8 h-8 rounded-full overflow-hidden bg-zinc-800 border border-zinc-700 flex items-center justify-center text-white text-xs font-bold shrink-0">
                                   {u.avatarUrl ? (
@@ -2742,7 +2825,7 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
 
                             <td className="py-3.5">
                               {isGoogle ? (
-                                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20 text-[10px] font-mono">
+                                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-300 border border-zinc-700 text-[10px] font-mono">
                                   <span className="font-bold">G</span> Google OAuth
                                 </span>
                               ) : (
@@ -2754,7 +2837,7 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
 
                             <td className="py-3.5">
                               {isUserAdmin ? (
-                                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 uppercase font-bold">
+                                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-200 border border-zinc-700 uppercase font-bold">
                                   SUPER ADMIN
                                 </span>
                               ) : (
@@ -2766,15 +2849,15 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
 
                             <td className="py-3.5">
                               {isUserAdmin ? (
-                                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-200 border border-zinc-700">
                                   PRO ILIMITADO
                                 </span>
                               ) : isTrial ? (
-                                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-bold">
+                                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 border border-zinc-700 font-bold">
                                   - 7D (TESTE)
                                 </span>
                               ) : (
-                                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-purple-500/15 text-purple-400 border border-purple-500/30 font-bold">
+                                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-white text-black font-bold">
                                   PRO MENSAL
                                 </span>
                               )}

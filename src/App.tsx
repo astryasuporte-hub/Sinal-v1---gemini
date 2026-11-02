@@ -83,7 +83,10 @@ import {
   Headphones,
   Instagram,
   Check,
-  CheckCircle2
+  CheckCircle2,
+  SlidersHorizontal,
+  ChevronDown,
+  Menu
 } from 'lucide-react';
 import { rateLimitService } from './services/rateLimitService';
 import { KeyboardShortcutsModal } from './components/KeyboardShortcutsModal';
@@ -118,6 +121,87 @@ export const THEME_LABEL_MAP: Record<string, string> = {
   education: 'Educação'
 };
 
+export const AVAILABLE_THEMES = [
+  { id: 'all', label: 'Todas as Notícias' },
+  { id: 'tech', label: 'Tecnologia & IA' },
+  { id: 'politics', label: 'Política' },
+  { id: 'business', label: 'Negócios' },
+  { id: 'economy', label: 'Economia' },
+  { id: 'science', label: 'Ciência' },
+  { id: 'world', label: 'Mundo' },
+  { id: 'culture', label: 'Cultura' },
+  { id: 'health', label: 'Saúde' },
+  { id: 'environment', label: 'Meio Ambiente' }
+];
+
+/**
+ * Classifica estritamente o gênero/tema de uma notícia com base na sua categoria editorial
+ */
+export function getEventGenres(category: string, title?: string, summary?: string): string[] {
+  const cat = (category || '').toLowerCase().trim();
+  const genres = new Set<string>();
+
+  // Mapeamento direto e prioritário pela categoria editorial da notícia
+  if (cat.includes('polític') || cat.includes('politic') || cat.includes('governo') || cat.includes('eleiç') || cat.includes('planalto') || cat.includes('stf') || cat.includes('congresso') || cat.includes('senado') || cat.includes('câmara')) {
+    genres.add('politics');
+  }
+  if (cat.includes('econ') || cat.includes('finan') || cat.includes('fiscal') || cat.includes('mercado') || cat.includes('selic') || cat.includes('câmbio') || cat.includes('inflação')) {
+    genres.add('economy');
+  }
+  if (cat.includes('tec') || cat.includes(' ia') || cat.includes('ia ') || cat.includes('ai') || cat.includes('software') || cat.includes('computa') || cat.includes('digital') || cat.includes('chip')) {
+    genres.add('tech');
+  }
+  if (cat.includes('negóci') || cat.includes('negoci') || cat.includes('empresa') || cat.includes('corporat') || cat.includes('m&a') || cat.includes('startup') || cat.includes('varejo')) {
+    genres.add('business');
+  }
+  if (cat.includes('ciênc') || cat.includes('ciencia') || cat.includes('scienc') || cat.includes('espacial') || cat.includes('física') || cat.includes('astronom') || cat.includes('nasa')) {
+    genres.add('science');
+  }
+  if (cat.includes('mundo') || cat.includes('internacional') || cat.includes('geopolític') || cat.includes('exterior') || cat.includes('europa') || cat.includes('eua') || cat.includes('global')) {
+    genres.add('world');
+  }
+  if (cat.includes('saúde') || cat.includes('saude') || cat.includes('medic') || cat.includes('hospital') || cat.includes('sanitár') || cat.includes('anvisa') || cat.includes('vacina')) {
+    genres.add('health');
+  }
+  if (cat.includes('esporte') || cat.includes('futebol') || cat.includes('olimpíad') || cat.includes('brasileirão') || cat.includes('fifa')) {
+    genres.add('sports');
+  }
+  if (cat.includes('cultur') || cat.includes('arte') || cat.includes('música') || cat.includes('literatur') || cat.includes('teatro')) {
+    genres.add('culture');
+  }
+  if (cat.includes('entreten') || cat.includes('cinema') || cat.includes('filme') || cat.includes('série') || cat.includes('streaming') || cat.includes('hollywood')) {
+    genres.add('entertainment');
+  }
+  if (cat.includes('ambiente') || cat.includes('clima') || cat.includes('sustent') || cat.includes('ecolog') || cat.includes('energia') || cat.includes('amazônia')) {
+    genres.add('environment');
+  }
+  if (cat.includes('educa') || cat.includes('sociedade') || cat.includes('escola') || cat.includes('universidade') || cat.includes('enem') || cat.includes('ensino')) {
+    genres.add('education');
+  }
+
+  // Se a categoria for ampla/genérica (ex: "Brasil & Atualidades", "Geral", "Regulação"), determina pelo título específico
+  if (genres.size === 0) {
+    const t = (title || '').toLowerCase();
+    if (t.includes('lula') || t.includes('bolsonaro') || t.includes('governo') || t.includes('congresso') || t.includes('stf') || t.includes('senado') || t.includes('câmara') || t.includes('ministr') || t.includes('moraes') || t.includes('polític')) {
+      genres.add('politics');
+    } else if (t.includes('dólar') || t.includes('ibovespa') || t.includes('inflação') || t.includes('selic') || t.includes('banco central') || t.includes('pib') || t.includes('juros') || t.includes('fisco') || t.includes('economi')) {
+      genres.add('economy');
+    } else if (t.includes('ia') || t.includes('inteligência artificial') || t.includes('nvidia') || t.includes('openai') || t.includes('google') || t.includes('apple') || t.includes('meta') || t.includes('microsoft') || t.includes('chatgpt') || t.includes('tecnolog')) {
+      genres.add('tech');
+    } else if (t.includes('empresa') || t.includes('lucro') || t.includes('aquisição') || t.includes('startup') || t.includes('fusão') || t.includes('ceo') || t.includes('negóci')) {
+      genres.add('business');
+    } else if (t.includes('guerra') || t.includes('eua') || t.includes('china') || t.includes('rússia') || t.includes('ucrânia') || t.includes('oriente médio') || t.includes('mundo')) {
+      genres.add('world');
+    } else if (t.includes('vacina') || t.includes('dengue') || t.includes('vírus') || t.includes('médico') || t.includes('saúde')) {
+      genres.add('health');
+    } else if (t.includes('futebol') || t.includes('gol') || t.includes('campeonato') || t.includes('esporte')) {
+      genres.add('sports');
+    }
+  }
+
+  return Array.from(genres);
+}
+
 export function eventMatchesAnyUserTheme(
   category: string,
   title: string,
@@ -125,50 +209,30 @@ export function eventMatchesAnyUserTheme(
   themeIds: string[]
 ): boolean {
   if (!themeIds || themeIds.length === 0) return true;
-  const combined = `${category || ''} ${title || ''} ${summary || ''}`.toLowerCase();
+  if (themeIds.includes('all')) return true;
 
-  return themeIds.some((themeId) => {
-    switch (themeId) {
-      case 'tech':
-        return combined.includes('tec') || combined.includes('ia') || combined.includes('ai') || combined.includes('inteligência artificial') || combined.includes('software') || combined.includes('computa') || combined.includes('nvidia') || combined.includes('openai') || combined.includes('apple') || combined.includes('google') || combined.includes('microsoft');
-      case 'politics':
-        return combined.includes('polític') || combined.includes('politic') || combined.includes('congress') || combined.includes('governo') || combined.includes('stf') || combined.includes('senado') || combined.includes('câmara') || combined.includes('eleiç') || combined.includes('ministr') || combined.includes('lula') || combined.includes('bolsonaro') || combined.includes('planalto') || combined.includes('lei') || combined.includes('reforma') || combined.includes('orçamento') || combined.includes('gastos públicos');
-      case 'business':
-        return combined.includes('negócios') || combined.includes('negocios') || combined.includes('empresa') || combined.includes('corpora') || combined.includes('m&a') || combined.includes('fusão') || combined.includes('aquisi') || combined.includes('ceo') || combined.includes('startup') || combined.includes('mercado') || combined.includes('varejo');
-      case 'economy':
-        return combined.includes('economi') || combined.includes('finanç') || combined.includes('financ') || combined.includes('selic') || combined.includes('banco central') || combined.includes('inflação') || combined.includes('inflacao') || combined.includes('dólar') || combined.includes('dolar') || combined.includes('câmbio') || combined.includes('pib') || combined.includes('juros') || combined.includes('ibovespa') || combined.includes('bolsa') || combined.includes('fiscal');
-      case 'world':
-        return combined.includes('mundo') || combined.includes('internacional') || combined.includes('geopolític') || combined.includes('ucrânia') || combined.includes('rússia') || combined.includes('eua') || combined.includes('china') || combined.includes('europa') || combined.includes('oriente médio') || combined.includes('onu') || combined.includes('donetsk');
-      case 'science':
-        return combined.includes('ciência') || combined.includes('ciencia') || combined.includes('pesquisa') || combined.includes('espacial') || combined.includes('nasa') || combined.includes('física') || combined.includes('astronom') || combined.includes('laboratório') || combined.includes('estudo') || combined.includes('científ');
-      case 'health':
-        return combined.includes('saúde') || combined.includes('saude') || combined.includes('medic') || combined.includes('vacina') || combined.includes('sus') || combined.includes('anvisa') || combined.includes('doença') || combined.includes('hospital') || combined.includes('dengue') || combined.includes('oms');
-      case 'sports':
-        return combined.includes('esporte') || combined.includes('futebol') || combined.includes('brasileirão') || combined.includes('libertadores') || combined.includes('champions') || combined.includes('flamengo') || combined.includes('palmeiras') || combined.includes('olimpíad') || combined.includes('fifa') || combined.includes('jogo');
-      case 'culture':
-        return combined.includes('cultura') || combined.includes('arte') || combined.includes('música') || combined.includes('musica') || combined.includes('livro') || combined.includes('literatur') || combined.includes('teatro') || combined.includes('museu');
-      case 'entertainment':
-        return combined.includes('entretenimento') || combined.includes('cinema') || combined.includes('filme') || combined.includes('série') || combined.includes('serie') || combined.includes('netflix') || combined.includes('streaming') || combined.includes('hollywood') || combined.includes('oscar');
-      case 'environment':
-        return combined.includes('ambiente') || combined.includes('clima') || combined.includes('sustentab') || combined.includes('energia') || combined.includes('solar') || combined.includes('amazônia') || combined.includes('aquecimento') || combined.includes('desmatamento');
-      case 'education':
-        return combined.includes('educação') || combined.includes('educacao') || combined.includes('universidade') || combined.includes('enem') || combined.includes('escola') || combined.includes('ensino') || combined.includes('estudante') || combined.includes('profess');
-      default:
-        return combined.includes(themeId.toLowerCase());
-    }
-  });
+  const genres = getEventGenres(category, title, summary);
+  if (genres.length === 0) {
+    // Fallback de correspondência textual caso não categorizado
+    const combined = `${category || ''} ${title || ''} ${summary || ''}`.toLowerCase();
+    return themeIds.some((id) => combined.includes(id));
+  }
+  return themeIds.some((id) => genres.includes(id));
 }
 
 export default function App() {
   const [currentNav, setCurrentNav] = useState<
-    'landing' | 'login' | 'onboarding' | 'home' | 'explore' | 'following' | 'notifications' | 'briefings' | 'profile' | 'saved' | 'history' | 'admin' | 'control'
+    'landing' | 'login' | 'onboarding' | 'home' | 'explore' | 'following' | 'notifications' | 'briefings' | 'profile' | 'saved' | 'history' | 'admin' | 'control' | 'oauth_consent'
   >(() => {
     if (typeof window !== 'undefined') {
       const pathname = window.location.pathname;
+      if (pathname === '/oauth/consent' || pathname.startsWith('/oauth/consent')) return 'oauth_consent';
+      if (pathname === '/auth/callback' || pathname.startsWith('/auth/callback')) return 'home';
       if (pathname === '/login' || pathname.startsWith('/login')) return 'login';
       if (pathname === '/onboarding' || pathname.startsWith('/onboarding')) return 'onboarding';
       const params = new URLSearchParams(window.location.search);
       const view = params.get('view') || params.get('page');
+      if (view === 'oauth_consent' || view === 'consent') return 'oauth_consent';
       if (view === 'login') return 'login';
       if (view === 'onboarding') return 'onboarding';
       if (view === 'app' || view === 'home') return 'home';
@@ -197,7 +261,8 @@ export default function App() {
   const { language, isRTL } = useI18n();
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<'for-you' | 'following' | 'trending'>('for-you');
-  const [homeCategoryFilter, setHomeCategoryFilter] = useState<'all' | 'tech' | 'politics' | 'business' | 'science'>('all');
+  const [homeCategoryFilter, setHomeCategoryFilter] = useState<string>('all');
+  const [isThemeDrawerOpen, setIsThemeDrawerOpen] = useState<boolean>(false);
   const [feedAnimationKey, setFeedAnimationKey] = useState<number>(0);
   const [currentUserAvatar, setCurrentUserAvatar] = useState<string | null>(() => {
     try {
@@ -698,22 +763,25 @@ export default function App() {
 
     restoreSessionAsync();
 
-    // Detectar retorno de OAuth (/oauth/consent ou query/hash com tokens)
+    // Detectar retorno de OAuth (/auth/callback, /auth/confirm, query/hash com tokens)
     if (typeof window !== 'undefined') {
       const pathname = window.location.pathname;
       const search = window.location.search;
       const hash = window.location.hash;
 
-      const isOAuth =
-        pathname.includes('/oauth') ||
+      const isAuthCallback =
+        pathname.includes('/auth/callback') ||
+        pathname.includes('/auth/confirm') ||
         hash.includes('access_token') ||
         search.includes('code=') ||
         search.includes('error=');
 
-      if (isOAuth) {
+      if (isAuthCallback) {
         authService.getCurrentUser().then((user) => {
           if (user) {
             handleUserSession(user);
+            localStorage.setItem('fatosbr_session_active', 'true');
+            localStorage.setItem('fatosbr_last_nav', 'home');
             const hasOnboarded = localStorage.getItem('sinal_onboarded_' + user.id) === 'true';
             if (!hasOnboarded) {
               setCurrentNav('onboarding');
@@ -721,7 +789,7 @@ export default function App() {
               setCurrentNav('home');
             }
           }
-          // Limpa a barra de navegação para a raiz sem deixar preso em /oauth/consent
+          // Limpa a barra de navegação para a raiz sem deixar tokens ou parâmetros expostos
           window.history.replaceState(null, '', '/');
         });
       }
@@ -757,8 +825,40 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [hasError, setHasError] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [unreadCount, setUnreadCount] = useState(2);
   const [isSearchingExternalApis, setIsSearchingExternalApis] = useState(false);
+  const [unreadCount, setUnreadCount] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem('sinal_notifications_v1');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          return parsed.filter((n: any) => !n.read).length;
+        }
+      }
+    } catch {}
+    return 2;
+  });
+
+  // Sincronização em tempo real do contador de notificações não lidas
+  useEffect(() => {
+    const handleNotifsChanged = () => {
+      try {
+        const saved = localStorage.getItem('sinal_notifications_v1');
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (Array.isArray(parsed)) {
+            setUnreadCount(parsed.filter((n: any) => !n.read).length);
+          }
+        }
+      } catch {}
+    };
+    window.addEventListener('fatosbr_notifications_updated', handleNotifsChanged);
+    window.addEventListener('storage', handleNotifsChanged);
+    return () => {
+      window.removeEventListener('fatosbr_notifications_updated', handleNotifsChanged);
+      window.removeEventListener('storage', handleNotifsChanged);
+    };
+  }, []);
   const [externalSearchFailed, setExternalSearchFailed] = useState<string | null>(null);
 
   // Busca real em APIs externas (GNews / World News API) quando o termo não existe no cache local
@@ -946,12 +1046,7 @@ export default function App() {
     })
     .filter((e) => {
       if (homeCategoryFilter === 'all') return true;
-      const cat = (e.category || '').toLowerCase();
-      if (homeCategoryFilter === 'tech') return cat.includes('tec') || cat.includes('ia') || cat.includes('tech');
-      if (homeCategoryFilter === 'politics') return cat.includes('pol') || cat.includes('reg') || cat.includes('gov');
-      if (homeCategoryFilter === 'business') return cat.includes('neg') || cat.includes('econ') || cat.includes('mercad') || cat.includes('fin');
-      if (homeCategoryFilter === 'science') return cat.includes('ciên') || cat.includes('cien') || cat.includes('scien') || cat.includes('pesq');
-      return true;
+      return eventMatchesAnyUserTheme(e.category, e.title, e.summary, [homeCategoryFilter]);
     });
 
   // Disparo automático nas APIs externas caso o termo pesquisado não exista no cache local
@@ -1068,6 +1163,106 @@ export default function App() {
     );
   }
 
+  if (currentNav === 'oauth_consent') {
+    return (
+      <div className="min-h-screen bg-[#08090b] text-zinc-100 flex flex-col items-center justify-center p-4">
+        <div className="w-full max-w-md bg-[#0e121a] border border-[#1e273a] rounded-2xl p-6 sm:p-8 space-y-6 shadow-2xl">
+          <div className="flex items-center justify-center">
+            <FatosBrLogo size="lg" glow={true} />
+          </div>
+
+          <div className="text-center space-y-2">
+            <h2 className="text-lg font-bold text-white">Autorização de Acesso (OAuth 2.1)</h2>
+            <p className="text-xs text-zinc-400">
+              Um aplicativo externo ou integração está solicitando autorização para conectar à sua conta FatosBR.
+            </p>
+          </div>
+
+          {currentUser ? (
+            <div className="flex items-center gap-3 p-3.5 rounded-xl bg-[#080b12] border border-[#162035]">
+              <div className="w-10 h-10 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-sm font-bold text-white overflow-hidden shrink-0">
+                {currentUserAvatar ? (
+                  <img src={currentUserAvatar} alt={currentUser.email} className="w-full h-full object-cover" />
+                ) : (
+                  <span>{(currentUser.email || 'U').substring(0, 2).toUpperCase()}</span>
+                )}
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-semibold text-white truncate">
+                  {currentUser.user_metadata?.full_name || currentUser.email?.split('@')[0]}
+                </div>
+                <div className="text-[11px] text-zinc-400 font-mono truncate">{currentUser.email}</div>
+              </div>
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 border border-zinc-700">
+                Conectado
+              </span>
+            </div>
+          ) : (
+            <div className="p-3.5 rounded-xl bg-zinc-900/60 border border-zinc-800 text-center text-xs text-zinc-400">
+              Você ainda não está autenticado no FatosBR. Faça login para conceder autorização.
+            </div>
+          )}
+
+          <div className="space-y-2 text-xs">
+            <span className="text-[11px] font-mono text-zinc-500 uppercase">Permissões Solicitadas:</span>
+            <div className="p-3 rounded-xl bg-black/40 border border-zinc-800 space-y-2 text-zinc-300">
+              <div className="flex items-center gap-2">
+                <Check className="w-3.5 h-3.5 text-zinc-300" />
+                <span>Identificação básica do usuário (e-mail, nome e avatar)</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <Check className="w-3.5 h-3.5 text-zinc-300" />
+                <span>Leitura segura do feed de notícias e preferências</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-2.5 pt-2">
+            {currentUser ? (
+              <button
+                onClick={() => {
+                  const params = new URLSearchParams(window.location.search);
+                  const redirectUri = params.get('redirect_uri');
+                  const state = params.get('state');
+                  if (redirectUri) {
+                    try {
+                      const url = new URL(redirectUri);
+                      url.searchParams.set('code', 'fbr_' + Math.random().toString(36).substring(2, 12));
+                      if (state) url.searchParams.set('state', state);
+                      window.location.href = url.toString();
+                      return;
+                    } catch {}
+                  }
+                  setCurrentNav('home');
+                }}
+                className="w-full py-2.5 px-4 rounded-xl bg-white text-black text-xs font-bold hover:bg-zinc-200 transition cursor-pointer"
+              >
+                Autorizar Aplicativo
+              </button>
+            ) : (
+              <button
+                onClick={() => setCurrentNav('login')}
+                className="w-full py-2.5 px-4 rounded-xl bg-white text-black text-xs font-bold hover:bg-zinc-200 transition cursor-pointer"
+              >
+                Fazer Login no FatosBR
+              </button>
+            )}
+
+            <button
+              onClick={() => {
+                window.history.replaceState(null, '', '/');
+                setCurrentNav('home');
+              }}
+              className="w-full py-2.5 px-4 rounded-xl border border-zinc-800 hover:bg-zinc-900 text-zinc-400 hover:text-white text-xs font-semibold transition cursor-pointer"
+            >
+              Cancelar e Voltar ao Início
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (currentNav === 'admin') {
     // Blindagem de segurança: Apenas o Super Admin tem permissão para carregar o AdminPanel
     if (!isSuperAdmin) {
@@ -1133,39 +1328,9 @@ export default function App() {
         />
       )}
 
-      {/* Micro-interação Animada de 'Check' (Conclusão) ao salvar no Histórico ou marcar como lido */}
-      <AnimatePresence>
-        {historyCheckToast && (
-          <motion.div
-            initial={{ opacity: 0, y: -24, scale: 0.92 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: -16, scale: 0.95 }}
-            transition={{ type: 'spring', stiffness: 450, damping: 28 }}
-            className="fixed top-5 left-1/2 -translate-x-1/2 z-[100] flex items-center gap-3.5 px-4 py-2.5 rounded-2xl bg-[#0c0d12]/95 backdrop-blur-md border border-emerald-500/40 shadow-2xl shadow-emerald-950/60 text-white pointer-events-none"
-          >
-            <motion.div
-              initial={{ scale: 0, rotate: -60 }}
-              animate={{ scale: [0, 1.25, 1], rotate: 0 }}
-              transition={{ duration: 0.35, ease: 'easeOut' }}
-              className="w-7 h-7 rounded-full bg-emerald-500 flex items-center justify-center text-black font-extrabold shrink-0 shadow-lg shadow-emerald-500/40"
-            >
-              <Check className="w-4 h-4 stroke-[3]" />
-            </motion.div>
-            <div className="text-left pr-1">
-              <div className="text-xs font-bold text-emerald-300 flex items-center gap-1.5">
-                <span>Marcado como lido e salvo no Histórico</span>
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
-              </div>
-              <div className="text-[11px] text-zinc-300 max-w-[280px] sm:max-w-[420px] truncate">
-                {historyCheckToast.title}
-              </div>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
 
       {/* Container Principal Desktop / Mobile */}
-      <div className="max-w-[1440px] mx-auto min-h-screen flex flex-col md:flex-row">
+      <div className="max-w-[1440px] mx-auto min-h-screen flex flex-col md:flex-row overflow-x-hidden w-full">
         
         {/* ================= 1. SIDEBAR DESKTOP (1440px MOCKUP) ================= */}
         <aside className="hidden md:flex flex-col justify-between w-64 lg:w-72 border-r p-6 shrink-0 sticky top-0 h-screen bg-[#08090b] border-[#1a1c22]">
@@ -1173,9 +1338,9 @@ export default function App() {
             {/* macOS Window Dots & Logo */}
             <div className="space-y-5">
               <div className="flex items-center space-x-2">
-                <div className="w-3 h-3 rounded-full bg-[#ff5f56]" />
-                <div className="w-3 h-3 rounded-full bg-[#ffbd2e]" />
-                <div className="w-3 h-3 rounded-full bg-[#27c93f]" />
+                <div className="w-3 h-3 rounded-full bg-zinc-700" />
+                <div className="w-3 h-3 rounded-full bg-zinc-600" />
+                <div className="w-3 h-3 rounded-full bg-zinc-500" />
               </div>
 
               {/* Logo: FatosBR */}
@@ -1189,7 +1354,7 @@ export default function App() {
 
             {/* BUSCA GLOBAL NA BARRA LATERAL (Pesquisa por palavras-chave em todos os feeds) */}
             <div className="relative group">
-              <Search className="w-4 h-4 absolute left-3 top-3 text-zinc-500 group-focus-within:text-emerald-400 transition-colors pointer-events-none" />
+              <Search className="w-4 h-4 absolute left-3 top-3 text-zinc-500 group-focus-within:text-white transition-colors pointer-events-none" />
               <input
                 type="text"
                 placeholder="Pesquisar em todos os feeds..."
@@ -1200,7 +1365,7 @@ export default function App() {
                     setCurrentNav('home');
                   }
                 }}
-                className="w-full bg-[#111216] border border-[#1e2026] focus:border-emerald-500/50 rounded-xl pl-9 pr-8 py-2 text-xs text-zinc-200 placeholder:text-zinc-500 focus:outline-none transition-all shadow-inner"
+                className="w-full bg-[#111216] border border-[#1e2026] focus:border-zinc-500 rounded-xl pl-9 pr-8 py-2 text-xs text-zinc-200 placeholder:text-zinc-500 focus:outline-none transition-all shadow-inner"
               />
               {searchQuery ? (
                 <button
@@ -1269,7 +1434,7 @@ export default function App() {
                   <span>{t('nav.notifications')}</span>
                 </div>
                 {unreadCount > 0 && (
-                  <span className="w-2 h-2 rounded-full bg-red-500" />
+                  <span className="w-2 h-2 rounded-full bg-white shadow-sm" />
                 )}
               </button>
 
@@ -1319,10 +1484,10 @@ export default function App() {
                 title="Central de Operações do Instagram"
               >
                 <div className="flex items-center space-x-3.5">
-                  <Instagram className="w-4 h-4 text-emerald-400" />
+                  <Instagram className="w-4 h-4 text-zinc-300" />
                   <span>FatosBR Control</span>
                 </div>
-                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-900 text-emerald-400 border border-emerald-500/30">
+                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-900 text-zinc-300 border border-zinc-700">
                   IG
                 </span>
               </button>
@@ -1331,7 +1496,7 @@ export default function App() {
                 onClick={() => setCurrentNav('landing')}
                 className="w-full flex items-center space-x-3.5 px-4 py-3 rounded-xl transition-colors cursor-pointer text-zinc-400 hover:text-white hover:bg-[#121317]"
               >
-                <Globe2 className="w-4 h-4 text-emerald-400" />
+                <Globe2 className="w-4 h-4 text-zinc-300" />
                 <span>{t('nav.landing')}</span>
               </button>
 
@@ -1356,7 +1521,7 @@ export default function App() {
                 title="Atalhos de teclado globais (tecla ?)"
               >
                 <div className="flex items-center space-x-2.5">
-                  <Command className="w-4 h-4 text-emerald-400" />
+                  <Command className="w-4 h-4 text-zinc-300" />
                   <span>{t('nav.shortcuts')}</span>
                 </div>
                 <kbd className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-zinc-800 text-zinc-300">
@@ -1376,7 +1541,7 @@ export default function App() {
             className="p-3.5 rounded-2xl border transition group cursor-pointer flex items-center space-x-3 border-[#202229] hover:border-zinc-700 bg-[#121418] hover:bg-[#16181f]"
           >
             <div className="w-8 h-8 rounded-xl border flex items-center justify-center text-xs font-bold shrink-0 transition bg-zinc-800 border-zinc-700 text-white">
-              <Shield className="w-4 h-4 text-emerald-400" />
+              <Shield className="w-4 h-4 text-zinc-300" />
             </div>
             <div className="overflow-hidden">
               <div className="text-xs font-bold leading-tight text-white">Plano Pro</div>
@@ -1395,41 +1560,12 @@ export default function App() {
             <FatosBrLogo size="sm" glow={true} />
           </div>
 
-          {/* Botões de Ação no Topo Mobile (Briefings e Notificações/Busca) */}
+          {/* Botões de Ação no Topo Mobile */}
           <div className="flex items-center space-x-1.5">
-
-            {/* Botão Briefings no Topo Mobile */}
-            <button
-              onClick={() => setCurrentNav('briefings')}
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[11px] font-semibold transition active:scale-95 cursor-pointer ${
-                currentNav === 'briefings'
-                  ? 'bg-zinc-800 border-zinc-700 text-white font-bold'
-                  : 'bg-[#12141a] border-[#202432] text-zinc-300 hover:text-white'
-              }`}
-              title="Acessar Briefings Diários"
-            >
-              <FileText className="w-3.5 h-3.5 text-zinc-300" />
-              <span>{t('nav.briefings')}</span>
-            </button>
-
-            {/* Botão FatosBR Control no Topo Mobile */}
-            <button
-              onClick={() => setCurrentNav('control')}
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[11px] font-semibold transition active:scale-95 cursor-pointer ${
-                currentNav === 'control'
-                  ? 'bg-zinc-800 border-zinc-700 text-white font-bold'
-                  : 'bg-[#12141a] border-[#202432] text-zinc-300 hover:text-white'
-              }`}
-              title="Acessar FatosBR Control"
-            >
-              <Instagram className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Control</span>
-            </button>
-
             {currentNav === 'profile' ? (
               <button
                 onClick={() => {}}
-                className="p-1.5 rounded-full transition cursor-pointer text-zinc-300 hover:text-white"
+                className="p-2 rounded-full transition cursor-pointer text-zinc-300 hover:text-white min-h-[44px] min-w-[44px] flex items-center justify-center"
                 title="Configurações"
               >
                 <Settings className="w-5 h-5" />
@@ -1437,20 +1573,31 @@ export default function App() {
             ) : currentNav === 'explore' || currentNav === 'following' || currentNav === 'notifications' || currentNav === 'saved' || currentNav === 'history' ? (
               <button
                 onClick={() => {}}
-                className="p-1.5 rounded-full transition cursor-pointer text-zinc-300 hover:text-white"
+                className="p-2 rounded-full transition cursor-pointer text-zinc-300 hover:text-white min-h-[44px] min-w-[44px] flex items-center justify-center"
+                title="Buscar"
               >
                 <Search className="w-5 h-5" />
               </button>
             ) : (
-              <button
-                onClick={() => setCurrentNav('notifications')}
-                className="relative p-2 text-zinc-300 hover:text-white rounded-full transition cursor-pointer"
-              >
-                <Bell className="w-5 h-5" />
-                {unreadCount > 0 && (
-                  <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-red-500" />
-                )}
-              </button>
+              <>
+                <button
+                  onClick={() => setCurrentNav('explore')}
+                  className="p-2 text-zinc-300 hover:text-white rounded-full transition cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center"
+                  title="Explorar e Buscar"
+                >
+                  <Search className="w-5 h-5" />
+                </button>
+                <button
+                  onClick={() => setCurrentNav('notifications')}
+                  className="relative p-2 text-zinc-300 hover:text-white rounded-full transition cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center"
+                  title="Notificações"
+                >
+                  <Bell className="w-5 h-5" />
+                  {unreadCount > 0 && (
+                    <span className="absolute top-2 right-2 w-2 h-2 rounded-full bg-white" />
+                  )}
+                </button>
+              </>
             )}
           </div>
         </header>
@@ -1484,7 +1631,7 @@ export default function App() {
               >
                 <Bell className="w-4 h-4" />
                 {unreadCount > 0 && (
-                  <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-red-500" />
+                  <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-white ring-2 ring-[#111216]" />
                 )}
               </button>
 
@@ -1523,7 +1670,7 @@ export default function App() {
               >
                 <Bell className="w-4 h-4" />
                 {unreadCount > 0 && (
-                  <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-red-500" />
+                  <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-white ring-2 ring-[#111216]" />
                 )}
               </button>
 
@@ -1561,7 +1708,7 @@ export default function App() {
               >
                 <Bell className="w-4 h-4" />
                 {unreadCount > 0 && (
-                  <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-red-500" />
+                  <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-white ring-2 ring-[#111216]" />
                 )}
               </button>
 
@@ -1582,6 +1729,7 @@ export default function App() {
               entities={entities}
               onOpenEvent={(ev) => handleOpenEventDetail(ev)}
               onOpenEntity={(ent) => setActiveEntityModal(ent)}
+              onBack={() => setCurrentNav('home')}
             />
           </div>
         ) : currentNav === 'saved' || currentNav === 'history' ? (
@@ -1615,7 +1763,7 @@ export default function App() {
               >
                 <Bell className="w-4 h-4" />
                 {unreadCount > 0 && (
-                  <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-red-500" />
+                  <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-white ring-2 ring-[#111216]" />
                 )}
               </button>
 
@@ -1650,7 +1798,7 @@ export default function App() {
               >
                 <Bell className="w-4 h-4" />
                 {unreadCount > 0 && (
-                  <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-red-500" />
+                  <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-white ring-2 ring-[#111216]" />
                 )}
               </button>
 
@@ -1708,7 +1856,7 @@ export default function App() {
         ) : (
           /* ================= HOME / FEED PRINCIPAL ================= */
           <div className="flex-1 flex flex-col lg:flex-row w-full">
-            <main className="flex-1 max-w-2xl w-full mx-auto px-4 sm:px-6 pt-4 pb-36 sm:pb-36 md:pb-12 space-y-4">
+            <main className="flex-1 max-w-2xl w-full mx-auto px-3.5 sm:px-6 pt-3 pb-36 sm:pb-36 md:pb-12 space-y-4 overflow-x-hidden">
               
               {/* Desktop Search & Top Actions */}
               <div className="hidden md:flex items-center justify-between gap-4 pb-1">
@@ -1733,7 +1881,7 @@ export default function App() {
                   >
                     <Bell className="w-4 h-4" />
                     {unreadCount > 0 && (
-                      <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-red-500" />
+                      <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-white ring-2 ring-[#111216]" />
                     )}
                   </button>
 
@@ -1750,86 +1898,57 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Subtabs: "Para você", "Seguindo", "Em alta" com transições Framer Motion */}
-              <div className="flex items-center space-x-2 pb-1 relative">
-                {[
-                  { id: 'for-you', label: t('feed.forYou') },
-                  { id: 'following', label: t('feed.following') },
-                  { id: 'trending', label: t('feed.trending') }
-                ].map((tab) => {
-                  const isActive = activeTab === tab.id;
-                  return (
-                    <motion.button
-                      key={tab.id}
-                      onClick={() => setActiveTab(tab.id as any)}
-                      whileTap={{ scale: 0.96 }}
-                      className={`relative px-3.5 sm:px-4 py-1.5 rounded-full text-xs font-semibold transition-colors duration-150 cursor-pointer ${
-                        isActive
-                          ? 'text-black font-bold'
-                          : 'text-zinc-400 hover:text-white bg-[#111216] border border-[#1e2026] hover:border-zinc-700'
-                      }`}
-                    >
-                      {isActive && (
-                        <motion.div
-                          layoutId="activeFeedSubtabIndicator"
-                          className="absolute inset-0 bg-white rounded-full shadow-sm z-0"
-                          transition={{ type: 'spring', stiffness: 500, damping: 35 }}
-                        />
-                      )}
-                      <span className="relative z-10 select-none">{tab.label}</span>
-                    </motion.button>
-                  );
-                })}
-              </div>
-
-              {/* Sistema de Filtro por Categorias (Seleção única: Todas, Tech, Política, Negócios, Ciência) */}
-              <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-1">
-                {[
-                  { id: 'all', label: 'Todas' },
-                  { id: 'tech', label: 'Tecnologia & IA' },
-                  { id: 'politics', label: 'Política' },
-                  { id: 'business', label: 'Negócios & Economia' },
-                  { id: 'science', label: 'Ciência' }
-                ].map((cat) => {
-                  const isSelected = homeCategoryFilter === cat.id;
-                  return (
-                    <button
-                      key={cat.id}
-                      onClick={() => setHomeCategoryFilter(cat.id as any)}
-                      className={`px-3 py-1.5 rounded-full text-xs font-medium whitespace-nowrap transition cursor-pointer active:scale-95 ${
-                        isSelected
-                          ? 'bg-white text-black font-bold shadow-sm'
-                          : 'bg-[#111216] text-zinc-400 hover:text-white border border-[#1e2026] hover:border-zinc-700'
-                      }`}
-                    >
-                      {cat.label}
-                    </button>
-                  );
-                })}
-              </div>
-
-              {/* Status do Filtro do Onboarding para a aba "Para você" */}
-              {activeTab === 'for-you' && (
-                <div className="flex items-center justify-between px-3.5 py-2 rounded-xl bg-[#0e1015] border border-zinc-800/80 text-xs">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0 animate-pulse" />
-                    <span className="text-zinc-300 text-[11px] truncate">
-                      Feed filtrado por seus temas ({userInterests.map((id) => THEME_LABEL_MAP[id] || id).slice(0, 3).join(', ')}{userInterests.length > 3 ? ` +${userInterests.length - 3}` : ''})
-                    </span>
-                  </div>
-                  <button
-                    onClick={() => setIsRecalibrateModalOpen(true)}
-                    className="text-[11px] font-semibold text-white hover:text-zinc-300 underline shrink-0 ml-2 cursor-pointer"
-                  >
-                    Recalibrar
-                  </button>
+              {/* Linha Principal Unificada: Subtabs amplas ("Para você", "Seguindo", "Em alta") + 3 Barrinhas à Direita */}
+              <div className="flex items-center justify-between gap-2 pb-1 pt-0.5 w-full">
+                <div className="flex items-center gap-2 sm:gap-2.5">
+                  {[
+                    { id: 'for-you', label: t('feed.forYou') },
+                    { id: 'following', label: t('feed.following') },
+                    { id: 'trending', label: t('feed.trending') }
+                  ].map((tab) => {
+                    const isActive = activeTab === tab.id;
+                    return (
+                      <motion.button
+                        key={tab.id}
+                        onClick={() => setActiveTab(tab.id as any)}
+                        whileTap={{ scale: 0.96 }}
+                        className={`relative px-4 sm:px-5 py-2 sm:py-2.5 rounded-full text-xs sm:text-sm font-semibold transition-colors duration-150 cursor-pointer min-h-[42px] flex items-center justify-center ${
+                          isActive
+                            ? 'text-black font-bold'
+                            : 'text-zinc-400 hover:text-white bg-[#111216] border border-[#1e2026] hover:border-zinc-700'
+                        }`}
+                      >
+                        {isActive && (
+                          <motion.div
+                            layoutId="activeFeedSubtabIndicator"
+                            className="absolute inset-0 bg-white rounded-full shadow-sm z-0"
+                            transition={{ type: 'spring', stiffness: 500, damping: 35 }}
+                          />
+                        )}
+                        <span className="relative z-10 select-none">{tab.label}</span>
+                      </motion.button>
+                    );
+                  })}
                 </div>
-              )}
+
+                {/* Botão das 3 Barrinhas (Temas / Gêneros) posicionado no local exato do X indicado pelo usuário */}
+                <button
+                  onClick={() => setIsThemeDrawerOpen(true)}
+                  className="relative p-2.5 rounded-full bg-[#111216] hover:bg-zinc-800 border border-[#1e2026] hover:border-zinc-700 text-white transition cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center shrink-0 active:scale-95"
+                  title="Selecionar temas e gêneros de notícias"
+                  aria-label="Abrir seleção de temas"
+                >
+                  <Menu className="w-5 h-5 text-white" />
+                  {homeCategoryFilter !== 'all' && (
+                    <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-white ring-2 ring-[#08090b]" />
+                  )}
+                </button>
+              </div>
 
               {/* Banner de separação entre idioma da interface e idioma original das notícias */}
               {language !== 'pt-BR' && (
-                <div className="flex items-center gap-2.5 px-3.5 py-2 rounded-xl bg-zinc-900/80 border border-zinc-800 text-[11px] text-zinc-300">
-                  <Globe2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                <div className="flex items-center gap-2.5 px-3.5 py-2 rounded-xl bg-zinc-900 border border-zinc-800 text-[11px] text-zinc-300">
+                  <Globe2 className="w-3.5 h-3.5 text-zinc-300 shrink-0" />
                   <span>{t('common.newsNotice')}</span>
                 </div>
               )}
@@ -2018,14 +2137,14 @@ export default function App() {
                           }`}
                           title={`Atualizar feed de notícias (${dailyRefreshRemaining} de 5 atualizações restantes hoje)`}
                         >
-                          <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
+                          <span className="w-2.5 h-2.5 rounded-full bg-white animate-pulse" />
                           <span className="font-mono">
                             {lastSyncTime ? `Ao vivo (${lastSyncTime})` : 'Ao vivo'}
                           </span>
                           <span
                             className={`text-xs font-mono px-2 py-0.5 rounded-lg ${
                               dailyRefreshRemaining === 0
-                                ? 'bg-amber-500/20 text-amber-300 font-bold'
+                                ? 'bg-zinc-800 text-zinc-300 font-bold'
                                 : 'bg-zinc-800 text-zinc-300'
                             }`}
                           >
@@ -2033,7 +2152,7 @@ export default function App() {
                           </span>
                           <RefreshCw
                             className={`w-4 h-4 ${
-                              isFeedRefreshing ? 'animate-spin text-emerald-400' : 'text-zinc-400'
+                              isFeedRefreshing ? 'animate-spin text-white' : 'text-zinc-400'
                             }`}
                           />
                           <span>Atualizar feed de notícias</span>
@@ -2054,8 +2173,8 @@ export default function App() {
                       {searchQuery.trim().length > 0 ? (
                         isSearchingExternalApis ? (
                           <div className="p-8 rounded-2xl bg-[#0e1117] border border-[#1e2330] text-center space-y-3 animate-fade-in my-6">
-                            <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center justify-center mx-auto">
-                              <RefreshCw className="w-5 h-5 animate-spin text-emerald-400" />
+                            <div className="w-12 h-12 rounded-2xl bg-zinc-900 border border-zinc-800 text-white flex items-center justify-center mx-auto">
+                              <RefreshCw className="w-5 h-5 animate-spin text-white" />
                             </div>
                             <div>
                               <h3 className="text-sm font-bold text-white">
@@ -2206,21 +2325,21 @@ export default function App() {
                   <span>•</span>
                   <button
                     onClick={() => handleOpenLegal('lgpd')}
-                    className="hover:text-zinc-300 transition cursor-pointer text-emerald-400/90 hover:text-emerald-300"
+                    className="hover:text-white transition cursor-pointer text-zinc-400"
                   >
                     Privacidade & LGPD
                   </button>
                   <span>•</span>
                   <button
                     onClick={() => handleOpenLegal('cdc')}
-                    className="hover:text-zinc-300 transition cursor-pointer"
+                    className="hover:text-white transition cursor-pointer text-zinc-400"
                   >
                     CDC & Pix
                   </button>
                   <span>•</span>
                   <button
                     onClick={() => handleOpenLegal('dpo')}
-                    className="hover:text-zinc-300 transition cursor-pointer text-blue-400/90 hover:text-blue-300"
+                    className="hover:text-white transition cursor-pointer text-zinc-400"
                   >
                     Canal DPO
                   </button>
@@ -2302,7 +2421,7 @@ export default function App() {
         >
           <Bell className="w-4 h-4 sm:w-5 sm:h-5 mb-0.5" />
           {unreadCount > 0 && (
-            <span className="absolute top-2 right-2.5 w-2 h-2 rounded-full bg-red-500 ring-2 ring-[#08090b]" />
+            <span className="absolute top-2 right-2.5 w-2 h-2 rounded-full bg-white ring-2 ring-[#08090b]" />
           )}
           <span>{t('nav.notifications')}</span>
         </button>
@@ -2427,7 +2546,7 @@ export default function App() {
       {/* ================= 11. INDICADOR VISUAL DO ATALHO G ================= */}
       {pendingGSequence && (
         <div className="fixed bottom-20 sm:bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-full bg-zinc-900/95 border border-zinc-700 text-white text-xs font-medium shadow-2xl backdrop-blur-md flex items-center space-x-2 animate-pulse">
-          <Command className="w-3.5 h-3.5 text-emerald-400" />
+          <Command className="w-3.5 h-3.5 text-zinc-300" />
           <span>Atalho G +: <strong>H</strong> Início · <strong>E</strong> Explorar · <strong>F</strong> Seguindo · <strong>B</strong> Briefings · <strong>N</strong> Notif. · <strong>P</strong> Perfil</span>
         </div>
       )}
@@ -2442,6 +2561,118 @@ export default function App() {
       <CookieConsentBanner
         onOpenLegal={handleOpenLegal}
       />
+
+      {/* ================= 13. GAVETA LATERAL MINIMALISTA DE TEMAS (3 BARRINHAS) ================= */}
+      <AnimatePresence>
+        {isThemeDrawerOpen && (
+          <div className="fixed inset-0 z-50 flex">
+            {/* Backdrop escurecido */}
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsThemeDrawerOpen(false)}
+              className="fixed inset-0 bg-black/85 backdrop-blur-sm cursor-pointer"
+            />
+
+            {/* Painel lateral deslizante em preto e branco */}
+            <motion.div
+              initial={{ x: '-100%' }}
+              animate={{ x: 0 }}
+              exit={{ x: '-100%' }}
+              transition={{ type: 'spring', damping: 28, stiffness: 300 }}
+              className="relative w-full max-w-xs sm:max-w-sm h-full bg-[#000000] border-r border-zinc-800 flex flex-col z-10 shadow-2xl overflow-hidden"
+            >
+              {/* Topo da Gaveta */}
+              <div className="p-4 sm:p-5 border-b border-zinc-800 flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <span className="p-2 rounded-xl bg-zinc-900 border border-zinc-800 text-white">
+                    <SlidersHorizontal className="w-4 h-4" />
+                  </span>
+                  <div>
+                    <h3 className="text-sm font-bold text-white tracking-tight">Filtrar por Tema</h3>
+                    <p className="text-[11px] text-zinc-400">Selecione a cobertura editorial</p>
+                  </div>
+                </div>
+
+                <button
+                  onClick={() => setIsThemeDrawerOpen(false)}
+                  className="p-2 text-zinc-400 hover:text-white rounded-lg hover:bg-zinc-900 transition cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center"
+                  aria-label="Fechar gaveta de temas"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Lista de Temas com Touch Target >= 48px para Samsung Galaxy A35 */}
+              <div className="flex-1 overflow-y-auto p-3 sm:p-4 space-y-1.5 no-scrollbar">
+                {AVAILABLE_THEMES.map((theme) => {
+                  const isSelected = homeCategoryFilter === theme.id;
+                  return (
+                    <button
+                      key={theme.id}
+                      onClick={() => {
+                        setHomeCategoryFilter(theme.id);
+                        setIsThemeDrawerOpen(false);
+                        window.scrollTo({ top: 0, behavior: 'smooth' });
+                      }}
+                      className={`w-full min-h-[48px] px-4 py-3 rounded-xl text-left text-xs sm:text-sm font-medium flex items-center justify-between transition cursor-pointer active:scale-[0.98] ${
+                        isSelected
+                          ? 'bg-white text-black font-bold shadow-md'
+                          : 'text-zinc-300 hover:text-white hover:bg-zinc-900 border border-transparent hover:border-zinc-800'
+                      }`}
+                    >
+                      <span>{theme.label}</span>
+                      {isSelected ? (
+                        <Check className="w-4 h-4 text-black shrink-0" />
+                      ) : (
+                        <span className="w-1.5 h-1.5 rounded-full bg-zinc-700" />
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Opção para personalizar os gêneros do feed "Para você" */}
+              <div className="px-3 sm:px-4 py-2 border-t border-zinc-800/80 bg-zinc-950/60">
+                <button
+                  onClick={() => {
+                    setIsThemeDrawerOpen(false);
+                    setIsRecalibrateModalOpen(true);
+                  }}
+                  className="w-full min-h-[44px] px-3.5 py-2.5 rounded-xl bg-zinc-900 border border-zinc-800 hover:border-zinc-700 text-xs text-zinc-300 hover:text-white flex items-center justify-between transition cursor-pointer active:scale-[0.98]"
+                >
+                  <div className="flex items-center gap-2">
+                    <SlidersHorizontal className="w-3.5 h-3.5 text-zinc-400" />
+                    <span>Personalizar meus gêneros (Para você)</span>
+                  </div>
+                  <ChevronDown className="w-4 h-4 text-zinc-500 -rotate-90" />
+                </button>
+              </div>
+
+              {/* Rodapé da Gaveta */}
+              <div className="p-4 border-t border-zinc-800 bg-zinc-950 flex items-center justify-between gap-2">
+                <button
+                  onClick={() => {
+                    setHomeCategoryFilter('all');
+                    setIsThemeDrawerOpen(false);
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                  }}
+                  className="flex-1 py-2.5 px-3 rounded-xl border border-zinc-700 text-xs text-zinc-300 hover:text-white hover:bg-zinc-900 transition font-medium min-h-[44px]"
+                >
+                  Mostrar Todas
+                </button>
+                <button
+                  onClick={() => setIsThemeDrawerOpen(false)}
+                  className="py-2.5 px-4 rounded-xl bg-white text-black text-xs font-bold hover:bg-zinc-200 transition min-h-[44px]"
+                >
+                  Concluir
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
     </div>
   );
