@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
 import { UserSubscription, SubscriptionStatus } from '../types/sinal';
 import {
   X,
@@ -58,6 +59,7 @@ export const BillingModal: React.FC<BillingModalProps> = ({
   const [zynCharge, setZynCharge] = useState<ZynPayCharge | null>(null);
   const [loadingCharge, setLoadingCharge] = useState(false);
   const [chargeError, setChargeError] = useState<string | null>(null);
+  const [showPixSuccessAnimation, setShowPixSuccessAnimation] = useState(false);
 
   // Invoices History
   const [invoices, setInvoices] = useState<InvoiceItem[]>([
@@ -129,21 +131,69 @@ export const BillingModal: React.FC<BillingModalProps> = ({
     }
   }, [isOpen, paymentStatus, zynCharge, generateZynPayCharge]);
 
-  // Hook de polling no BillingModal que consulta a cada 5 segundos o status da cobrança Pix pendente até que seja alterado para 'PAID'
+  // Callback central de sucesso quando o pagamento Pix é liquidado
+  const handlePixPaymentApproved = useCallback((detail?: any) => {
+    setPaymentStatus('approved');
+    setShowPixSuccessAnimation(true);
+    setInvoices((prev) =>
+      prev.map((inv, idx) =>
+        idx === 0 ? { ...inv, status: 'PAGO' } : inv
+      )
+    );
+    onUpgradeApproved();
+    showToast('Pagamento Pix confirmado via SSE! FatosBR Pro ativo.');
+  }, [onUpgradeApproved]);
+
+  // Listener de Server-Sent Events (SSE) dedicado para confirmação imediata
+  useEffect(() => {
+    if (!isOpen || paymentStatus === 'approved') return;
+
+    // 1. Ouvir via canal SSE oficial do zynpayService
+    const unsubscribe = zynpayService.onPaymentConfirmed((payload) => {
+      if (!zynCharge?.id || !payload?.chargeId || payload.chargeId === zynCharge.id) {
+        handlePixPaymentApproved(payload);
+      }
+    });
+
+    // 2. Conexão Server-Sent Events (SSE) direta e resiliente em /api/zynpay/events
+    let sse: EventSource | null = null;
+    try {
+      if (typeof window !== 'undefined' && 'EventSource' in window) {
+        sse = new EventSource('/api/zynpay/events');
+        sse.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'PAYMENT_CONFIRMED' || data.event === 'charge.paid') {
+              handlePixPaymentApproved(data);
+            }
+          } catch {}
+        };
+      }
+    } catch (e) {
+      console.warn('[BillingModal] SSE fallback:', e);
+    }
+
+    // 3. Ouvir evento global disparado por webhooks
+    const handleGlobalSync = (e: any) => {
+      handlePixPaymentApproved(e?.detail);
+    };
+    window.addEventListener('fatosbr_subscription_updated', handleGlobalSync);
+
+    return () => {
+      unsubscribe();
+      if (sse) sse.close();
+      window.removeEventListener('fatosbr_subscription_updated', handleGlobalSync);
+    };
+  }, [isOpen, paymentStatus, zynCharge?.id, handlePixPaymentApproved]);
+
+  // Polling complementar para garantir 100% de redundância em conexões com proxy restrito
   usePixPolling({
     chargeId: zynCharge?.id,
     enabled: isOpen && paymentStatus !== 'approved' && Boolean(zynCharge?.id),
     intervalMs: 5000,
     onSuccess: (paidCharge) => {
-      setPaymentStatus('approved');
       setZynCharge(paidCharge);
-      setInvoices((prev) =>
-        prev.map((inv, idx) =>
-          idx === 0 ? { ...inv, status: 'PAGO' } : inv
-        )
-      );
-      onUpgradeApproved();
-      showToast('Pagamento Pix confirmado pela ZynPay! Assinatura Pro ativa.');
+      handlePixPaymentApproved(paidCharge);
     }
   });
 
@@ -183,15 +233,8 @@ export const BillingModal: React.FC<BillingModalProps> = ({
 
     setTimeout(() => {
       setSimulatingWebhook(false);
-      setPaymentStatus('approved');
-      setInvoices((prev) =>
-        prev.map((inv, idx) =>
-          idx === 0 ? { ...inv, status: 'PAGO' } : inv
-        )
-      );
-      onUpgradeApproved();
-      showToast('Pagamento confirmado via Webhook ZynPay. FatosBR Pro ativo!');
-    }, 1200);
+      handlePixPaymentApproved({ chargeId, amount: 2990 });
+    }, 1000);
   };
 
   // Status Badge Label
@@ -526,6 +569,13 @@ export const BillingModal: React.FC<BillingModalProps> = ({
                   </div>
 
                   {paymentStatus !== 'approved' && (
+                    <div className="flex items-center gap-2 p-2 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-[11px] text-emerald-300 font-mono">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping shrink-0" />
+                      <span>SSE Ativo: Aguardando sinal de liquidação do Pix...</span>
+                    </div>
+                  )}
+
+                  {paymentStatus !== 'approved' && (
                     <button
                       onClick={handleSimulateWebhook}
                       disabled={simulatingWebhook}
@@ -659,6 +709,101 @@ export const BillingModal: React.FC<BillingModalProps> = ({
           </button>
         </footer>
       </div>
+
+      {/* ================= MODAL DE CONFIRMAÇÃO ANIMADA (SSE PIX CONFIRMADO) ================= */}
+      <AnimatePresence>
+        {showPixSuccessAnimation && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/90 backdrop-blur-md"
+          >
+            <motion.div
+              initial={{ scale: 0.85, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              transition={{ type: 'spring', damping: 20, stiffness: 300 }}
+              className="relative w-full max-w-md p-6 sm:p-8 rounded-3xl bg-[#0e1014] border border-zinc-700/80 text-center space-y-5 shadow-2xl overflow-hidden"
+            >
+              {/* Círculo do Check com animação de pulso e escala */}
+              <div className="relative mx-auto w-20 h-20 flex items-center justify-center">
+                <motion.div
+                  initial={{ scale: 0 }}
+                  animate={{ scale: [1, 1.25, 1] }}
+                  transition={{ duration: 1.5, repeat: Infinity, ease: 'easeInOut' }}
+                  className="absolute inset-0 rounded-full bg-emerald-500/20"
+                />
+                <motion.div
+                  initial={{ scale: 0 }}
+                  animate={{ scale: 1 }}
+                  transition={{ type: 'spring', damping: 12, stiffness: 200, delay: 0.1 }}
+                  className="w-16 h-16 rounded-full bg-emerald-500 flex items-center justify-center text-black shadow-xl shadow-emerald-500/30"
+                >
+                  <Check className="w-9 h-9 stroke-[3]" />
+                </motion.div>
+              </div>
+
+              <div className="space-y-1.5">
+                <motion.h3
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: 0.2 }}
+                  className="text-xl sm:text-2xl font-bold text-white tracking-tight"
+                >
+                  Pagamento Pix Confirmado!
+                </motion.h3>
+                <motion.p
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: 0.3 }}
+                  className="text-xs sm:text-sm text-zinc-300"
+                >
+                  Sua transação foi processada pelo Banco Central e o plano <strong className="text-white">FatosBR Pro</strong> foi ativado com sucesso.
+                </motion.p>
+              </div>
+
+              {/* Detalhes da Transação */}
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.4 }}
+                className="p-3.5 rounded-2xl bg-zinc-950 border border-zinc-800 text-left font-mono text-xs space-y-2 text-zinc-300"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-zinc-500">Valor Pago:</span>
+                  <span className="text-emerald-400 font-bold">R$ 29,90</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-zinc-500">Forma de Pagamento:</span>
+                  <span className="text-white">PIX Instantâneo</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-zinc-500">Gateway:</span>
+                  <span className="text-zinc-300">ZynPay Oficial</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-zinc-500">Status:</span>
+                  <span className="text-emerald-400 font-bold">● APROVADO / PAGO</span>
+                </div>
+              </motion.div>
+
+              <motion.button
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.5 }}
+                onClick={() => {
+                  setShowPixSuccessAnimation(false);
+                  onClose();
+                }}
+                className="w-full py-3.5 px-4 rounded-xl bg-white hover:bg-zinc-200 text-black font-bold text-sm transition cursor-pointer shadow-lg active:scale-[0.98]"
+              >
+                Continuar e Explorar o FatosBR Pro
+              </motion.button>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };

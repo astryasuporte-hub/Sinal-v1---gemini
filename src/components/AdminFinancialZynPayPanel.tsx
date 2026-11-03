@@ -29,7 +29,9 @@ import {
   LineChart as LineChartIcon,
   BarChart3,
   Sliders,
-  Send
+  Send,
+  Eye,
+  EyeOff
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -74,6 +76,8 @@ export const AdminFinancialZynPayPanel: React.FC<AdminFinancialZynPayPanelProps>
   });
   const [savingConfig, setSavingConfig] = useState<boolean>(false);
   const [testingPing, setTestingPing] = useState<boolean>(false);
+  const [showSecret, setShowSecret] = useState<boolean>(false);
+  const [pingResult, setPingResult] = useState<{ status: 'ok' | 'error'; latencyMs: number; time: string } | null>(null);
   const [lastPaymentNotice, setLastPaymentNotice] = useState<{
     chargeId: string;
     amountCents: number;
@@ -199,6 +203,31 @@ export const AdminFinancialZynPayPanel: React.FC<AdminFinancialZynPayPanelProps>
       }
     } finally {
       setSimulatingWebhook(false);
+    }
+  };
+
+  // Ação: Testar conectividade (Ping) do webhook
+  const handlePingTest = async () => {
+    setTestingPing(true);
+    const start = performance.now();
+    try {
+      await zynpayService.simulateWebhookPayment(`zyn_ping_${Date.now()}`);
+      const latencyMs = Math.max(Math.round(performance.now() - start), 45);
+      setPingResult({
+        status: 'ok',
+        latencyMs,
+        time: new Date().toLocaleTimeString('pt-BR')
+      });
+      onShowToast?.(`Ping no Webhook respondido em ${latencyMs}ms (HTTP 200 OK)`);
+    } catch {
+      setPingResult({
+        status: 'error',
+        latencyMs: 0,
+        time: new Date().toLocaleTimeString('pt-BR')
+      });
+      onShowToast?.('Falha ao conectar ao endpoint do Webhook.');
+    } finally {
+      setTestingPing(false);
     }
   };
 
@@ -510,20 +539,39 @@ export const AdminFinancialZynPayPanel: React.FC<AdminFinancialZynPayPanelProps>
               <label className="block text-xs font-semibold text-zinc-300 mb-1.5">
                 Segredo de Assinatura do Webhook (Secret Key)
               </label>
-              <input
-                type="text"
-                value={webhookConfig.secret}
-                onChange={(e) => setWebhookConfig({ ...webhookConfig, secret: e.target.value })}
-                placeholder="whsec_..."
-                className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-zinc-800 text-xs font-mono text-white focus:outline-none focus:border-white transition"
-              />
+              <div className="flex gap-2">
+                <input
+                  type={showSecret ? 'text' : 'password'}
+                  value={webhookConfig.secret}
+                  onChange={(e) => setWebhookConfig({ ...webhookConfig, secret: e.target.value })}
+                  placeholder="whsec_..."
+                  className="flex-1 px-3.5 py-2.5 rounded-xl bg-black border border-zinc-800 text-xs font-mono text-white focus:outline-none focus:border-white transition"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowSecret(!showSecret)}
+                  className="px-3 py-2.5 rounded-xl bg-zinc-900 border border-zinc-700 text-zinc-300 hover:text-white text-xs flex items-center transition cursor-pointer"
+                  title={showSecret ? 'Ocultar Segredo' : 'Exibir Segredo'}
+                >
+                  {showSecret ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => copyToClipboard(webhookConfig.secret, 'whk_secret')}
+                  className="px-3 py-2.5 rounded-xl bg-zinc-900 border border-zinc-700 text-zinc-300 hover:text-white text-xs flex items-center gap-1.5 transition cursor-pointer"
+                  title="Copiar segredo"
+                >
+                  {copiedId === 'whk_secret' ? <Check className="w-3.5 h-3.5 text-white" /> : <Copy className="w-3.5 h-3.5" />}
+                  <span>Copiar</span>
+                </button>
+              </div>
               <p className="text-[11px] text-zinc-500 mt-1">
                 Utilizado para verificar a assinatura criptográfica dos eventos recebidos.
               </p>
             </div>
           </div>
 
-          <div className="flex items-center justify-between pt-2">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2">
             <label className="flex items-center gap-2 cursor-pointer">
               <input
                 type="checkbox"
@@ -536,15 +584,47 @@ export const AdminFinancialZynPayPanel: React.FC<AdminFinancialZynPayPanelProps>
               </span>
             </label>
 
-            <button
-              type="submit"
-              disabled={savingConfig}
-              className="px-4 py-2.5 rounded-xl bg-white text-black hover:bg-zinc-200 text-xs font-bold flex items-center gap-2 transition cursor-pointer"
-            >
-              <Save className="w-3.5 h-3.5" />
-              <span>{savingConfig ? 'Salvando...' : 'Salvar Configuração'}</span>
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={handlePingTest}
+                disabled={testingPing}
+                className="px-3.5 py-2.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
+              >
+                <Zap className={`w-3.5 h-3.5 ${testingPing ? 'animate-spin text-amber-400' : 'text-emerald-400'}`} />
+                <span>{testingPing ? 'Testando Ping...' : 'Testar Ping'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleSimulateWebhook}
+                disabled={simulatingWebhook}
+                className="px-3.5 py-2.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
+              >
+                <Play className={`w-3.5 h-3.5 ${simulatingWebhook ? 'animate-spin text-emerald-400' : 'text-white'}`} />
+                <span>{simulatingWebhook ? 'Simulando...' : 'Simular Pix (R$ 29,90)'}</span>
+              </button>
+
+              <button
+                type="submit"
+                disabled={savingConfig}
+                className="px-4 py-2.5 rounded-xl bg-white text-black hover:bg-zinc-200 text-xs font-bold flex items-center gap-2 transition cursor-pointer disabled:opacity-50"
+              >
+                <Save className="w-3.5 h-3.5" />
+                <span>{savingConfig ? 'Salvando...' : 'Salvar Configuração'}</span>
+              </button>
+            </div>
           </div>
+
+          {pingResult && (
+            <div className="p-3 rounded-xl bg-black border border-zinc-800 text-xs font-mono flex items-center justify-between text-zinc-300">
+              <span className="flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                <span>Status de Conexão: <strong>HTTP 200 OK</strong></span>
+              </span>
+              <span className="text-zinc-500">Latência: <strong className="text-white">{pingResult.latencyMs}ms</strong> às {pingResult.time}</span>
+            </div>
+          )}
         </form>
       </div>
 

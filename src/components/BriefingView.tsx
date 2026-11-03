@@ -75,6 +75,26 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
     setTimeout(() => setToastMsg(null), 3500);
   };
 
+  // Pré-carregamento imediato das artes oficiais de briefing para garantir exibição instantânea (0ms)
+  useEffect(() => {
+    const pre1 = new Image();
+    pre1.src = MORNING_IMG;
+    const pre2 = new Image();
+    pre2.src = EVENING_IMG;
+
+    try {
+      const saved = localStorage.getItem('fatosbr_briefing_prefs');
+      if (saved) {
+        const p = JSON.parse(saved);
+        if (p.emailAddress) setEmailAddress(p.emailAddress);
+        if (p.morningTime) setMorningTime(p.morningTime);
+        if (p.eveningTime) setEveningTime(p.eveningTime);
+        if (typeof p.morningEnabled === 'boolean') setMorningEnabled(p.morningEnabled);
+        if (typeof p.eveningEnabled === 'boolean') setEveningEnabled(p.eveningEnabled);
+      }
+    } catch {}
+  }, []);
+
   // Base estruturada de Briefings
   const briefingsData: BriefingItem[] = useMemo(() => [
     {

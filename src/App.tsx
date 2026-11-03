@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   INITIAL_ENTITIES,
   INITIAL_TOPICS,
@@ -15,6 +15,7 @@ import {
 } from './data/mockData';
 import { Event, Entity, Topic, Source, UserSubscription, SinalNotification } from './types/sinal';
 import { EventCard } from './components/EventCard';
+import { FeaturedTopCarousel } from './components/FeaturedTopCarousel';
 import { EventDetailModal } from './components/EventDetailModal';
 import { EntityDetailModal } from './components/EntityDetailModal';
 import { ExploreView } from './components/ExploreView';
@@ -275,7 +276,6 @@ export default function App() {
   });
   const [currentUser, setCurrentUser] = useState<SupabaseUser | null>(null);
   const [, setAvatarSyncCounter] = useState<number>(0);
-  const [historyCheckToast, setHistoryCheckToast] = useState<{ id: string; title: string } | null>(null);
 
   // Interesses selecionados no Onboarding para filtrar estritamente o feed "Para você"
   const [userInterests, setUserInterests] = useState<string[]>(() => {
@@ -519,9 +519,15 @@ export default function App() {
     }
   };
 
-  // Coleta automática de notícias reais em tempo real ao carregar o Início
+  // Coleta automática de notícias reais em tempo real ao carregar o Início + Pré-carregamento de Briefings
   useEffect(() => {
     loadRealTimeNews(false);
+
+    // Pré-carregamento imediato em segundo plano para abertura instantânea da aba de Briefings
+    const b1 = new Image();
+    b1.src = '/assets/aistudio/Amanhecer_sobre_a_cidade__1__638f4414.png';
+    const b2 = new Image();
+    b2.src = '/assets/aistudio/Horizonte_urbano_ao_anoitecer__2__4a1dd254.png';
   }, []);
 
   // Listener Global de Atalhos de Teclado (G+H, G+E, G+F, G+B, G+N, G+P, G+S, R, T, ?)
@@ -885,20 +891,11 @@ export default function App() {
     }
   }, [isSearchingExternalApis, savedEventIds]);
 
-  // Handler para abrir detalhe do evento e registrar no histórico real
+  // Handler para abrir detalhe do evento e registrar no histórico real silenciosamente
   const handleOpenEventDetail = (event: Event) => {
     setActiveEventModal(event);
     const now = Date.now();
     const isoString = new Date(now).toISOString();
-
-    // Feedback visual animado de conclusão (check) ao adicionar ao histórico / marcar como lido
-    setHistoryCheckToast({
-      id: event.id,
-      title: event.title
-    });
-    setTimeout(() => {
-      setHistoryCheckToast((prev) => (prev?.id === event.id ? null : prev));
-    }, 3500);
 
     setHistoryItems((prev) => {
       // Reabertura: remove ocorrência anterior se já existia para reposicioná-la no topo com novo horário
@@ -1048,6 +1045,28 @@ export default function App() {
       if (homeCategoryFilter === 'all') return true;
       return eventMatchesAnyUserTheme(e.category, e.title, e.summary, [homeCategoryFilter]);
     });
+
+  // Manchetes e acontecimentos em destaque para o carrossel do topo do feed Home
+  const topFeaturedEvents = useMemo(() => {
+    // Quando houver pesquisa ativa, não exibe o carrossel para focar nos resultados da busca
+    if (searchQuery.trim().length > 0 || visibleEvents.length === 0) return [];
+    // Prioriza eventos com imagem de capa nítida para o banner de alto impacto
+    const withImages = visibleEvents.filter((e) => Boolean(e.imageUrl));
+    if (withImages.length >= 2) {
+      return withImages.slice(0, 4);
+    }
+    return visibleEvents.slice(0, 3);
+  }, [visibleEvents, searchQuery]);
+
+  const featuredEventIds = useMemo(() => {
+    return new Set(topFeaturedEvents.map((e) => e.id));
+  }, [topFeaturedEvents]);
+
+  // Feed vertical padrão (remove os acontecimentos já promovidos para o carrossel de manchetes do topo)
+  const verticalFeedEvents = useMemo(() => {
+    if (topFeaturedEvents.length === 0) return visibleEvents;
+    return visibleEvents.filter((e) => !featuredEventIds.has(e.id));
+  }, [visibleEvents, topFeaturedEvents, featuredEventIds]);
 
   // Disparo automático nas APIs externas caso o termo pesquisado não exista no cache local
   useEffect(() => {
@@ -2085,6 +2104,15 @@ export default function App() {
                       transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
                       className="space-y-4"
                     >
+                      {/* Carrossel Superior de Manchetes em Destaque (movendo-as para fora do feed vertical) */}
+                      {topFeaturedEvents.length > 0 && (
+                        <FeaturedTopCarousel
+                          events={topFeaturedEvents}
+                          onOpenDetail={(ev) => handleOpenEventDetail(ev)}
+                          onToggleSave={handleToggleSave}
+                        />
+                      )}
+
                       <motion.div
                         variants={{
                           hidden: { opacity: 0 },
@@ -2100,7 +2128,7 @@ export default function App() {
                         animate="show"
                         className="space-y-4"
                       >
-                        {visibleEvents.map((event, index) => (
+                        {verticalFeedEvents.map((event, index) => (
                           <motion.div
                             key={`${event.id}-${activeTab}-${homeCategoryFilter}`}
                             variants={{

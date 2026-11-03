@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  * 
  * Central de Conformidade Legal, Termos & LGPD (FatosBR)
- * - 100% Monocromático (Preto, Cinzas e Branco)
- * - Interface Fullscreen Otimizada para Mobile (Samsung Galaxy A35 e smartphones)
+ * - 100% Monocromático (Preto puro, Cinzas e Branco)
+ * - Visão dedicada e simplificada para Mobile com seções colapsáveis (Acordeões)
  * - Baseado na legislação brasileira oficial (ctresb/leis):
  *   - Lei nº 13.709/2018 (LGPD)
  *   - Lei nº 12.965/2014 (Marco Civil da Internet)
@@ -25,7 +25,13 @@ import {
   Copy,
   Check,
   Mail,
-  Clock
+  Clock,
+  ChevronDown,
+  ChevronUp,
+  Eye,
+  Trash2,
+  ShieldCheck,
+  Smartphone
 } from 'lucide-react';
 import {
   LEGAL_SECTIONS,
@@ -46,6 +52,24 @@ export const LegalCenterModal: React.FC<LegalCenterModalProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<'terms' | 'lgpd' | 'cdc' | 'owner-rights' | 'dpo'>(initialTab);
   const [copiedProtocol, setCopiedProtocol] = useState<string | null>(null);
+
+  // Modo de exibição: 'simplified' (resumo fácil com seções colapsáveis para mobile) vs 'full' (artigos jurídicos detalhados)
+  const [mobileViewMode, setMobileViewMode] = useState<'simplified' | 'full'>('simplified');
+
+  // Estado das seções colapsáveis no modo simplificado
+  const [openAccordions, setOpenAccordions] = useState<Record<string, boolean>>({
+    collected: true,
+    rights: true,
+    security: false,
+    dpoChannel: true
+  });
+
+  const toggleAccordion = (key: string) => {
+    setOpenAccordions((prev) => ({
+      ...prev,
+      [key]: !prev[key]
+    }));
+  };
 
   // Formulário do Encarregado (DPO)
   const [dpoName, setDpoName] = useState('');
@@ -112,7 +136,7 @@ export const LegalCenterModal: React.FC<LegalCenterModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex sm:items-center sm:justify-center bg-black/90 backdrop-blur-md p-0 sm:p-5 animate-fadeIn">
+    <div className="fixed inset-0 z-50 flex sm:items-center sm:justify-center bg-black/95 backdrop-blur-md p-0 sm:p-5 animate-fadeIn">
       {/* Container Responsivo: Tela cheia no Mobile (Samsung A35), Dialog no Desktop */}
       <div className="relative w-full h-full sm:h-auto sm:max-h-[92vh] sm:max-w-4xl bg-black border-0 sm:border sm:border-zinc-800 rounded-none sm:rounded-3xl shadow-2xl flex flex-col text-zinc-100 overflow-hidden">
         
@@ -132,7 +156,7 @@ export const LegalCenterModal: React.FC<LegalCenterModalProps> = ({
                 </span>
               </div>
               <p className="text-[11px] sm:text-xs text-zinc-400">
-                Garantias ao titular e segurança jurídica na plataforma.
+                Garantias ao titular e segurança jurídica na plataforma FatosBR.
               </p>
             </div>
           </div>
@@ -148,18 +172,6 @@ export const LegalCenterModal: React.FC<LegalCenterModalProps> = ({
 
         {/* ================= NAVEGAÇÃO POR ABAS SUPERIORES ================= */}
         <div className="flex items-center gap-1.5 px-3 sm:px-6 py-2.5 bg-black border-b border-zinc-800 overflow-x-auto no-scrollbar shrink-0">
-          <button
-            onClick={() => setActiveTab('terms')}
-            className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition cursor-pointer min-h-[40px] ${
-              activeTab === 'terms'
-                ? 'bg-white text-black font-bold shadow-md'
-                : 'text-zinc-400 hover:text-white bg-zinc-900 border border-zinc-800 hover:border-zinc-700'
-            }`}
-          >
-            <FileText className="w-3.5 h-3.5" />
-            <span>Termos de Uso</span>
-          </button>
-
           <button
             onClick={() => setActiveTab('lgpd')}
             className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition cursor-pointer min-h-[40px] ${
@@ -182,6 +194,18 @@ export const LegalCenterModal: React.FC<LegalCenterModalProps> = ({
           >
             <UserCheck className="w-3.5 h-3.5" />
             <span>Canal do Encarregado (DPO)</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('terms')}
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition cursor-pointer min-h-[40px] ${
+              activeTab === 'terms'
+                ? 'bg-white text-black font-bold shadow-md'
+                : 'text-zinc-400 hover:text-white bg-zinc-900 border border-zinc-800 hover:border-zinc-700'
+            }`}
+          >
+            <FileText className="w-3.5 h-3.5" />
+            <span>Termos de Uso</span>
           </button>
 
           <button
@@ -210,10 +234,303 @@ export const LegalCenterModal: React.FC<LegalCenterModalProps> = ({
         </div>
 
         {/* ================= CORPO COM SCROLL ================= */}
-        <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-5 no-scrollbar">
-          {activeTab !== 'dpo' && currentSection && (
+        <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4 no-scrollbar">
+
+          {/* ================= VISÃO ESPECÍFICA DE PRIVACIDADE & LGPD ================= */}
+          {activeTab === 'lgpd' && (
             <div className="space-y-4">
-              {/* Descrição do Módulo */}
+              {/* Barra de Seleção de Modo (Mobile / Resumo Rápido vs Texto Completo) */}
+              <div className="p-2 rounded-2xl bg-[#09090b] border border-zinc-800 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 p-1 bg-black rounded-xl border border-zinc-800 text-xs w-full sm:w-auto">
+                  <button
+                    onClick={() => setMobileViewMode('simplified')}
+                    className={`flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-3.5 py-1.5 rounded-lg font-semibold transition cursor-pointer min-h-[36px] ${
+                      mobileViewMode === 'simplified'
+                        ? 'bg-white text-black font-bold'
+                        : 'text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    <Smartphone className="w-3.5 h-3.5" />
+                    <span>Resumo Fácil (Mobile)</span>
+                  </button>
+
+                  <button
+                    onClick={() => setMobileViewMode('full')}
+                    className={`flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-3.5 py-1.5 rounded-lg font-semibold transition cursor-pointer min-h-[36px] ${
+                      mobileViewMode === 'full'
+                        ? 'bg-white text-black font-bold'
+                        : 'text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    <FileText className="w-3.5 h-3.5" />
+                    <span>Texto Legal da Lei</span>
+                  </button>
+                </div>
+
+                <span className="text-[10px] font-mono text-zinc-500 uppercase px-2 hidden md:inline-block">
+                  Conformidade ANPD • Lei 13.709
+                </span>
+              </div>
+
+              {/* MODO SIMPLIFICADO: SEÇÕES COLAPSÁVEIS (ACORDEÕES) */}
+              {mobileViewMode === 'simplified' ? (
+                <div className="space-y-3">
+                  {/* Card de Boas-Vindas & Transparência */}
+                  <div className="p-4 rounded-2xl bg-[#09090b] border border-zinc-800 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <ShieldCheck className="w-4 h-4 text-white" />
+                        <h3 className="text-xs sm:text-sm font-bold text-white">
+                          Compromisso de Privacidade FatosBR
+                        </h3>
+                      </div>
+                      <span className="text-[9px] font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 border border-zinc-700">
+                        100% SEGURO
+                      </span>
+                    </div>
+                    <p className="text-xs text-zinc-300 leading-relaxed">
+                      Sua privacidade é prioridade máxima. Não vendemos seus dados para anunciantes, não rastreamos navegação fora do app e você tem controle irrestrito para visualizar, corrigir ou excluir sua conta a qualquer momento.
+                    </p>
+                  </div>
+
+                  {/* Acordeão 1: O que coletamos de você? */}
+                  <div className="rounded-2xl bg-[#09090b] border border-zinc-800 overflow-hidden transition">
+                    <button
+                      onClick={() => toggleAccordion('collected')}
+                      className="w-full p-4 flex items-center justify-between text-left cursor-pointer hover:bg-zinc-900/50 transition min-h-[48px]"
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <Eye className="w-4 h-4 text-white shrink-0" />
+                        <div>
+                          <h4 className="text-xs sm:text-sm font-bold text-white">
+                            1. O que coletamos de você?
+                          </h4>
+                          <p className="text-[10px] sm:text-[11px] text-zinc-400">
+                            Apenas o estritamente necessário para o serviço de notícias.
+                          </p>
+                        </div>
+                      </div>
+                      {openAccordions.collected ? (
+                        <ChevronUp className="w-4 h-4 text-zinc-400" />
+                      ) : (
+                        <ChevronDown className="w-4 h-4 text-zinc-400" />
+                      )}
+                    </button>
+
+                    {openAccordions.collected && (
+                      <div className="p-4 pt-1 border-t border-zinc-800 space-y-2.5 text-xs text-zinc-300 bg-black/60">
+                        <div className="flex items-start gap-2">
+                          <Check className="w-3.5 h-3.5 text-white shrink-0 mt-0.5" />
+                          <div>
+                            <strong className="text-white">Identificação da Conta:</strong> Seu e-mail e nome fornecidos no login do Google ou cadastro próprio.
+                          </div>
+                        </div>
+
+                        <div className="flex items-start gap-2">
+                          <Check className="w-3.5 h-3.5 text-white shrink-0 mt-0.5" />
+                          <div>
+                            <strong className="text-white">Interesses Editoriais:</strong> Categorias selecionadas no onboarding (ex: Tecnologia, Economia) para organizar o feed "Para você".
+                          </div>
+                        </div>
+
+                        <div className="flex items-start gap-2">
+                          <Check className="w-3.5 h-3.5 text-white shrink-0 mt-0.5" />
+                          <div>
+                            <strong className="text-white">Histórico e Salvos:</strong> Guardados no seu dispositivo para você reler quando quiser.
+                          </div>
+                        </div>
+
+                        <div className="p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-[11px] text-zinc-300 font-mono">
+                          ⛔ <strong>Sem Venda de Dados:</strong> Nossos servidores não comercializam nem compartilham seu perfil com redes de anúncios ou terceiros.
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Acordeão 2: Seus Direitos como Titular (Art. 18 LGPD) */}
+                  <div className="rounded-2xl bg-[#09090b] border border-zinc-800 overflow-hidden transition">
+                    <button
+                      onClick={() => toggleAccordion('rights')}
+                      className="w-full p-4 flex items-center justify-between text-left cursor-pointer hover:bg-zinc-900/50 transition min-h-[48px]"
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <Scale className="w-4 h-4 text-white shrink-0" />
+                        <div>
+                          <h4 className="text-xs sm:text-sm font-bold text-white">
+                            2. Seus Direitos como Titular (Art. 18 da LGPD)
+                          </h4>
+                          <p className="text-[10px] sm:text-[11px] text-zinc-400">
+                            Garantias legais com atendimento formal e gratuito.
+                          </p>
+                        </div>
+                      </div>
+                      {openAccordions.rights ? (
+                        <ChevronUp className="w-4 h-4 text-zinc-400" />
+                      ) : (
+                        <ChevronDown className="w-4 h-4 text-zinc-400" />
+                      )}
+                    </button>
+
+                    {openAccordions.rights && (
+                      <div className="p-4 pt-1 border-t border-zinc-800 space-y-2 text-xs text-zinc-300 bg-black/60">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1 font-mono text-[11px]">
+                          <div className="p-2.5 rounded-xl bg-zinc-900 border border-zinc-800">
+                            <span className="text-white font-bold block">Acesso e Confirmação</span>
+                            <span className="text-zinc-400">Saber se tratamos seus dados e solicitar cópia integral.</span>
+                          </div>
+
+                          <div className="p-2.5 rounded-xl bg-zinc-900 border border-zinc-800">
+                            <span className="text-white font-bold block">Correção e Retificação</span>
+                            <span className="text-zinc-400">Atualizar nome ou e-mail diretamente no perfil.</span>
+                          </div>
+
+                          <div className="p-2.5 rounded-xl bg-zinc-900 border border-zinc-800">
+                            <span className="text-white font-bold block">Eliminação Definitiva</span>
+                            <span className="text-zinc-400">Excluir sua conta e apagar todos os registros de leitura.</span>
+                          </div>
+
+                          <div className="p-2.5 rounded-xl bg-zinc-900 border border-zinc-800">
+                            <span className="text-white font-bold block">Revogação de Acesso</span>
+                            <span className="text-zinc-400">Desconectar quando desejar e cancelar notificações.</span>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Acordeão 3: Segurança e Armazenamento */}
+                  <div className="rounded-2xl bg-[#09090b] border border-zinc-800 overflow-hidden transition">
+                    <button
+                      onClick={() => toggleAccordion('security')}
+                      className="w-full p-4 flex items-center justify-between text-left cursor-pointer hover:bg-zinc-900/50 transition min-h-[48px]"
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <Lock className="w-4 h-4 text-white shrink-0" />
+                        <div>
+                          <h4 className="text-xs sm:text-sm font-bold text-white">
+                            3. Segurança & Onde os Dados Ficam Guardados?
+                          </h4>
+                          <p className="text-[10px] sm:text-[11px] text-zinc-400">
+                            Infraestrutura protegida com criptografia e isolamento RLS.
+                          </p>
+                        </div>
+                      </div>
+                      {openAccordions.security ? (
+                        <ChevronUp className="w-4 h-4 text-zinc-400" />
+                      ) : (
+                        <ChevronDown className="w-4 h-4 text-zinc-400" />
+                      )}
+                    </button>
+
+                    {openAccordions.security && (
+                      <div className="p-4 pt-1 border-t border-zinc-800 space-y-2 text-xs text-zinc-300 bg-black/60">
+                        <p className="leading-relaxed">
+                          Os dados da sua conta são guardados no Supabase PostgreSQL com <strong>Row Level Security (RLS)</strong>, o que significa que nenhum outro usuário tem acesso aos seus dados de leitura ou preferências.
+                        </p>
+                        <div className="flex items-center gap-2 text-[11px] text-zinc-400 font-mono pt-1">
+                          <Check className="w-3.5 h-3.5 text-white" />
+                          <span>Tráfego criptografado com TLS 1.3</span>
+                        </div>
+                        <div className="flex items-center gap-2 text-[11px] text-zinc-400 font-mono">
+                          <Check className="w-3.5 h-3.5 text-white" />
+                          <span>Sessão protegida por tokens seguros com renovação automática</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Acordeão 4: Canal Direto com o Encarregado (DPO) */}
+                  <div className="rounded-2xl bg-[#09090b] border border-zinc-800 overflow-hidden transition">
+                    <button
+                      onClick={() => toggleAccordion('dpoChannel')}
+                      className="w-full p-4 flex items-center justify-between text-left cursor-pointer hover:bg-zinc-900/50 transition min-h-[48px]"
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <UserCheck className="w-4 h-4 text-white shrink-0" />
+                        <div>
+                          <h4 className="text-xs sm:text-sm font-bold text-white">
+                            4. Canal Direto do Encarregado (DPO)
+                          </h4>
+                          <p className="text-[10px] sm:text-[11px] text-zinc-400">
+                            Atendimento a requisições com geração de protocolo oficial.
+                          </p>
+                        </div>
+                      </div>
+                      {openAccordions.dpoChannel ? (
+                        <ChevronUp className="w-4 h-4 text-zinc-400" />
+                      ) : (
+                        <ChevronDown className="w-4 h-4 text-zinc-400" />
+                      )}
+                    </button>
+
+                    {openAccordions.dpoChannel && (
+                      <div className="p-4 pt-1 border-t border-zinc-800 space-y-3 text-xs bg-black/60">
+                        <p className="text-zinc-300 leading-relaxed">
+                          Para solicitar exclusão, cópia de dados ou esclarecer dúvidas, fale diretamente com o Encarregado de Proteção de Dados:
+                        </p>
+
+                        <div className="p-3 rounded-xl bg-zinc-900 border border-zinc-800 flex items-center justify-between text-xs font-mono">
+                          <div>
+                            <span className="text-[9px] text-zinc-500 block uppercase">E-mail Oficial DPO:</span>
+                            <span className="text-white font-bold">{DPO_CONTACT.email}</span>
+                          </div>
+                          <span className="text-[10px] text-zinc-400 border border-zinc-700 px-2 py-0.5 rounded">
+                            Prazo: 15 dias
+                          </span>
+                        </div>
+
+                        <button
+                          onClick={() => setActiveTab('dpo')}
+                          className="w-full py-2.5 px-4 rounded-xl bg-white text-black text-xs font-bold hover:bg-zinc-200 transition cursor-pointer flex items-center justify-center gap-2 min-h-[44px]"
+                        >
+                          <Send className="w-3.5 h-3.5" />
+                          <span>Preencher e Gerar Protocolo DPO Agora</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                /* TEXTO COMPLETO DOS ARTIGOS LEGAIS DA LGPD */
+                <div className="space-y-3.5">
+                  {currentSection?.articles.map((art, idx) => (
+                    <div
+                      key={idx}
+                      className="p-4 sm:p-5 rounded-2xl bg-[#09090b] border border-zinc-800 space-y-3 hover:border-zinc-700 transition"
+                    >
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2 border-b border-zinc-800">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-[11px] font-mono font-bold text-white bg-zinc-800 px-2 py-0.5 rounded border border-zinc-700">
+                            {art.law} • {art.number}
+                          </span>
+                          <span className="text-xs font-bold text-white">{art.title}</span>
+                        </div>
+                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 border border-zinc-700 font-bold uppercase tracking-wider w-fit">
+                          {art.badge}
+                        </span>
+                      </div>
+
+                      <div className="p-3 rounded-xl bg-black border border-zinc-800 text-[11px] sm:text-xs text-zinc-300 font-mono italic leading-relaxed">
+                        "{art.text}"
+                      </div>
+
+                      <div className="flex items-start gap-2 text-xs text-zinc-300">
+                        <CheckCircle2 className="w-4 h-4 text-white shrink-0 mt-0.5" />
+                        <div>
+                          <strong className="text-white">Aplicação Prática no FatosBR: </strong>
+                          <span className="text-zinc-400">{art.practicalApplication}</span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ================= DEMAIS ABAS (TERMOS, CDC, DEFESA) ================= */}
+          {activeTab !== 'lgpd' && activeTab !== 'dpo' && currentSection && (
+            <div className="space-y-4">
               <div className="p-4 rounded-2xl bg-[#09090b] border border-zinc-800">
                 <h3 className="text-sm font-bold text-white">{currentSection.title}</h3>
                 <p className="text-xs text-zinc-400 mt-1 leading-relaxed">
@@ -221,7 +538,6 @@ export const LegalCenterModal: React.FC<LegalCenterModalProps> = ({
                 </p>
               </div>
 
-              {/* Artigos da Legislação Brasileira */}
               <div className="space-y-3.5">
                 {currentSection.articles.map((art, idx) => (
                   <div
@@ -240,12 +556,10 @@ export const LegalCenterModal: React.FC<LegalCenterModalProps> = ({
                       </span>
                     </div>
 
-                    {/* Texto Literal da Lei */}
                     <div className="p-3 rounded-xl bg-black border border-zinc-800 text-[11px] sm:text-xs text-zinc-300 font-mono italic leading-relaxed">
                       "{art.text}"
                     </div>
 
-                    {/* Aplicação Prática no FatosBR */}
                     <div className="flex items-start gap-2 text-xs text-zinc-300">
                       <CheckCircle2 className="w-4 h-4 text-white shrink-0 mt-0.5" />
                       <div>
@@ -262,7 +576,6 @@ export const LegalCenterModal: React.FC<LegalCenterModalProps> = ({
           {/* ================= ABA DPO: CANAL DO ENCARREGADO ================= */}
           {activeTab === 'dpo' && (
             <div className="space-y-5">
-              {/* Cartão de Informações do DPO */}
               <div className="p-4 sm:p-5 rounded-2xl bg-[#09090b] border border-zinc-800 space-y-3">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">

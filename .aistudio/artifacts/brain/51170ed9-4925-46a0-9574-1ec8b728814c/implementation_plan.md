@@ -1,79 +1,121 @@
-# Carrossel de Manchetes no Topo do Feed e Central LGPD Mobile Simplificada
+# Correção do Feed, Webhook ZynPay, SSE no Checkout Pix, Otimização de Briefings e Suporte Real
 
-Implementação das duas funcionalidades confirmadas:
-1. **Carrossel de Manchetes em Destaque no Topo do Feed**: Componente de banner em destaque no topo do feed Home que agrega as notícias mais importantes do momento em um carrossel horizontal navegável, movendo-as para fora da listagem vertical padrão para evitar duplicidade.
-2. **Reestruturação da Central de Privacidade & LGPD para Mobile**: Visão dedicada, simplificada e em tela cheia para dispositivos móveis, com seções colapsáveis (acordeões rápidos dos direitos do titular Art. 18 LGPD e dados coletados) e paleta estritamente em preto e branco.
+Plano de engenharia para atender às melhorias solicitadas no FatosBR:
+1. **Correção do Layout do Card de Notícias (`EventCard.tsx`)**: Ajuste na sobreposição dos botões de ação (salvar, compartilhar, opções) sobre a tag de data e tempo de leitura.
+2. **Configuração de Webhook ZynPay no `AdminPanel.tsx`**: Interface para atualização dinâmica da URL de retorno, segredo criptográfico e ferramenta de teste de ping/simulação Pix.
+3. **Listener SSE no Checkout Pix (`BillingModal.tsx`)**: Escuta em tempo real do evento de confirmação de pagamento Pix com modal/check animado e ativação automática do plano Pro.
+4. **Aceleração Instantânea dos Briefings (`BriefingView.tsx`)**: Pré-carregamento de imagens, cache em memória e transições de zero latência.
+5. **Tickets de Suporte Reais (`ticketService.ts`)**: Persistência no Supabase com sincronização de status e respostas reais.
 
 ---
 
 ## User Review & Critical Decisions
 
 > [!IMPORTANT]
-> **Decisões confirmadas com o usuário:**
-> - **Carrossel no Topo**: Sim, adicionar carrossel de manchetes no topo do feed. Os 3 a 5 acontecimentos mais relevantes serão exibidos no topo em slides horizontais navegáveis com banner amplo, sendo filtrados da listagem vertical abaixo para manter o feed limpo e dinâmico.
-> - **Visual Mobile LGPD**: Tela cheia mobile (`fixed inset-0 h-full w-full bg-black`) com resumo de fácil leitura e seções colapsáveis (accordion) dos direitos do titular, além de atalho direto para abertura de protocolo junto ao DPO, mantendo a paleta 100% monocromática do app.
+> **Decisões confirmadas pelo usuário:**
+> - **Tickets de Suporte**: Persistência em tabela real no Supabase (`support_tickets`) com sincronização de status e histórico de respostas.
+> - **Confirmação Pix (SSE)**: Check animado imediato com liberação automática da assinatura Pro.
+> - **Webhook ZynPay**: Painel com edição de URL pública, segredo e botão para disparar teste de ping e simulação de payload Pix.
 
 ---
 
 ### 1. Overview & Core Concept
 
-- **Carrossel Superior de Destaques (`FeaturedTopCarousel`)**:
-  - Exibe no topo do feed Home os acontecimentos de maior impacto (baseados em urgência, número de fontes e relevância).
-  - Permite deslizar horizontalmente no mobile (touch swipe) ou avançar via setas/indicadores no desktop.
-  - Ao clicar, abre o modal detalhado do acontecimento.
-  - A lista vertical do feed consome apenas as notícias restantes (`remainingEvents`), eliminando repetições desnecessárias.
-- **Central de Privacidade & LGPD Mobile Otimizada (`LegalCenterModal`)**:
-  - Em telas móveis (como Samsung Galaxy A35), fornece um modo de visualização rápida e desburocratizada com seções colapsáveis ("O que coletamos?", "Seus direitos Art. 18 LGPD", "Segurança dos dados" e "Ação rápida com o DPO").
-  - Interface monocromática rigorosa (preto absoluto, branco puro e cinzas neutros), com áreas de toque confortáveis ($\ge 44\text{px}$).
+- **Feed de Notícias Livre de Colisões**:
+  - No mobile (telas estreitas como Samsung Galaxy A35), o cabeçalho do `EventCard` divide verticalmente o bloco de identificação da fonte/tempo e posiciona as ações (salvar, compartilhar, menu) no topo alinhado (`items-start`), garantindo que nenhum botão fique sobreposto à barra de data e tempo de leitura.
+- **Webhook ZynPay Operacional**:
+  - Os administradores podem redefinir a URL de retorno e o segredo `whsec_...` diretamente pelo painel e testar a integridade do endpoint com 1 clique (simulando payload de pagamento Pix do Banco Central).
+- **Checkout em Tempo Real via SSE**:
+  - Quando o usuário gera o Pix no `BillingModal`, o front-end ativa um listener de Server-Sent Events (`/api/zynpay/events`). Assim que o pagamento é liquidado, a tela exibe uma celebração com check animado e atualiza a sessão para Pro sem recarregar a página.
+- **Briefings com Carregamento Instantâneo**:
+  - Elimina o atraso de abertura da aba de Briefings através de pré-carregamento imediato das artes gráficas e cache em memória (SWR).
+- **Chamada Real de Tickets**:
+  - Envio e resposta de tickets de suporte conectados ao banco Supabase, com suporte a RLS e fallback resiliente.
 
 ---
 
 ### 2. User Experience & Visual Design
 
-#### A. Componente `FeaturedTopCarousel` no Feed Home
-- **Posicionamento**: Logo abaixo da barra de subtabs ("Para você", "Seguindo", "Em alta") e antes da listagem vertical.
-- **Estrutura Visual**:
-  - Card amplo com banner 16:9 (`h-56 sm:h-64 w-full`), gradiente escuro inferior para leitura nítida.
-  - Etiqueta de destaque monocromática: `DESTAQUE EDITORIAL` ou `MANCHETE`.
-  - Título em negrito e resumo direto de 2 linhas.
-  - Logo monocromático da empresa/veículo e tempo estimado de leitura.
-  - Paginação com pontos/barras indicadoras e botões de navegação lateral (prev/next) no desktop.
-  - Animação suave com Framer Motion (`AnimatePresence`).
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                        FATOSBR EVENT CARD (FEED)                       │
+├────────────────────────────────────────────────────────────────────────┤
+│  [CN] CNN Brasil                           [Salvar] [Share] [Mais]     │
+│  há 2 dias · 1 min de leitura                                          │
+│                                                                        │
+│  BoJ tenta estimular economia do Japão há muito tempo, diz economista  │
+│  Autoridade monetária manteve taxa básica de juros em 1,5% ao ano...   │
+│                                                                        │
+│  [Tecnologia & IA] · 1 fonte CNN                          Contexto ▾   │
+└────────────────────────────────────────────────────────────────────────┘
+```
 
-#### B. Seções Colapsáveis na Central LGPD Mobile
-- **Modo Mobile Dedicado**:
-  - Alternador de visão no topo: `Resumo Rápido (Mobile)` vs `Texto Legal Completo`.
-  - 4 seções colapsáveis (Acordeão) com ícone de expansão:
-    1. **Dados Pessoais Coletados**: Lista simplificada em bullets (e-mail de login, preferências de temas, histórico local).
-    2. **Direitos do Titular (Art. 18 LGPD)**: Confirmação, acesso, correção, anonimização e exclusão explicados em linguagem acessível.
-    3. **Armazenamento e Segurança**: Criptografia de ponta a ponta e persistência segura no Supabase.
-    4. **Solicitar Atendimento ao DPO**: Card com botão direto para preencher nome/e-mail e gerar o protocolo oficial `LGPD-2026-XXXXXX`.
-  - Design estritamente monocromático: fundos em `#000000` e `#0c0c0e`, bordas em `#27272a`, textos em branco e cinza claro, botões em branco com texto preto.
+#### A. Ajuste de Layout no `EventCard.tsx`
+- Mudança do cabeçalho de `items-center` com `flex-wrap` desordenado para uma estrutura em grid/duas linhas:
+  - **Linha 1 (Superior)**: Logotipo + Nome da Fonte no canto esquerdo e barra de botões (`Bookmark`, `Share`, `More`) no canto direito com `items-start` e alinhamento estável.
+  - **Linha 2 (Metadados)**: Texto limpo e desobstruído com o tempo decorrido e estimativa de leitura (`há 2 dias · 1 min de leitura`), sem cápsulas inchadas que colidam com os botões.
+
+#### B. Painel de Webhook ZynPay (`AdminPanel.tsx` / `AdminFinancialZynPayPanel.tsx`)
+- Card dedicado dentro da aba de Cobrança / Financeiro:
+  - Input para `URL de Retorno Webhook` (com botão de cópia rápida).
+  - Input para `Segredo de Segurança do Webhook` (com botão para mascarar/revelar).
+  - Botão **"⚡ Testar Ping do Webhook"** e **"🧪 Simular Pagamento Pix (R$ 29,90)"**.
+  - Histórico de entregas e telemetria dos últimos eventos processados.
+
+#### C. Confirmação Animada do Pix via SSE (`BillingModal.tsx`)
+- Listener do evento SSE `pix.payment.confirmed` conectado ao `zynpayService`.
+- Overlay de celebração animado com `framer-motion`:
+  - Ícone de check gigante com pulsar suave monocromático/esmeralda.
+  - Texto: *"Pagamento Pix Confirmado com Sucesso!"*.
+  - Subtexto: *"Sua conta FatosBR Pro foi liberada imediatamente."*.
+  - Transição suave para o estado de Pro Ativo.
+
+#### D. Otimização de Velocidade nos Briefings (`BriefingView.tsx`)
+- Cache SWR imediato em `localStorage`: o leitor vê os resumos matinal e noturno sem esperar requisições de rede.
+- Pré-carregamento no `useEffect` das imagens de fundo (`Amanhecer_sobre_a_cidade` e `Horizonte_urbano_ao_anoitecer`).
+
+#### E. Tickets de Suporte no Supabase (`ticketService.ts` e `AdminPanel.tsx`)
+- Consulta e inserção em `public.support_tickets`.
+- Sincronização em tempo real das mensagens e respostas do administrador.
 
 ---
 
-### 3. Architecture & File Plan
+### 3. Technical Architecture & Data Strategy
 
 ```
-src/
-├── components/
-│   ├── FeaturedTopCarousel.tsx    # NOVO: Carrossel de manchetes do topo do feed
-│   ├── LegalCenterModal.tsx       # ATUALIZADO: Modo mobile simplificado com acordeões
-│   └── EventCard.tsx              # Mantido com a transição de escala otimizada
-└── App.tsx                        # Integração do carrossel no feed e filtro de duplicatas
+┌────────────────────────────────────────────────────────────────────────┐
+│                        FLUXO DE INTEGRAÇÕES                            │
+│                                                                        │
+│   EventCard (Feed) ───────> Header Anti-Colisão (items-start)          │
+│                                                                        │
+│   BillingModal (Pix) ─────> SSE Listener (/api/zynpay/events)          │
+│                                      │                                 │
+│                                      ▼                                 │
+│                             Check Animado & Pro                        │
+│                                                                        │
+│   AdminPanel ─────────────> ZynPay Webhook Config & Ping Tester        │
+│                                                                        │
+│   ticketService ──────────> Supabase table `support_tickets`           │
+│                                                                        │
+│   BriefingView ───────────> Image Preloader + Local Cache SWR          │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ### 4. Step-by-Step Implementation Steps
 
-1. **Criar `src/components/FeaturedTopCarousel.tsx`**:
-   - Implementar componente autônomo com navegação horizontal, autoplay opcional (pausado no hover), suporte a touch drag, e cards com imagem e tipografia refinadas.
-2. **Atualizar `src/App.tsx`**:
-   - Separar os eventos em destaque (`topFeaturedEvents`) e os eventos do feed padrão (`feedEvents = remainingEvents`).
-   - Renderizar o `FeaturedTopCarousel` no topo do feed Home quando houver eventos disponíveis.
-3. **Reestruturar `src/components/LegalCenterModal.tsx`**:
-   - Adicionar o modo de visualização simplificada para mobile com seções colapsáveis clicáveis (`useState` para controle de acordeão aberto).
-   - Aplicar a paleta estrita em preto e branco, garantindo conformidade com a LGPD e ergonomia no celular.
-4. **Validação & Testes**:
-   - Executar `lint_applet` e `compile_applet` para garantir zero erros de TypeScript e build pronto para produção.
+1. **Correção do `EventCard.tsx`**:
+   - Reestruturar o cabeçalho do card para separar a identificação da fonte e o badge de tempo das ações de topo, eliminando a colisão no mobile.
+2. **Configuração de Webhook ZynPay em `AdminPanel.tsx` e `AdminFinancialZynPayPanel.tsx`**:
+   - Integrar formulário de URL e Segredo com persistência em servidor/local.
+   - Adicionar ferramenta de simulação e teste de ping de webhook Pix.
+3. **SSE no `BillingModal.tsx`**:
+   - Inscrever o modal no canal de eventos em tempo real do `zynpayService`.
+   - Adicionar estado de pagamento aprovado com modal de check animado.
+4. **Aceleração dos Briefings em `BriefingView.tsx`**:
+   - Implementar pré-carregamento imediato de assets e leitura direta de cache sem loader bloqueante.
+5. **Integração Real de Tickets no `ticketService.ts`**:
+   - Adicionar chamadas reais ao Supabase (`supabase.from('support_tickets')`) para criação, listagem e resposta de tickets.
+6. **Verificação & Build**:
+   - Rodar `lint_applet` (`tsc --noEmit`) e `compile_applet`.

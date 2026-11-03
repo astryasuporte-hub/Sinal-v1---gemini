@@ -1,6 +1,6 @@
 {
-  "summary": "Plano de implementação para o carrossel de manchetes em destaque no topo do feed Home e a reestruturação da Central de Privacidade e LGPD com visual simplificado em tela cheia mobile e seções colapsáveis em preto e branco.",
-  "updatedAt": "2026-11-02T20:16:18.456861664Z",
+  "summary": "Plano de implementação detalhado para:\n1. Correção visual definitiva do overlap no EventCard (feed de notícias).\n2. Tela completa de configuração de Webhook ZynPay no AdminPanel com atualização de URL/segredo e ferramenta de teste de ping e simulação de payload Pix.\n3. Listener de Server-Sent Events (SSE) no checkout do BillingModal com check animado e transição automática para o plano Pro.\n4. Otimização de alta velocidade para os Briefings com cache instantâneo e preloading de imagens.\n5. Integração real dos tickets de suporte com persistência e sincronização no Supabase.",
+  "updatedAt": "2026-11-02T23:19:16.422126130Z",
   "requestFeedback": true,
   "userFacing": true
 }

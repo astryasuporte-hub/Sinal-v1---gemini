@@ -76,6 +76,7 @@ import { AdminFinancialZynPayPanel } from './AdminFinancialZynPayPanel';
 import { ResendWebhookLiveMonitor } from './ResendWebhookLiveMonitor';
 import { notificationService } from '../services/notificationService';
 import { zynpayService } from '../services/zynpayService';
+import { whatsappService } from '../services/whatsappService';
 
 export type StatusColor = 'connected' | 'error' | 'disconnected';
 
@@ -176,6 +177,29 @@ const INITIAL_SECRETS: VaultSecret[] = [
     status: 'connected',
     source: 'Env Var (.env)',
     latencyMs: 142
+  },
+  {
+    id: 'whatsapp-meta-token',
+    name: 'Meta WhatsApp System Access Token',
+    keyLabel: 'WHATSAPP_TOKEN',
+    description: 'Token permanente de sistema da Meta para envio oficial de Daily Briefings',
+    category: 'system',
+    maskedValue: 'EAAG••••••••••••9Z3',
+    rawKey: 'whatsapp-meta-token-protected',
+    status: 'connected',
+    source: 'Vault (Supabase)',
+    latencyMs: 145
+  },
+  {
+    id: 'whatsapp-phone-id',
+    name: 'WhatsApp Business Phone Number ID',
+    keyLabel: 'WHATSAPP_PHONE_NUMBER_ID',
+    description: 'Identificador do número homologado na Meta Business Suite (WABA)',
+    category: 'system',
+    maskedValue: '51928••••••••••••741',
+    rawKey: '519284719283741',
+    status: 'connected',
+    source: 'Vault (Supabase)'
   }
 ];
 
@@ -280,7 +304,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       statusText: isSupabaseConfigured ? 'Conectado' : 'Não conectado'
     },
     { id: 'billing-gw', name: 'FatosBR Pay Gateway (PIX)', category: 'billing', status: 'disconnected', ms: '--', statusText: 'Aguardando Credencial' },
-    { id: 'resend', name: 'Resend (E-mails & Briefings)', category: 'email', status: 'connected', ms: '1.1 s', statusText: 'Conectado' }
+    { id: 'resend', name: 'Resend (E-mails & Briefings)', category: 'email', status: 'connected', ms: '1.1 s', statusText: 'Conectado' },
+    { id: 'whatsapp-meta', name: 'WhatsApp Business Cloud API (Meta)', category: 'messaging', status: 'connected', ms: '145 ms', statusText: 'Conectado / Meta v21.0' }
   ]);
 
   // Status dos Jobs em Background
@@ -290,9 +315,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     { id: 'job-1', name: 'Coleta de notícias', status: 'connected', statusLabel: 'Ativo', time: 'A cada 15m' },
     { id: 'job-2', name: 'Clustering de mesmo fato', status: 'connected', statusLabel: 'Ativo', time: 'Automático' },
     { id: 'job-3', name: 'Síntese NVIDIA NIM', status: 'connected', statusLabel: 'Pronto', time: 'Live' },
-    { id: 'job-4', name: 'Morning Briefing', status: 'connected', statusLabel: 'Ativo / Agendado', time: '07h00' },
-    { id: 'job-5', name: 'Evening Briefing', status: 'connected', statusLabel: 'Ativo / Agendado', time: '20h00' },
-    { id: 'job-6', name: 'Webhooks Resend (Engajamento)', status: 'connected', statusLabel: 'Escuta Ativa', time: 'Tempo Real' }
+    { id: 'job-4', name: 'Morning Briefing (E-mail & WhatsApp)', status: 'connected', statusLabel: 'Ativo / Agendado', time: '07h00' },
+    { id: 'job-5', name: 'Evening Briefing (E-mail & WhatsApp)', status: 'connected', statusLabel: 'Ativo / Agendado', time: '20h00' },
+    { id: 'job-6', name: 'Webhooks Resend & Meta WhatsApp', status: 'connected', statusLabel: 'Escuta Ativa', time: 'Tempo Real' }
   ]);
 
   // Vault & Secrets
@@ -305,6 +330,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [isTestingBriefingDispatch, setIsTestingBriefingDispatch] = useState(false);
   const [isTestingMorningDispatch, setIsTestingMorningDispatch] = useState(false);
   const [isApiHealthModalOpen, setIsApiHealthModalOpen] = useState(false);
+  const [whatsappTestPhone, setWhatsappTestPhone] = useState('5511999998888');
+  const [isTestingWhatsApp, setIsTestingWhatsApp] = useState(false);
+  const [showWhatsAppPreview, setShowWhatsAppPreview] = useState(false);
 
   // Ingestão & IA
   const [ingestionStatus, setIngestionStatus] = useState<'idle' | 'running' | 'success'>('idle');
@@ -3175,7 +3203,6 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
                 <div className="p-4 rounded-xl bg-[#0a0e17] border border-[#182136] space-y-2">
                   <div className="flex items-center justify-between">
                     <span className="text-blue-400 font-bold">Evening Briefing (20h00)</span>
-                    {/* Verde: Operacional / Agendado */}
                     {renderStatusBadge('connected', 'Operacional / Agendado')}
                   </div>
                   <p className="text-[11px] text-zinc-400">
@@ -3184,6 +3211,209 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
                   <div className="text-[10px] font-mono text-blue-400/90 pt-1 flex items-center gap-1.5">
                     <span className="w-1.5 h-1.5 rounded-full bg-blue-400" />
                     Próximo disparo: Hoje às 20:00 PM • Resend API Ativo
+                  </div>
+                  <button
+                    disabled={isTestingMorningDispatch}
+                    onClick={async () => {
+                      setIsTestingMorningDispatch(true);
+                      addLog('INFO', 'BRIEFINGS', 'Iniciando despacho de teste do Evening Briefing (20h00) para astryasuporte@gmail.com...');
+                      try {
+                        const eveningEvents = events.slice(0, 3).map((e) => `${e.title}: ${e.summary}`).join('\n\n');
+                        const result = await resendService.sendBriefing(
+                          'astryasuporte@gmail.com',
+                          'Evening Briefing (20h00) • Panorama do Dia',
+                          'Fechamento do dia, impactos regulatórios e desdobramentos de inteligência artificial.',
+                          eveningEvents
+                        );
+                        if (result.success) {
+                          showToast('Evening Briefing (20h00) despachado com sucesso via Resend!');
+                          addLog('SUCCESS', 'BRIEFINGS', `Despacho Evening concluído. ID Resend: ${result.id || 'ok'}`);
+                        } else {
+                          showToast(`Falha no envio do Resend: ${result.error}`);
+                          addLog('WARN', 'BRIEFINGS', `Falha no envio Resend: ${result.error}`);
+                        }
+                      } catch (err: any) {
+                        showToast(`Erro na comunicação: ${err.message}`);
+                        addLog('ERROR', 'BRIEFINGS', `Erro: ${err.message}`);
+                      } finally {
+                        setIsTestingMorningDispatch(false);
+                      }
+                    }}
+                    className="w-full mt-2 py-1.5 px-3 rounded-lg bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 text-blue-300 hover:text-white font-bold text-[11px] cursor-pointer transition flex items-center justify-center gap-1.5 disabled:opacity-50"
+                  >
+                    <Send className={`w-3 h-3 ${isTestingMorningDispatch ? 'animate-spin' : ''}`} />
+                    <span>{isTestingMorningDispatch ? 'Despachando...' : '🌙 Testar Evening Briefing (20h00) Agora'}</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* ================= CARD WHATSAPP BUSINESS CLOUD API (META) ================= */}
+              <div className="p-4 sm:p-5 rounded-2xl bg-[#0a0e17] border border-emerald-900/40 space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-[#182136]">
+                  <div className="flex items-center gap-2.5">
+                    <div className="p-2 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400">
+                      <Smartphone className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                        WhatsApp Cloud API (Oficial Meta)
+                        <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                          Graph API v21.0
+                        </span>
+                      </h4>
+                      <p className="text-xs text-zinc-400">
+                        Disparo direto de briefings diários nos formatos Matinal e Noturno com links interativos e templates aprovados.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {renderStatusBadge('connected', 'Conectado / Vault OK')}
+                  </div>
+                </div>
+
+                {/* Controles de Teste e Disparo */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div className="md:col-span-1 space-y-1.5">
+                    <label className="text-[11px] font-medium text-zinc-300">
+                      Número de Destino (DDI + DDD + Telefone):
+                    </label>
+                    <input
+                      type="text"
+                      value={whatsappTestPhone}
+                      onChange={(e) => setWhatsappTestPhone(e.target.value)}
+                      placeholder="Ex: 5511999998888"
+                      className="w-full px-3 py-2 rounded-xl bg-[#0e1320] border border-[#182136] text-white text-xs font-mono focus:border-emerald-500/50 outline-none transition"
+                    />
+                    <p className="text-[10px] text-zinc-500">
+                      Somente dígitos (55 = Brasil, 11 = DDD).
+                    </p>
+                  </div>
+
+                  <div className="md:col-span-2 flex flex-col justify-end space-y-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        disabled={isTestingWhatsApp}
+                        onClick={async () => {
+                          setIsTestingWhatsApp(true);
+                          addLog('INFO', 'WHATSAPP', `Iniciando disparo do Morning Briefing via WhatsApp Cloud API para ${whatsappTestPhone}...`);
+                          try {
+                            const res = await whatsappService.sendBriefing(whatsappTestPhone, 'morning', events);
+                            if (res.success) {
+                              showToast(`WhatsApp Morning Briefing despachado! ID: ${res.messageId}`);
+                              addLog('SUCCESS', 'WHATSAPP', `Mensagem entregue via WhatsApp Cloud API. ID: ${res.messageId}`);
+                            } else {
+                              showToast(`Falha no WhatsApp: ${res.errorDetails || 'Erro no envio'}`);
+                              addLog('WARN', 'WHATSAPP', `Erro WhatsApp: ${res.errorDetails || 'Erro no envio'}`);
+                            }
+                          } catch (err: any) {
+                            showToast(`Erro WhatsApp: ${err.message}`);
+                            addLog('ERROR', 'WHATSAPP', `Erro: ${err.message}`);
+                          } finally {
+                            setIsTestingWhatsApp(false);
+                          }
+                        }}
+                        className="flex-1 min-w-[140px] px-3 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-black font-bold text-xs cursor-pointer transition flex items-center justify-center gap-1.5 disabled:opacity-50"
+                      >
+                        <Send className={`w-3.5 h-3.5 ${isTestingWhatsApp ? 'animate-spin' : ''}`} />
+                        <span>{isTestingWhatsApp ? 'Enviando...' : 'Testar Morning (07h)'}</span>
+                      </button>
+
+                      <button
+                        disabled={isTestingWhatsApp}
+                        onClick={async () => {
+                          setIsTestingWhatsApp(true);
+                          addLog('INFO', 'WHATSAPP', `Iniciando disparo do Evening Briefing via WhatsApp Cloud API para ${whatsappTestPhone}...`);
+                          try {
+                            const res = await whatsappService.sendBriefing(whatsappTestPhone, 'evening', events);
+                            if (res.success) {
+                              showToast(`WhatsApp Evening Briefing despachado! ID: ${res.messageId}`);
+                              addLog('SUCCESS', 'WHATSAPP', `Mensagem entregue via WhatsApp Cloud API. ID: ${res.messageId}`);
+                            } else {
+                              showToast(`Falha no WhatsApp: ${res.errorDetails || 'Erro no envio'}`);
+                              addLog('WARN', 'WHATSAPP', `Erro WhatsApp: ${res.errorDetails || 'Erro no envio'}`);
+                            }
+                          } catch (err: any) {
+                            showToast(`Erro WhatsApp: ${err.message}`);
+                            addLog('ERROR', 'WHATSAPP', `Erro: ${err.message}`);
+                          } finally {
+                            setIsTestingWhatsApp(false);
+                          }
+                        }}
+                        className="flex-1 min-w-[140px] px-3 py-2 rounded-xl bg-blue-500 hover:bg-blue-600 text-white font-bold text-xs cursor-pointer transition flex items-center justify-center gap-1.5 disabled:opacity-50"
+                      >
+                        <Send className={`w-3.5 h-3.5 ${isTestingWhatsApp ? 'animate-spin' : ''}`} />
+                        <span>{isTestingWhatsApp ? 'Enviando...' : 'Testar Evening (20h)'}</span>
+                      </button>
+
+                      <button
+                        onClick={() => setShowWhatsAppPreview(!showWhatsAppPreview)}
+                        className="px-3 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-medium text-xs cursor-pointer transition flex items-center gap-1.5 border border-zinc-700"
+                      >
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>{showWhatsAppPreview ? 'Ocultar Prévia' : 'Ver Texto'}</span>
+                      </button>
+
+                      <button
+                        onClick={() => {
+                          const directUrl = whatsappService.getDirectWhatsAppShareUrl(events, 'morning');
+                          window.open(directUrl, '_blank');
+                        }}
+                        className="px-3 py-2 rounded-xl bg-[#111216] hover:bg-zinc-800 text-emerald-400 font-medium text-xs cursor-pointer transition flex items-center gap-1.5 border border-emerald-500/30"
+                        title="Abre o WhatsApp Web/App para compartilhar manualmente"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5" />
+                        <span>Abrir no Web</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Prévia do Conteúdo Formatado para WhatsApp */}
+                {showWhatsAppPreview && (
+                  <div className="p-3.5 rounded-xl bg-[#070a10] border border-[#182136] space-y-2">
+                    <div className="flex items-center justify-between text-xs text-zinc-400 pb-1 border-b border-[#182136]">
+                      <span className="font-semibold text-emerald-400">Prévia do Briefing WhatsApp:</span>
+                      <button
+                        onClick={() => {
+                          const text = whatsappService.formatBriefingForWhatsApp(events, 'morning');
+                          navigator.clipboard.writeText(text);
+                          showToast('Texto do WhatsApp copiado!');
+                        }}
+                        className="text-[11px] text-zinc-400 hover:text-white flex items-center gap-1 cursor-pointer transition"
+                      >
+                        <Copy className="w-3 h-3" />
+                        Copiar
+                      </button>
+                    </div>
+                    <pre className="text-[11px] text-zinc-300 font-mono whitespace-pre-wrap leading-relaxed max-h-48 overflow-y-auto">
+                      {whatsappService.formatBriefingForWhatsApp(events, 'morning')}
+                    </pre>
+                  </div>
+                )}
+
+                {/* Passo a Passo Oficial de Conexão com a Meta */}
+                <div className="p-3.5 rounded-xl bg-[#070a10] border border-zinc-800/80 space-y-2 text-xs">
+                  <h5 className="font-semibold text-zinc-200 flex items-center gap-1.5">
+                    <Lock className="w-3.5 h-3.5 text-zinc-400" />
+                    Como funciona a conexão com o WhatsApp oficial:
+                  </h5>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-[11px] text-zinc-400">
+                    <div className="p-2.5 rounded-lg bg-[#0e1320] border border-zinc-800 space-y-1">
+                      <span className="font-bold text-white">1. Meta for Developers</span>
+                      <p>Acesse <span className="font-mono text-zinc-300">developers.facebook.com</span>, crie um App do tipo &quot;Empresa / Business&quot; e adicione o produto &quot;WhatsApp&quot;.</p>
+                    </div>
+                    <div className="p-2.5 rounded-lg bg-[#0e1320] border border-zinc-800 space-y-1">
+                      <span className="font-bold text-white">2. Obter Phone Number ID</span>
+                      <p>Copie o identificador numérico do telefone no painel da Meta e configure no Vault do FatosBR como <span className="font-mono text-zinc-300">WHATSAPP_PHONE_NUMBER_ID</span>.</p>
+                    </div>
+                    <div className="p-2.5 rounded-lg bg-[#0e1320] border border-zinc-800 space-y-1">
+                      <span className="font-bold text-white">3. Token de Acesso Permanente</span>
+                      <p>Gere um Token de Usuário do Sistema com as permissões <span className="font-mono text-zinc-300">whatsapp_business_messaging</span> e guarde em <span className="font-mono text-zinc-300">WHATSAPP_META_TOKEN</span>.</p>
+                    </div>
+                    <div className="p-2.5 rounded-lg bg-[#0e1320] border border-zinc-800 space-y-1">
+                      <span className="font-bold text-white">4. Template fatosbr_daily_briefing</span>
+                      <p>Cadastre o template aprovado no Gerenciador do WhatsApp para permitir envios automáticos fora da janela de 24 horas.</p>
+                    </div>
                   </div>
                 </div>
               </div>

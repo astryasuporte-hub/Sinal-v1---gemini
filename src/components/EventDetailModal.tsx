@@ -22,13 +22,8 @@ import {
   ArrowRight,
   ShieldCheck,
   Sparkles,
-  Link as LinkIcon,
-  Headphones,
-  Play,
-  Pause,
-  Volume2
+  Link as LinkIcon
 } from 'lucide-react';
-import { audioSpeechService } from '../services/audioSpeechService';
 
 interface EventDetailModalProps {
   event: Event | null;
@@ -69,15 +64,6 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [onClose]);
-
-  // Audio Speech state for this event
-  const [isPlayingAudio, setIsPlayingAudio] = useState(false);
-  useEffect(() => {
-    if (!event) return;
-    return audioSpeechService.subscribe((s) => {
-      setIsPlayingAudio(s.currentEvent?.id === event.id && s.isPlaying);
-    });
-  }, [event?.id]);
 
   // Modo padrão: 'full' (notícia íntegra completa) com opção de alternar para 'summary' (resumo)
   const [readingMode, setReadingMode] = useState<'full' | 'summary'>('full');
@@ -132,15 +118,6 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
     });
   };
 
-  const handleToggleAudio = () => {
-    if (!event) return;
-    if (isPlayingAudio) {
-      audioSpeechService.pause();
-    } else {
-      audioSpeechService.playEvent(event);
-    }
-  };
-
   const wordCount = (
     event.title +
     ' ' +
@@ -153,11 +130,6 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
     .split(/\s+/)
     .filter(Boolean).length;
   const readingTimeMin = Math.max(1, Math.ceil(wordCount / 160));
-  const audioDurationSec = Math.max(25, Math.ceil((wordCount / 130) * 60));
-  const audioDurationFormatted =
-    audioDurationSec >= 60
-      ? `${Math.floor(audioDurationSec / 60)}min ${audioDurationSec % 60}s`
-      : `${audioDurationSec}s`;
 
   const getSourceBadge = (sourceName: string) => {
     const nameLower = sourceName.toLowerCase();
@@ -312,34 +284,6 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
             <p className="text-base sm:text-lg text-zinc-300 font-normal leading-relaxed break-words border-l-2 border-zinc-700 pl-4 py-1 italic">
               {event.summary}
             </p>
-          </div>
-
-          {/* Barra Opcional de Leitura em Áudio */}
-          <div className="flex items-center justify-between p-3.5 rounded-xl bg-[#111216] border border-zinc-800/80 text-xs">
-            <div className="flex items-center gap-2.5">
-              <Headphones className="w-4 h-4 text-emerald-400" />
-              <span className="text-zinc-300 font-medium">Ouvir síntese da matéria ({audioDurationFormatted})</span>
-            </div>
-            <button
-              onClick={handleToggleAudio}
-              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
-                isPlayingAudio
-                  ? 'bg-emerald-500 text-black hover:bg-emerald-400'
-                  : 'bg-zinc-800 hover:bg-zinc-700 text-white'
-              }`}
-            >
-              {isPlayingAudio ? (
-                <>
-                  <Pause className="w-3.5 h-3.5" />
-                  <span>Pausar</span>
-                </>
-              ) : (
-                <>
-                  <Play className="w-3.5 h-3.5" />
-                  <span>Ouvir</span>
-                </>
-              )}
-            </button>
           </div>
 
           {/* Notícia Completa na Íntegra — Leitura Fluída e Tranquila */}

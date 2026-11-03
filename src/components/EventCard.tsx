@@ -179,10 +179,10 @@ export const EventCard: React.FC<EventCardProps> = ({
 
       {/* Conteúdo do Card */}
       <div className="relative z-10 p-4 sm:p-6 space-y-3.5 w-full max-w-full overflow-hidden">
-        {/* Top Header: Categoria, Tempo Preciso, Tempo Estimado de Leitura e Ações */}
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 min-w-0 flex-wrap">
-            {/* Logo da Entidade/Empresa em Destaque */}
+        {/* Top Header: Identificação da Entidade, Metadados e Ações */}
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex flex-col gap-1 min-w-0 flex-1">
+            {/* Linha 1: Entidade / Fonte */}
             {primaryEntity && (
               <div
                 onClick={(e) => {
@@ -191,7 +191,7 @@ export const EventCard: React.FC<EventCardProps> = ({
                     onOpenEntity(primaryEntity);
                   }
                 }}
-                className="inline-flex items-center gap-1.5 hover:opacity-85 transition shrink-0"
+                className="inline-flex items-center gap-1.5 hover:opacity-85 transition shrink-0 max-w-full"
                 title={`Ver detalhes de ${primaryEntity.name}`}
               >
                 <CompanyLogoBadge
@@ -201,23 +201,24 @@ export const EventCard: React.FC<EventCardProps> = ({
                   logoUrl={primaryEntity.logoUrl}
                   size="sm"
                 />
-                <span className="text-xs font-semibold text-zinc-300 hover:text-white truncate max-w-[110px] sm:max-w-[160px]">
+                <span className="text-xs font-semibold text-zinc-300 hover:text-white truncate">
                   {primaryEntity.name}
                 </span>
-                <span className="text-zinc-600 text-xs select-none">·</span>
               </div>
             )}
 
-            {/* Metadados: Horário Relativo e Tempo Estimado de Leitura (calculado pelo resumo) */}
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-900/90 text-zinc-300 text-[11px] font-mono border border-zinc-800/80 shrink-0">
-              <Clock className="w-3 h-3 text-zinc-400 shrink-0" />
-              <span>{displayTime}</span>
+            {/* Linha 2: Metadados desobstruídos com separador tipográfico (sem colisão) */}
+            <div className="flex items-center gap-1.5 text-zinc-400 text-[11px] font-mono flex-wrap">
+              <span className="inline-flex items-center gap-1">
+                <Clock className="w-3 h-3 text-zinc-500 shrink-0" />
+                <span>{displayTime}</span>
+              </span>
               <span className="text-zinc-600 select-none">·</span>
-              <span className="text-zinc-300 font-medium">{readingTimeMin} min de leitura</span>
-            </span>
+              <span className="text-zinc-400">{readingTimeMin} min de leitura</span>
+            </div>
           </div>
 
-          <div className="flex items-center space-x-1 shrink-0" onClick={(e) => e.stopPropagation()}>
+          <div className="flex items-center space-x-1 shrink-0 -mt-0.5" onClick={(e) => e.stopPropagation()}>
             {/* Botão Salvar */}
             <button
               onClick={handleSaveClick}
