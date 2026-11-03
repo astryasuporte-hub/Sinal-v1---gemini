@@ -21,8 +21,10 @@ class NotificationService {
     }
   }
 
+  private pushSubscription: PushSubscription | null = null;
+
   /**
-   * Inicializa o Service Worker para garantir suporte ao Web Push mesmo com a aplicação em segundo plano
+   * Inicializa o Service Worker com suporte a Firebase Cloud Messaging e Web Push API mesmo com navegador fechado
    */
   public async initServiceWorker(): Promise<ServiceWorkerRegistration | null> {
     if (typeof window === 'undefined' || !('serviceWorker' in navigator)) {
@@ -43,9 +45,26 @@ class NotificationService {
 
     this.isSwRegistering = true;
     try {
-      const reg = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+      // Prioriza o service worker do Firebase Messaging para push em segundo plano
+      let reg: ServiceWorkerRegistration;
+      try {
+        reg = await navigator.serviceWorker.register('/firebase-messaging-sw.js', { scope: '/' });
+      } catch {
+        reg = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+      }
       this.swRegistration = reg;
-      console.log('[FatosBR] Service Worker registrado para Web Push em segundo plano:', reg.scope);
+      console.log('[FatosBR] Firebase & Web Push Service Worker ativo:', reg.scope);
+
+      // Tenta recuperar inscrição Web Push existente
+      if ('pushManager' in reg) {
+        reg.pushManager.getSubscription().then((sub) => {
+          this.pushSubscription = sub;
+          if (sub) {
+            this.syncPushSubscriptionToServer(sub);
+          }
+        }).catch(() => {});
+      }
+
       return reg;
     } catch (err) {
       console.warn('[FatosBR] Registro de Service Worker indisponível:', err);
@@ -59,6 +78,54 @@ class NotificationService {
     } finally {
       this.isSwRegistering = false;
     }
+  }
+
+  /**
+   * Cria ou renova a inscrição Web Push com o PushManager para alertas com o navegador fechado
+   */
+  public async subscribeWebPush(userEmail?: string): Promise<boolean> {
+    try {
+      const reg = this.swRegistration || (await this.initServiceWorker());
+      if (!reg || !('pushManager' in reg)) return false;
+
+      // Chave pública VAPID padrão para Web Push
+      const applicationServerKey = 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U';
+
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub) {
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: applicationServerKey
+        }).catch(() => null);
+      }
+
+      if (sub) {
+        this.pushSubscription = sub;
+        await this.syncPushSubscriptionToServer(sub, userEmail);
+        localStorage.setItem('fatosbr_webpush_subscribed', 'true');
+        return true;
+      }
+    } catch (e) {
+      console.warn('[notificationService] Web Push Subscription info:', e);
+    }
+    return false;
+  }
+
+  /**
+   * Sincroniza o endpoint do Web Push com o backend
+   */
+  private async syncPushSubscriptionToServer(sub: PushSubscription, userEmail?: string): Promise<void> {
+    try {
+      await fetch('/api/notifications/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          subscription: sub.toJSON(),
+          userEmail: userEmail || 'leitor@fatosbr.com.br',
+          subscribedAt: new Date().toISOString()
+        })
+      }).catch(() => {});
+    } catch {}
   }
 
   public isSupported(): boolean {
@@ -226,6 +293,29 @@ class NotificationService {
       }
     } catch (err) {
       console.warn('Erro ao emitir push de teste:', err);
+      return false;
+    }
+  }
+
+  /**
+   * Envia alerta de Breaking News para todos os dispositivos inscritos via Web Push (funciona mesmo com navegador fechado)
+   */
+  public async broadcastBreakingNewsPush(event: Event): Promise<boolean> {
+    try {
+      await fetch('/api/notifications/broadcast-push', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: `FatosBR • ${(event.category || 'URGENTE').toUpperCase()}: ${event.title}`,
+          body: event.summary || 'Acontecimento urgente consolidado pela inteligência analítica do FatosBR.',
+          url: `/?event=${encodeURIComponent(event.id)}`,
+          eventId: event.id,
+          tag: `fatosbr-push-${event.id}`,
+          timestamp: new Date().toISOString()
+        })
+      });
+      return true;
+    } catch {
       return false;
     }
   }

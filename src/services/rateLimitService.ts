@@ -14,6 +14,10 @@ function getTodayString(): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+// Armazenamento em memória (Tier 1: Ultra-rápido, 0ms latency)
+let memoryFeedCache: any[] | null = null;
+let memoryFeedTimestamp: number = 0;
+
 export const rateLimitService = {
   /**
    * Retorna quantas atualizações manuais o usuário já realizou hoje
@@ -76,42 +80,87 @@ export const rateLimitService = {
   },
 
   /**
-   * Salva feed em cache local para evitar consumo excessivo de cotas das APIs
+   * Salva feed em cache em duas camadas (Tier 1: Memória + Tier 2: localStorage)
    */
   saveCachedFeed(events: any[]): void {
-    if (typeof window === 'undefined') return;
-    try {
-      localStorage.setItem(STORAGE_KEY_FEED_CACHE, JSON.stringify(events));
-      localStorage.setItem(STORAGE_KEY_FEED_TIMESTAMP, String(Date.now()));
-    } catch (e) {
-      console.warn('Não foi possível salvar cache de notícias:', e);
+    if (!Array.isArray(events) || events.length === 0) return;
+    const now = Date.now();
+    // 1. Tier 1: Cache em Memória
+    memoryFeedCache = [...events];
+    memoryFeedTimestamp = now;
+
+    // 2. Tier 2: Persistência no localStorage
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(STORAGE_KEY_FEED_CACHE, JSON.stringify(events));
+        localStorage.setItem(STORAGE_KEY_FEED_TIMESTAMP, String(now));
+      } catch (e) {
+        console.warn('Não foi possível salvar cache de notícias no localStorage:', e);
+      }
     }
   },
 
   /**
-   * Obtém feed em cache se for válido (ex: até 15 minutos)
+   * Obtém feed do cache de duas camadas (Tier 1 Memória prioritário, Tier 2 localStorage fallback)
    */
   getCachedFeed(maxAgeMs = 15 * 60 * 1000): any[] | null {
+    const now = Date.now();
+
+    // 1. Verifica Tier 1 (Memória RAM instantânea)
+    if (memoryFeedCache && memoryFeedCache.length >= 20 && now - memoryFeedTimestamp < maxAgeMs) {
+      return memoryFeedCache;
+    }
+
+    // 2. Verifica Tier 2 (localStorage)
     if (typeof window === 'undefined') return null;
     try {
       const rawTime = localStorage.getItem(STORAGE_KEY_FEED_TIMESTAMP);
       if (!rawTime) return null;
-      const age = Date.now() - parseInt(rawTime, 10);
-      if (age > maxAgeMs) return null; // cache expirado
+      const age = now - parseInt(rawTime, 10);
+      if (age > maxAgeMs) return null; // expirado
 
       const rawFeed = localStorage.getItem(STORAGE_KEY_FEED_CACHE);
       if (!rawFeed) return null;
       const parsed = JSON.parse(rawFeed);
-      return Array.isArray(parsed) && parsed.length > 0 ? parsed : null;
+      if (Array.isArray(parsed) && parsed.length >= 20) {
+        // Aquece Tier 1 de Memória para chamadas subsequentes
+        memoryFeedCache = parsed;
+        memoryFeedTimestamp = parseInt(rawTime, 10);
+        return parsed;
+      }
+      return null;
     } catch {
       return null;
     }
   },
 
   /**
-   * Limpa cache de notícias e reseta timestamps para permitir recarga forçada imediata
+   * Retorna qualquer feed disponível imediatamente no Tier 1 ou Tier 2 (mesmo stale)
+   * para exibição instantânea no mount sem tela em branco ou loading
+   */
+  getInstantFeedSync(): any[] | null {
+    if (memoryFeedCache && memoryFeedCache.length > 0) {
+      return memoryFeedCache;
+    }
+    if (typeof window === 'undefined') return null;
+    try {
+      const rawFeed = localStorage.getItem(STORAGE_KEY_FEED_CACHE);
+      if (!rawFeed) return null;
+      const parsed = JSON.parse(rawFeed);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        memoryFeedCache = parsed;
+        return parsed;
+      }
+    } catch {}
+    return null;
+  },
+
+  /**
+   * Limpa cache de notícias em ambas as camadas (Memória + localStorage)
    */
   clearCache(): void {
+    memoryFeedCache = null;
+    memoryFeedTimestamp = 0;
     if (typeof window === 'undefined') return;
     try {
       localStorage.removeItem(STORAGE_KEY_FEED_CACHE);

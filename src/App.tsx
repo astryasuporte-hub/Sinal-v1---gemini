@@ -388,8 +388,11 @@ export default function App() {
   );
   const [rateLimitToast, setRateLimitToast] = useState<string | null>(null);
 
-  // Domain state - Notícias em tempo real (dados mockados removidos)
-  const [events, setEvents] = useState<Event[]>([]);
+  // Domain state - Notícias em tempo real com hidratação instantânea via cache de duas camadas (Memória + localStorage)
+  const [events, setEvents] = useState<Event[]>(() => {
+    const instant = rateLimitService.getInstantFeedSync();
+    return Array.isArray(instant) && instant.length > 0 ? (instant as Event[]) : [];
+  });
   const [isFeedRefreshing, setIsFeedRefreshing] = useState(false);
   const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
   const [entities, setEntities] = useState<Entity[]>(() => {
@@ -447,7 +450,7 @@ export default function App() {
     }
   }, [historyItems]);
 
-  // Função para buscar notícias reais via provedores e alimentar o feed em tempo real (25 a 40 notícias)
+  // Função para buscar notícias reais via provedores e alimentar o feed em tempo real com cache em 2 camadas (Memória + localStorage)
   const loadRealTimeNews = async (isManualRefresh = false) => {
     if (isManualRefresh) {
       const check = rateLimitService.recordUserRefresh();
@@ -461,9 +464,9 @@ export default function App() {
       setDailyRefreshRemaining(check.remaining);
       setIsFeedRefreshing(true);
     } else {
-      // Carregamento inicial / automático: verifica cache recente para economizar cotas de APIs
+      // 1. Camada 1 & 2: Verifica cache de duas camadas (Memória + localStorage)
       const cached = rateLimitService.getCachedFeed();
-      if (cached && cached.length >= 25) {
+      if (cached && cached.length >= 20) {
         const viewedIds = new Set(historyItems.map((h) => h.event.id));
         const cachedWithViewed = cached.map((e) => ({
           ...e,
@@ -477,7 +480,15 @@ export default function App() {
         setFeedAnimationKey((k) => k + 1);
         return;
       }
-      setIsLoading(true);
+
+      // Se há cache instantâneo prévio, exibe imediatamente para 0ms de tela branca
+      const instantFallback = rateLimitService.getInstantFeedSync();
+      if (instantFallback && instantFallback.length > 0 && events.length === 0) {
+        setEvents(instantFallback as Event[]);
+        setIsLoading(false);
+      } else if (events.length === 0) {
+        setIsLoading(true);
+      }
     }
 
     setHasError(false);
@@ -491,6 +502,7 @@ export default function App() {
           isViewed: viewedIds.has(e.id) ? true : Boolean(e.isViewed),
         }));
         setEvents(eventsWithViewed);
+        // Persiste nas duas camadas (Memória RAM + localStorage)
         rateLimitService.saveCachedFeed(eventsWithViewed);
         setLastSyncTime(
           new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
@@ -2468,21 +2480,31 @@ export default function App() {
         </button>
       </nav>
 
-      {/* ================= 6. MODAIS CENTRAIS ================= */}
-      <EventDetailModal
-        event={activeEventModal}
-        onClose={() => setActiveEventModal(null)}
-        onToggleSave={handleToggleSave}
-      />
+      {/* ================= 6. MODAIS CENTRAIS COM TRANSIÇÕES SPRING E LAYOUT SHIFT ================= */}
+      <AnimatePresence mode="wait">
+        {activeEventModal && (
+          <EventDetailModal
+            key={`event-modal-${activeEventModal.id}`}
+            event={activeEventModal}
+            onClose={() => setActiveEventModal(null)}
+            onToggleSave={handleToggleSave}
+          />
+        )}
+      </AnimatePresence>
 
-      <EntityDetailModal
-        entity={activeEntityModal}
-        onClose={() => setActiveEntityModal(null)}
-        allEvents={events}
-        onOpenEventDetail={(ev) => setActiveEventModal(ev)}
-        onToggleSaveEvent={handleToggleSave}
-        onToggleFollow={handleToggleFollowEntity}
-      />
+      <AnimatePresence mode="wait">
+        {activeEntityModal && (
+          <EntityDetailModal
+            key={`entity-modal-${activeEntityModal.id}`}
+            entity={activeEntityModal}
+            onClose={() => setActiveEntityModal(null)}
+            allEvents={events}
+            onOpenEventDetail={(ev) => setActiveEventModal(ev)}
+            onToggleSaveEvent={handleToggleSave}
+            onToggleFollow={handleToggleFollowEntity}
+          />
+        )}
+      </AnimatePresence>
 
       <BillingModal
         isOpen={isBillingModalOpen}

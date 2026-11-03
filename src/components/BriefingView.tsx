@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Event, UserSubscription } from '../types/sinal';
 import {
   Sun,
@@ -45,16 +45,31 @@ interface BriefingViewProps {
   isSuperAdmin?: boolean;
 }
 
+// Imagens oficiais enviadas pelo usuário
+const MORNING_IMG = '/assets/aistudio/Amanhecer_sobre_a_cidade__1__638f4414.png';
+const EVENING_IMG = '/assets/aistudio/Horizonte_urbano_ao_anoitecer__2__4a1dd254.png';
+
+// Tier 1: Cache estático em memória e pré-carregamento imediato no escopo do módulo (0ms de latência)
+let preloadedBriefingImages: HTMLImageElement[] = [];
+const BRIEFING_CACHE_KEY = 'fatosbr_briefing_editorial_cache_v2';
+let memoryBriefingsCache: BriefingItem[] | null = null;
+
+if (typeof window !== 'undefined') {
+  try {
+    const img1 = new Image();
+    img1.src = MORNING_IMG;
+    const img2 = new Image();
+    img2.src = EVENING_IMG;
+    preloadedBriefingImages = [img1, img2];
+  } catch {}
+}
+
 export const BriefingView: React.FC<BriefingViewProps> = ({
   events = [],
   subscription,
   onOpenEventDetail,
   onOpenBilling
 }) => {
-  // Imagens oficiais enviadas pelo usuário
-  const MORNING_IMG = '/assets/aistudio/Amanhecer_sobre_a_cidade__1__638f4414.png';
-  const EVENING_IMG = '/assets/aistudio/Horizonte_urbano_ao_anoitecer__2__4a1dd254.png';
-
   // Estados de filtro e busca
   const [activeFilter, setActiveFilter] = useState<'all' | 'morning' | 'evening' | 'preferences'>('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -75,12 +90,25 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
     setTimeout(() => setToastMsg(null), 3500);
   };
 
-  // Pré-carregamento imediato das artes oficiais de briefing para garantir exibição instantânea (0ms)
+  // Pré-carregamento agressivo e hidratação imediata de preferências (0ms)
   useEffect(() => {
-    const pre1 = new Image();
-    pre1.src = MORNING_IMG;
-    const pre2 = new Image();
-    pre2.src = EVENING_IMG;
+    if (preloadedBriefingImages.length === 0 && typeof window !== 'undefined') {
+      const pre1 = new Image();
+      pre1.src = MORNING_IMG;
+      const pre2 = new Image();
+      pre2.src = EVENING_IMG;
+      preloadedBriefingImages = [pre1, pre2];
+    }
+
+    // Pré-carrega também imagens dos acontecimentos que compõem os briefings
+    if (Array.isArray(events) && events.length > 0) {
+      events.slice(0, 8).forEach((ev) => {
+        if (ev.imageUrl) {
+          const img = new Image();
+          img.src = ev.imageUrl;
+        }
+      });
+    }
 
     try {
       const saved = localStorage.getItem('fatosbr_briefing_prefs');
@@ -93,7 +121,7 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
         if (typeof p.eveningEnabled === 'boolean') setEveningEnabled(p.eveningEnabled);
       }
     } catch {}
-  }, []);
+  }, [events]);
 
   // Base estruturada de Briefings
   const briefingsData: BriefingItem[] = useMemo(() => [

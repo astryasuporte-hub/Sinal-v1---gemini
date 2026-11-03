@@ -18,7 +18,7 @@ import {
   FileText,
   TrendingUp,
   Bell,
-  Infinity,
+  Infinity as InfinityIcon,
   Layers,
   ChevronRight,
   RefreshCw,
@@ -673,7 +673,7 @@ export const BillingModal: React.FC<BillingModalProps> = ({
 
               <div className="p-3.5 rounded-xl bg-zinc-950/40 border border-zinc-800/70 space-y-1.5">
                 <div className="flex items-center gap-2">
-                  <Infinity className="w-4 h-4 text-zinc-300" />
+                  <InfinityIcon className="w-4 h-4 text-zinc-300" />
                   <span className="font-bold text-white">Acompanhamento ilimitado</span>
                 </div>
                 <p className="text-[11px] text-zinc-400 leading-snug">

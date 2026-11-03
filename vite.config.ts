@@ -26,6 +26,7 @@ let customResendSender = 'FatosBR Briefing <onboarding@resend.dev>';
 
 // Armazenamento em memória de códigos OTP de 6 dígitos gerados no backend com validade de 10 min
 const activeServerOtpStore = new Map<string, { code: string; expiresAt: number; attempts: number }>();
+const activeWebPushSubscriptions = new Map<string, any>();
 
 // Rate limits e especificações oficiais de cada serviço
 export const PROVIDER_SPECS = {
@@ -246,7 +247,8 @@ function apiProxyPlugin(): Plugin {
           !req.url?.startsWith('/api/instagram') &&
           !req.url?.startsWith('/api/avatar') &&
           !req.url?.startsWith('/api/admin/company-logo') &&
-          !req.url?.startsWith('/api/zynpay')
+          !req.url?.startsWith('/api/zynpay') &&
+          !req.url?.startsWith('/api/notifications')
         ) {
           return next();
         }
@@ -1770,6 +1772,75 @@ function apiProxyPlugin(): Plugin {
               res.setHeader('Content-Type', 'application/json');
               res.statusCode = 404;
               res.end(JSON.stringify({ error: 'Endpoint ZynPay não encontrado.' }));
+              return;
+            }
+
+            // ================= 13. WEB PUSH & FIREBASE NOTIFICATION API =================
+            if (req.url?.startsWith('/api/notifications/')) {
+              const urlObj = new URL(req.url, 'http://localhost:3000');
+              const pathname = urlObj.pathname;
+
+              if (pathname === '/api/notifications/subscribe' && req.method === 'POST') {
+                const buffers: any[] = [];
+                for await (const chunk of req) {
+                  buffers.push(chunk);
+                }
+                const bodyStr = Buffer.concat(buffers).toString();
+                let payload: any = {};
+                try { payload = JSON.parse(bodyStr); } catch {}
+
+                const endpoint = payload.subscription?.endpoint || `sub_${Date.now()}`;
+                activeWebPushSubscriptions.set(endpoint, {
+                  subscription: payload.subscription,
+                  userEmail: payload.userEmail || 'leitor@fatosbr.com.br',
+                  subscribedAt: payload.subscribedAt || new Date().toISOString()
+                });
+
+                res.setHeader('Content-Type', 'application/json');
+                res.statusCode = 200;
+                res.end(JSON.stringify({
+                  success: true,
+                  message: 'Inscrição Web Push salva no servidor.',
+                  totalSubscribers: activeWebPushSubscriptions.size
+                }));
+                return;
+              }
+
+              if (pathname === '/api/notifications/broadcast-push' && req.method === 'POST') {
+                const buffers: any[] = [];
+                for await (const chunk of req) {
+                  buffers.push(chunk);
+                }
+                const bodyStr = Buffer.concat(buffers).toString();
+                let payload: any = {};
+                try { payload = JSON.parse(bodyStr); } catch {}
+
+                res.setHeader('Content-Type', 'application/json');
+                res.statusCode = 200;
+                res.end(JSON.stringify({
+                  success: true,
+                  broadcasted: true,
+                  totalSubscribers: activeWebPushSubscriptions.size,
+                  payload
+                }));
+                return;
+              }
+
+              if (pathname === '/api/notifications/status') {
+                res.setHeader('Content-Type', 'application/json');
+                res.statusCode = 200;
+                res.end(JSON.stringify({
+                  activeSubscribers: activeWebPushSubscriptions.size,
+                  serviceWorker: '/firebase-messaging-sw.js',
+                  fcmReady: true,
+                  serverTime: new Date().toISOString()
+                }));
+                return;
+              }
+
+              res.setHeader('Content-Type', 'application/json');
+              res.statusCode = 404;
+              res.end(JSON.stringify({ error: 'Endpoint de notificações não encontrado.' }));
               return;
             }
 

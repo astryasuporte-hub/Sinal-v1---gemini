@@ -49,6 +49,7 @@ import {
 } from 'lucide-react';
 import { FinancialDashboard } from './FinancialDashboard';
 import { ticketService } from '../services/ticketService';
+import { useSupportTickets } from '../hooks/useSupportTickets';
 import { soundAlertService } from '../services/soundAlertService';
 import { notificationService } from '../services/notificationService';
 import { ApiHealthModal } from './ApiHealthModal';
@@ -216,11 +217,28 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
     | 'deleteAccount'
     | 'helpCenter'
     | 'contactSupport'
+    | 'myTickets'
     | 'terms'
     | 'paymentMethod'
     | 'invoices'
     | 'logoutConfirm'
   >(null);
+
+  // Hook personalizado de tickets com sincronização em tempo real no Supabase
+  const {
+    userTickets,
+    isLoading: isTicketsLoading,
+    isSyncing: isTicketsSyncing,
+    openCount: openTicketsCount,
+    answeredCount: answeredTicketsCount,
+    createTicket: createSupportTicket,
+    replyTicket: replySupportTicket,
+    refreshTickets
+  } = useSupportTickets({ userEmail: profile.email, userName: profile.name });
+
+  const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null);
+  const [ticketFollowUpText, setTicketFollowUpText] = useState<string>('');
+  const [supportTab, setSupportTab] = useState<'new' | 'list'>('new');
 
   // Form states for modals
   const [editNameInput, setEditNameInput] = useState(profile.name);
@@ -1164,14 +1182,48 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
               </div>
 
               <div
-                onClick={() => setActiveModal('contactSupport')}
+                onClick={() => {
+                  setSupportTab('new');
+                  setActiveModal('contactSupport');
+                }}
                 className="p-3 rounded-xl hover:bg-[#16181f] transition cursor-pointer flex items-center justify-between group"
               >
                 <div className="flex items-center gap-3">
                   <Mail className="w-4 h-4 text-zinc-400 group-hover:text-white" />
                   <div>
                     <div className="font-semibold text-white">Entrar em contato</div>
-                    <div className="text-[11px] text-zinc-400">Fale com nosso suporte</div>
+                    <div className="text-[11px] text-zinc-400">Abrir chamado de suporte</div>
+                  </div>
+                </div>
+                <ChevronRight className="w-4 h-4 text-zinc-500 group-hover:text-white transition" />
+              </div>
+
+              <div
+                onClick={() => {
+                  setSupportTab('list');
+                  setActiveModal('contactSupport');
+                }}
+                className="p-3 rounded-xl hover:bg-[#16181f] transition cursor-pointer flex items-center justify-between group border border-zinc-800/80 bg-zinc-950/40"
+              >
+                <div className="flex items-center gap-3">
+                  <Clock className="w-4 h-4 text-zinc-400 group-hover:text-white" />
+                  <div>
+                    <div className="font-semibold text-white flex items-center gap-2">
+                      <span>Meus Chamados</span>
+                      {userTickets.length > 0 && (
+                        <span className="px-1.5 py-0.2 rounded-full text-[10px] font-mono bg-zinc-800 text-zinc-300 border border-zinc-700">
+                          {userTickets.length}
+                        </span>
+                      )}
+                      {answeredTicketsCount > 0 && (
+                        <span className="px-1.5 py-0.2 rounded-full text-[10px] font-mono bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                          {answeredTicketsCount} nova{answeredTicketsCount > 1 ? 's' : ''} resposta{answeredTicketsCount > 1 ? 's' : ''}
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-[11px] text-zinc-400">
+                      {isTicketsSyncing ? 'Sincronizando com Supabase...' : 'Acompanhe respostas e status em tempo real'}
+                    </div>
                   </div>
                 </div>
                 <ChevronRight className="w-4 h-4 text-zinc-500 group-hover:text-white transition" />
@@ -2308,80 +2360,353 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
         </div>
       )}
 
-      {/* MODAL: ENTRAR EM CONTATO */}
+      {/* MODAL: CENTRAL DE SUPORTE E TICKETS EM TEMPO REAL */}
       {activeModal === 'contactSupport' && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-sm p-4 animate-fade-in">
-          <div className="relative w-full max-w-md rounded-2xl border border-[#1f2229] bg-[#0c0d10] p-6 text-zinc-100 shadow-2xl space-y-5">
-            <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+          <div className="relative w-full max-w-xl rounded-2xl border border-[#1f2229] bg-[#0c0d10] p-6 text-zinc-100 shadow-2xl space-y-4 max-h-[90vh] flex flex-col overflow-hidden">
+            {/* Cabeçalho */}
+            <div className="flex items-center justify-between border-b border-zinc-800 pb-3 shrink-0">
               <div>
-                <h3 className="text-base font-bold text-white">Fale com o Suporte</h3>
-                <p className="text-[11px] text-zinc-400 mt-0.5">Resposta em até 24 horas úteis.</p>
+                <h3 className="text-base font-bold text-white flex items-center gap-2">
+                  <span>Suporte & Chamados</span>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-1">
+                    <span className={`w-1.5 h-1.5 rounded-full ${isTicketsSyncing ? 'bg-emerald-400 animate-spin' : 'bg-emerald-400'}`} />
+                    <span>Supabase Live</span>
+                  </span>
+                </h3>
+                <p className="text-[11px] text-zinc-400 mt-0.5">
+                  Acompanhamento de tickets sincronizado com banco de dados em tempo real.
+                </p>
               </div>
-              <button onClick={() => setActiveModal(null)} className="p-1 text-zinc-400 hover:text-white">
+              <button
+                onClick={() => {
+                  setActiveModal(null);
+                  setSelectedTicketId(null);
+                }}
+                className="p-1.5 text-zinc-400 hover:text-white rounded-lg transition"
+              >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <form
-              onSubmit={async (e) => {
-                e.preventDefault();
-                try {
-                  const newTicket = await ticketService.createTicket(
-                    profile.email,
-                    profile.name,
-                    contactSubject,
-                    contactMessage
-                  );
-                  showToast(`Chamado #${newTicket.id} criado com sucesso! Notificação enviada para seu e-mail.`);
-                } catch {
-                  showToast('Chamado registrado com sucesso! Responderemos em breve.');
-                }
-                setActiveModal(null);
-                setContactSubject('');
-                setContactMessage('');
-              }}
-              className="space-y-3.5 text-xs"
-            >
-              <div className="space-y-1">
-                <label className="text-zinc-300">Assunto</label>
-                <input
-                  type="text"
-                  required
-                  placeholder="Dúvida, feedback ou problema..."
-                  value={contactSubject}
-                  onChange={(e) => setContactSubject(e.target.value)}
-                  className="w-full bg-[#111216] border border-[#1e2026] rounded-xl px-3 py-2 text-zinc-200 focus:outline-none focus:border-zinc-500"
-                />
-              </div>
-
-              <div className="space-y-1">
-                <label className="text-zinc-300">Mensagem</label>
-                <textarea
-                  required
-                  rows={4}
-                  placeholder="Descreva o que podemos ajudar..."
-                  value={contactMessage}
-                  onChange={(e) => setContactMessage(e.target.value)}
-                  className="w-full bg-[#111216] border border-[#1e2026] rounded-xl px-3 py-2 text-zinc-200 focus:outline-none focus:border-zinc-500"
-                />
-              </div>
-
-              <div className="pt-2 flex gap-2 justify-end">
+            {/* Alternância de Abas: Novo Chamado vs Meus Chamados */}
+            <div className="flex items-center justify-between gap-2 border-b border-zinc-800/80 pb-2 shrink-0">
+              <div className="inline-flex rounded-xl p-1 bg-zinc-900 border border-zinc-800 text-xs">
                 <button
                   type="button"
-                  onClick={() => setActiveModal(null)}
-                  className="px-4 py-2 rounded-xl bg-zinc-800 text-zinc-200"
+                  onClick={() => {
+                    setSupportTab('new');
+                    setSelectedTicketId(null);
+                  }}
+                  className={`px-3 py-1.5 rounded-lg font-semibold transition cursor-pointer ${
+                    supportTab === 'new'
+                      ? 'bg-white text-black shadow-sm'
+                      : 'text-zinc-400 hover:text-white'
+                  }`}
                 >
-                  Cancelar
+                  Novo Chamado
                 </button>
                 <button
-                  type="submit"
-                  className="px-5 py-2 rounded-xl bg-white text-black font-bold"
+                  type="button"
+                  onClick={() => setSupportTab('list')}
+                  className={`px-3 py-1.5 rounded-lg font-semibold transition cursor-pointer flex items-center gap-1.5 ${
+                    supportTab === 'list'
+                      ? 'bg-white text-black shadow-sm'
+                      : 'text-zinc-400 hover:text-white'
+                  }`}
                 >
-                  Enviar mensagem
+                  <span>Meus Chamados</span>
+                  <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${
+                    supportTab === 'list' ? 'bg-black text-white' : 'bg-zinc-800 text-zinc-300'
+                  }`}>
+                    {userTickets.length}
+                  </span>
                 </button>
               </div>
-            </form>
+
+              <button
+                type="button"
+                onClick={() => {
+                  refreshTickets();
+                  showToast('Tickets sincronizados com Supabase.');
+                }}
+                disabled={isTicketsSyncing}
+                className="text-[11px] font-mono text-zinc-400 hover:text-white flex items-center gap-1 px-2 py-1 rounded bg-zinc-900/60 border border-zinc-800 transition disabled:opacity-50"
+                title="Sincronizar com banco de dados Supabase"
+              >
+                <RefreshCw className={`w-3 h-3 ${isTicketsSyncing ? 'animate-spin text-emerald-400' : ''}`} />
+                <span>Atualizar</span>
+              </button>
+            </div>
+
+            {/* Conteúdo da Aba: Formulário de Novo Chamado */}
+            {supportTab === 'new' && (
+              <form
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  if (!contactSubject.trim() || !contactMessage.trim()) return;
+                  try {
+                    const newTicket = await createSupportTicket(contactSubject, contactMessage);
+                    showToast(`Chamado #${newTicket.id} registrado com sucesso no Supabase!`);
+                    setContactSubject('');
+                    setContactMessage('');
+                    setSupportTab('list');
+                    setSelectedTicketId(newTicket.id);
+                  } catch {
+                    showToast('Chamado registrado com sucesso.');
+                  }
+                }}
+                className="space-y-3.5 text-xs overflow-y-auto flex-1 pr-1"
+              >
+                <div className="p-3 rounded-xl bg-zinc-950 border border-zinc-800 space-y-1">
+                  <span className="text-zinc-400 text-[11px] block">Identificação do Solicitante:</span>
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-white font-semibold">{profile.name}</span>
+                    <span className="text-zinc-400 font-mono text-[11px]">{profile.email}</span>
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-zinc-300 font-medium">Assunto do Chamado</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Ex: Dúvida sobre cobrança Pix, sugestão de pauta..."
+                    value={contactSubject}
+                    onChange={(e) => setContactSubject(e.target.value)}
+                    className="w-full bg-[#111216] border border-[#1e2026] rounded-xl px-3.5 py-2.5 text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-white transition"
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-zinc-300 font-medium">Mensagem Detalhada</label>
+                  <textarea
+                    required
+                    rows={4}
+                    placeholder="Descreva seu caso com o máximo de detalhes possível para agilizarmos a resposta..."
+                    value={contactMessage}
+                    onChange={(e) => setContactMessage(e.target.value)}
+                    className="w-full bg-[#111216] border border-[#1e2026] rounded-xl px-3.5 py-2.5 text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-white transition"
+                  />
+                </div>
+
+                <div className="pt-2 flex gap-2 justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setActiveModal(null)}
+                    className="px-4 py-2.5 rounded-xl bg-zinc-800 text-zinc-200 hover:bg-zinc-700 transition cursor-pointer"
+                  >
+                    Fechar
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-5 py-2.5 rounded-xl bg-white text-black font-bold hover:bg-zinc-200 transition cursor-pointer shadow-md"
+                  >
+                    Abrir Chamado no Supabase
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {/* Conteúdo da Aba: Lista de Meus Chamados com Detalhe / Thread */}
+            {supportTab === 'list' && (
+              <div className="space-y-3 text-xs overflow-y-auto flex-1 pr-1">
+                {selectedTicketId ? (
+                  // Visão do Detalhe do Chamado Selecionado
+                  (() => {
+                    const ticket = userTickets.find((t) => t.id === selectedTicketId);
+                    if (!ticket) return null;
+
+                    return (
+                      <div className="space-y-3.5">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedTicketId(null)}
+                          className="inline-flex items-center gap-1.5 text-zinc-400 hover:text-white transition cursor-pointer font-medium mb-1"
+                        >
+                          <ChevronLeft className="w-3.5 h-3.5" />
+                          <span>Voltar para lista de chamados</span>
+                        </button>
+
+                        <div className="p-4 rounded-xl bg-zinc-950 border border-zinc-800 space-y-2">
+                          <div className="flex items-center justify-between flex-wrap gap-2">
+                            <span className="font-mono text-[11px] text-zinc-400">#{ticket.id}</span>
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono uppercase ${
+                                ticket.status === 'open'
+                                  ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                                  : ticket.status === 'answered'
+                                  ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                                  : 'bg-zinc-800 text-zinc-400 border border-zinc-700'
+                              }`}
+                            >
+                              {ticket.status === 'open'
+                                ? '● Em Análise'
+                                : ticket.status === 'answered'
+                                ? '● Respondido'
+                                : '● Resolvido'}
+                            </span>
+                          </div>
+
+                          <h4 className="font-bold text-white text-sm">{ticket.subject}</h4>
+                          <p className="text-zinc-300 text-xs whitespace-pre-wrap leading-relaxed bg-[#111216] p-3 rounded-lg border border-zinc-800/80">
+                            {ticket.message}
+                          </p>
+                          <div className="text-[10px] font-mono text-zinc-500">
+                            Aberto em: {new Date(ticket.createdAt).toLocaleString('pt-BR')}
+                          </div>
+                        </div>
+
+                        {/* Thread de Respostas */}
+                        <div className="space-y-2.5">
+                          <h5 className="font-semibold text-white text-xs flex items-center justify-between">
+                            <span>Respostas ({ticket.responses?.length || 0})</span>
+                            <span className="text-[10px] text-emerald-400 font-mono">
+                              ● Atualização automática
+                            </span>
+                          </h5>
+
+                          {ticket.responses && ticket.responses.length > 0 ? (
+                            ticket.responses.map((resp, i) => (
+                              <div
+                                key={resp.id || i}
+                                className={`p-3 rounded-xl border text-xs space-y-1.5 ${
+                                  resp.from === 'admin'
+                                    ? 'bg-zinc-900 border-zinc-700 text-zinc-100 ml-3'
+                                    : 'bg-black border-zinc-800 text-zinc-300 mr-3'
+                                }`}
+                              >
+                                <div className="flex items-center justify-between text-[11px]">
+                                  <span className="font-bold text-white flex items-center gap-1.5">
+                                    <span className={`w-1.5 h-1.5 rounded-full ${resp.from === 'admin' ? 'bg-emerald-400' : 'bg-zinc-400'}`} />
+                                    <span>{resp.authorName}</span>
+                                    {resp.from === 'admin' && (
+                                      <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-zinc-800 text-zinc-300 border border-zinc-700">
+                                        Equipe
+                                      </span>
+                                    )}
+                                  </span>
+                                  <span className="text-[10px] font-mono text-zinc-500">
+                                    {new Date(resp.sentAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                                  </span>
+                                </div>
+                                <p className="text-xs whitespace-pre-wrap leading-relaxed">
+                                  {resp.message}
+                                </p>
+                              </div>
+                            ))
+                          ) : (
+                            <div className="p-3 text-center text-zinc-500 border border-dashed border-zinc-800 rounded-xl text-xs">
+                              Seu chamado está na fila prioritária de atendimento. Assim que a equipe responder, aparecerá aqui instantaneamente.
+                            </div>
+                          )}
+
+                          {/* Campo de Enviar Tréplica / Dúvida adicional */}
+                          {ticket.status !== 'resolved' && (
+                            <div className="pt-2 flex gap-2">
+                              <input
+                                type="text"
+                                placeholder="Adicionar resposta ou complemento..."
+                                value={ticketFollowUpText}
+                                onChange={(e) => setTicketFollowUpText(e.target.value)}
+                                onKeyDown={async (e) => {
+                                  if (e.key === 'Enter' && ticketFollowUpText.trim()) {
+                                    e.preventDefault();
+                                    await replySupportTicket(ticket.id, ticketFollowUpText.trim(), profile.name);
+                                    setTicketFollowUpText('');
+                                    showToast('Resposta enviada com sucesso.');
+                                  }
+                                }}
+                                className="flex-1 bg-[#111216] border border-zinc-800 rounded-xl px-3 py-2 text-xs text-zinc-100 focus:outline-none focus:border-white transition font-sans"
+                              />
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  if (!ticketFollowUpText.trim()) return;
+                                  await replySupportTicket(ticket.id, ticketFollowUpText.trim(), profile.name);
+                                  setTicketFollowUpText('');
+                                  showToast('Resposta enviada com sucesso.');
+                                }}
+                                className="px-3.5 py-2 rounded-xl bg-white text-black font-bold text-xs hover:bg-zinc-200 transition cursor-pointer"
+                              >
+                                Responder
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()
+                ) : userTickets.length > 0 ? (
+                  // Lista de Chamados
+                  <div className="space-y-2">
+                    {userTickets.map((t) => (
+                      <div
+                        key={t.id}
+                        onClick={() => setSelectedTicketId(t.id)}
+                        className="p-3.5 rounded-xl bg-[#111216] hover:bg-zinc-900 border border-zinc-800/80 hover:border-zinc-700 transition cursor-pointer flex items-center justify-between gap-3 group"
+                      >
+                        <div className="space-y-1 min-w-0 flex-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-mono text-[10px] text-zinc-500">#{t.id}</span>
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono uppercase ${
+                                t.status === 'open'
+                                  ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                                  : t.status === 'answered'
+                                  ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                                  : 'bg-zinc-800 text-zinc-400 border border-zinc-700'
+                              }`}
+                            >
+                              {t.status === 'open'
+                                ? '● Em Análise'
+                                : t.status === 'answered'
+                                ? '● Respondido'
+                                : '● Resolvido'}
+                            </span>
+                            <span className="text-[10px] text-zinc-500 font-mono">
+                              {new Date(t.createdAt).toLocaleDateString('pt-BR')}
+                            </span>
+                          </div>
+
+                          <h4 className="font-semibold text-white text-xs truncate group-hover:text-zinc-200">
+                            {t.subject}
+                          </h4>
+                          <p className="text-[11px] text-zinc-400 truncate">
+                            {t.message}
+                          </p>
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0">
+                          {t.responses?.length ? (
+                            <span className="px-2 py-1 rounded bg-zinc-800 text-zinc-300 font-mono text-[10px]">
+                              {t.responses.length} resp.
+                            </span>
+                          ) : null}
+                          <ChevronRight className="w-4 h-4 text-zinc-500 group-hover:text-white transition" />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  // Estado Vazio
+                  <div className="text-center py-8 px-4 rounded-xl border border-dashed border-zinc-800 bg-zinc-950/40 space-y-2">
+                    <Clock className="w-8 h-8 text-zinc-600 mx-auto" />
+                    <h4 className="text-sm font-bold text-white">Nenhum chamado aberto</h4>
+                    <p className="text-xs text-zinc-400 max-w-sm mx-auto">
+                      Você ainda não abriu tickets de suporte. Dúvidas sobre o plano Pro ou relatórios de erros podem ser enviados a qualquer momento.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setSupportTab('new')}
+                      className="mt-2 px-4 py-2 rounded-xl bg-white text-black font-bold text-xs hover:bg-zinc-200 transition cursor-pointer"
+                    >
+                      Abrir Primeiro Chamado
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}

@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useMemo, useEffect } from 'react';
+import { motion } from 'motion/react';
 import { Entity, Event, Topic, Source } from '../types/sinal';
 import {
   X,
@@ -264,10 +265,14 @@ export const EntityDetailModal: React.FC<EntityDetailModalProps> = ({
   };
 
   return (
-    <div
+    <motion.div
       role="dialog"
       aria-modal="true"
-      className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 bg-black/85 backdrop-blur-md overflow-y-auto animate-fade-in"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.22, ease: 'easeOut' }}
+      className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 bg-black/85 backdrop-blur-md overflow-y-auto"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -280,8 +285,20 @@ export const EntityDetailModal: React.FC<EntityDetailModalProps> = ({
         </div>
       )}
 
-      {/* Main Container */}
-      <div className="relative w-full max-w-5xl min-h-screen sm:min-h-0 sm:max-h-[92vh] sm:rounded-3xl border-0 sm:border border-[#1f2229] bg-[#0c0d10] text-zinc-100 shadow-2xl flex flex-col overflow-hidden">
+      {/* Main Container com animação spring e layout shift suave */}
+      <motion.div
+        layout
+        initial={{ opacity: 0, scale: 0.94, y: 26 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.95, y: 16 }}
+        transition={{
+          type: 'spring',
+          damping: 26,
+          stiffness: 320,
+          mass: 0.85
+        }}
+        className="relative w-full max-w-5xl min-h-screen sm:min-h-0 sm:max-h-[92vh] sm:rounded-3xl border-0 sm:border border-[#1f2229] bg-[#0c0d10] text-zinc-100 shadow-2xl flex flex-col overflow-hidden will-change-transform"
+      >
         {/* ================= 1. CAPA PANORÂMICA & TOP BAR ================= */}
         <div className="relative w-full">
           {/* Imagem de Capa (quando aplicável) */}
@@ -795,7 +812,7 @@ export const EntityDetailModal: React.FC<EntityDetailModalProps> = ({
             Fechar
           </button>
         </footer>
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>
   );
 };

@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
+import { motion } from 'motion/react';
 import { Event, Entity } from '../types/sinal';
 import {
   ChevronLeft,
@@ -156,11 +157,15 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
       : 'https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?auto=format&fit=crop&w=1200&q=80';
 
   return (
-    <div
+    <motion.div
       role="dialog"
       aria-modal="true"
       aria-labelledby="event-modal-title"
-      className="fixed inset-0 z-50 flex flex-col sm:items-center sm:justify-center bg-black/95 sm:bg-black/85 backdrop-blur-md p-0 sm:p-4 overflow-hidden animate-fade-in"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.22, ease: 'easeOut' }}
+      className="fixed inset-0 z-50 flex flex-col sm:items-center sm:justify-center bg-black/95 sm:bg-black/85 backdrop-blur-md p-0 sm:p-4 overflow-hidden"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -173,8 +178,20 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
         </div>
       )}
 
-      {/* Main Editorial Container - Tela cheia no Mobile com cantos arredondados no Desktop */}
-      <div className="relative w-full h-full sm:h-auto sm:max-h-[92vh] sm:max-w-2xl sm:rounded-3xl border-0 sm:border border-[#1f2229] bg-[#0c0d10] text-zinc-100 shadow-2xl flex flex-col overflow-hidden">
+      {/* Main Editorial Container - Tela cheia no Mobile com cantos arredondados no Desktop e Spring Physics */}
+      <motion.div
+        layout
+        initial={{ opacity: 0, scale: 0.94, y: 26 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.95, y: 16 }}
+        transition={{
+          type: 'spring',
+          damping: 26,
+          stiffness: 320,
+          mass: 0.85
+        }}
+        className="relative w-full h-full sm:h-auto sm:max-h-[92vh] sm:max-w-2xl sm:rounded-3xl border-0 sm:border border-[#1f2229] bg-[#0c0d10] text-zinc-100 shadow-2xl flex flex-col overflow-hidden will-change-transform"
+      >
         {/* ================= HEADER EDITORIAL / NAVEGAÇÃO FIXA ================= */}
         <header className="sticky top-0 z-40 flex items-center justify-between px-3 sm:px-6 py-2.5 sm:py-3.5 bg-[#0c0d10]/98 backdrop-blur-md border-b border-[#1f2229] shrink-0">
           <div className="flex items-center gap-2">
@@ -419,7 +436,7 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
             <ExternalLink className="w-3.5 h-3.5" />
           </a>
         </footer>
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>
   );
 };
