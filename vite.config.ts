@@ -12,14 +12,14 @@ import { saveCompanyLogoUpload } from './src/server/companyLogoService';
 
 dotenv.config();
 
-// Chaves reais de API mantidas exclusivamente no servidor (nunca vazadas para o front-end)
+// Chaves reais de API mantidas exclusivamente no servidor via variáveis de ambiente
 const SERVER_SECRET_KEYS = {
-  GNEWS: 'e37cbd9a24021b33730f26bbdf72bd50',
-  NEWSAPI: '83351ebfb2bc4f4181c331af407e37e9',
-  WORLD_NEWS: '5aa4881ff72042da94cf264799fe3bd6',
-  NVIDIA_NIM: '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',
-  RESEND: process.env.RESEND_API_KEY || 're_Zpj8ZrCY_Cvmd3wj2NkeKoiJmJhAgkeQe',
-  ZYNPAY: process.env.ZYNPAY_API_KEY || 'zpk_live_iDWdmDVWUV97IQ3qUhNwB4qXn8zCrrVMaboFeeP8qm8'
+  GNEWS: process.env.GNEWS_API_KEY || '',
+  NEWSAPI: process.env.NEWSAPI_API_KEY || '',
+  WORLD_NEWS: process.env.WORLD_NEWS_API_KEY || '',
+  NVIDIA_NIM: process.env.NVIDIA_NIM_API_KEY || '',
+  RESEND: process.env.RESEND_API_KEY || '',
+  ZYNPAY: process.env.ZYNPAY_API_KEY || ''
 };
 
 let customResendSender = 'FatosBR Briefing <onboarding@resend.dev>';
