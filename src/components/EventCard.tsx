@@ -157,9 +157,9 @@ export const EventCard: React.FC<EventCardProps> = ({
   return (
     <motion.article
       onClick={() => onOpenDetail(event)}
-      whileHover={{ scale: 1.015, y: -2 }}
-      whileTap={{ scale: 0.988 }}
-      transition={{ type: 'tween', duration: 0.2, ease: [0.25, 1, 0.5, 1] }}
+      whileHover={{ scale: 1.018, y: -3 }}
+      whileTap={{ scale: 0.985 }}
+      transition={{ type: 'spring', stiffness: 380, damping: 24 }}
       className="group relative rounded-2xl bg-[#111215] hover:border-zinc-700/80 transition-[border-color,box-shadow] duration-200 overflow-hidden cursor-pointer w-full max-w-full border border-[#1e2025] hover:shadow-2xl hover:shadow-black/60 transform-gpu will-change-transform"
       style={{ backfaceVisibility: 'hidden', WebkitFontSmoothing: 'subpixel-antialiased' }}
     >

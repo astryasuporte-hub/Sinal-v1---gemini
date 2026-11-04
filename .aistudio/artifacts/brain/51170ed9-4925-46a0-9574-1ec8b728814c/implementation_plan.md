@@ -1,121 +1,67 @@
-# Correção do Feed, Webhook ZynPay, SSE no Checkout Pix, Otimização de Briefings e Suporte Real
+# Plano Mestre de Conclusão e Lançamento Integral — FatosBR
 
-Plano de engenharia para atender às melhorias solicitadas no FatosBR:
-1. **Correção do Layout do Card de Notícias (`EventCard.tsx`)**: Ajuste na sobreposição dos botões de ação (salvar, compartilhar, opções) sobre a tag de data e tempo de leitura.
-2. **Configuração de Webhook ZynPay no `AdminPanel.tsx`**: Interface para atualização dinâmica da URL de retorno, segredo criptográfico e ferramenta de teste de ping/simulação Pix.
-3. **Listener SSE no Checkout Pix (`BillingModal.tsx`)**: Escuta em tempo real do evento de confirmação de pagamento Pix com modal/check animado e ativação automática do plano Pro.
-4. **Aceleração Instantânea dos Briefings (`BriefingView.tsx`)**: Pré-carregamento de imagens, cache em memória e transições de zero latência.
-5. **Tickets de Suporte Reais (`ticketService.ts`)**: Persistência no Supabase com sincronização de status e respostas reais.
+Plano abrangente para finalizar todas as frentes necessárias para colocar o **FatosBR** no ar como um produto jornalístico profissional, lucrativo e escalável.
 
 ---
 
-## User Review & Critical Decisions
+## 1. O Papel das Ferramentas: AI Studio vs. ChatGPT Plus
 
-> [!IMPORTANT]
-> **Decisões confirmadas pelo usuário:**
-> - **Tickets de Suporte**: Persistência em tabela real no Supabase (`support_tickets`) com sincronização de status e histórico de respostas.
-> - **Confirmação Pix (SSE)**: Check animado imediato com liberação automática da assinatura Pro.
-> - **Webhook ZynPay**: Painel com edição de URL pública, segredo e botão para disparar teste de ping e simulação de payload Pix.
-
----
-
-### 1. Overview & Core Concept
-
-- **Feed de Notícias Livre de Colisões**:
-  - No mobile (telas estreitas como Samsung Galaxy A35), o cabeçalho do `EventCard` divide verticalmente o bloco de identificação da fonte/tempo e posiciona as ações (salvar, compartilhar, menu) no topo alinhado (`items-start`), garantindo que nenhum botão fique sobreposto à barra de data e tempo de leitura.
-- **Webhook ZynPay Operacional**:
-  - Os administradores podem redefinir a URL de retorno e o segredo `whsec_...` diretamente pelo painel e testar a integridade do endpoint com 1 clique (simulando payload de pagamento Pix do Banco Central).
-- **Checkout em Tempo Real via SSE**:
-  - Quando o usuário gera o Pix no `BillingModal`, o front-end ativa um listener de Server-Sent Events (`/api/zynpay/events`). Assim que o pagamento é liquidado, a tela exibe uma celebração com check animado e atualiza a sessão para Pro sem recarregar a página.
-- **Briefings com Carregamento Instantâneo**:
-  - Elimina o atraso de abertura da aba de Briefings através de pré-carregamento imediato das artes gráficas e cache em memória (SWR).
-- **Chamada Real de Tickets**:
-  - Envio e resposta de tickets de suporte conectados ao banco Supabase, com suporte a RLS e fallback resiliente.
+| Frente de Trabalho | Onde Fazer | Como Executar |
+| :--- | :--- | :--- |
+| **Código, Banco & Infraestrutura** | **Google AI Studio Build** (Aqui) | Desenvolvimento direto, compilação, testes, integração Supabase, ZynPay SSE e Vite. Sem necessidade de copiar e colar. |
+| **Templates & Roteiros de WhatsApp** | **ChatGPT Plus + AI Studio** | O ChatGPT Plus pode gerar e refinar variações de copywriting; o AI Studio implementa os templates diretamente no código da API da Meta. |
+| **Diretrizes Editoriais & Prompts** | **ChatGPT Plus + AI Studio** | Criação de personas e regras anti-viés político para alimentação do motor de síntese. |
+| **Marketing de Aquisição & Vendas** | **ChatGPT Plus** | Roteiros de posts, anúncios para redes sociais e emails de onboarding para os primeiros 1.000 assinantes. |
 
 ---
 
-### 2. User Experience & Visual Design
+## 2. Pilares de Execução para Conclusão do FatosBR
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                        FATOSBR EVENT CARD (FEED)                       │
-├────────────────────────────────────────────────────────────────────────┤
-│  [CN] CNN Brasil                           [Salvar] [Share] [Mais]     │
-│  há 2 dias · 1 min de leitura                                          │
-│                                                                        │
-│  BoJ tenta estimular economia do Japão há muito tempo, diz economista  │
-│  Autoridade monetária manteve taxa básica de juros em 1,5% ao ano...   │
-│                                                                        │
-│  [Tecnologia & IA] · 1 fonte CNN                          Contexto ▾   │
-└────────────────────────────────────────────────────────────────────────┘
-```
-
-#### A. Ajuste de Layout no `EventCard.tsx`
-- Mudança do cabeçalho de `items-center` com `flex-wrap` desordenado para uma estrutura em grid/duas linhas:
-  - **Linha 1 (Superior)**: Logotipo + Nome da Fonte no canto esquerdo e barra de botões (`Bookmark`, `Share`, `More`) no canto direito com `items-start` e alinhamento estável.
-  - **Linha 2 (Metadados)**: Texto limpo e desobstruído com o tempo decorrido e estimativa de leitura (`há 2 dias · 1 min de leitura`), sem cápsulas inchadas que colidam com os botões.
-
-#### B. Painel de Webhook ZynPay (`AdminPanel.tsx` / `AdminFinancialZynPayPanel.tsx`)
-- Card dedicado dentro da aba de Cobrança / Financeiro:
-  - Input para `URL de Retorno Webhook` (com botão de cópia rápida).
-  - Input para `Segredo de Segurança do Webhook` (com botão para mascarar/revelar).
-  - Botão **"⚡ Testar Ping do Webhook"** e **"🧪 Simular Pagamento Pix (R$ 29,90)"**.
-  - Histórico de entregas e telemetria dos últimos eventos processados.
-
-#### C. Confirmação Animada do Pix via SSE (`BillingModal.tsx`)
-- Listener do evento SSE `pix.payment.confirmed` conectado ao `zynpayService`.
-- Overlay de celebração animado com `framer-motion`:
-  - Ícone de check gigante com pulsar suave monocromático/esmeralda.
-  - Texto: *"Pagamento Pix Confirmado com Sucesso!"*.
-  - Subtexto: *"Sua conta FatosBR Pro foi liberada imediatamente."*.
-  - Transição suave para o estado de Pro Ativo.
-
-#### D. Otimização de Velocidade nos Briefings (`BriefingView.tsx`)
-- Cache SWR imediato em `localStorage`: o leitor vê os resumos matinal e noturno sem esperar requisições de rede.
-- Pré-carregamento no `useEffect` das imagens de fundo (`Amanhecer_sobre_a_cidade` e `Horizonte_urbano_ao_anoitecer`).
-
-#### E. Tickets de Suporte no Supabase (`ticketService.ts` e `AdminPanel.tsx`)
-- Consulta e inserção em `public.support_tickets`.
-- Sincronização em tempo real das mensagens e respostas do administrador.
+### Pilar A: Engenharia & Funcionalidades Finais (AI Studio)
+1. **Conexão Real do WhatsApp Cloud API**:
+   - Configuração de envio de mensagens no `src/services/whatsappService.ts` com suporte a templates aprovados pela Meta.
+   - Painel administrativo no `AdminPanel.tsx` para envio em massa do Briefing Matinal e Alertas de Breaking News com métricas de entrega.
+2. **Web Push API (Notificações no Navegador Fechado)**:
+   - Registro de Service Worker para envio de alertas urgentes via Firebase Cloud Messaging (FCM).
+3. **Esteira de Pagamentos Pix (ZynPay)**:
+   - Validação da reconciliação com SSE no `BillingModal.tsx` e gestão de assinaturas no Supabase.
+4. **Auditoria de Performance**:
+   - Garantir carregamento inicial do feed em menos de 300ms com estratégia de cache em memória + localStorage (SWR).
 
 ---
 
-### 3. Technical Architecture & Data Strategy
-
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                        FLUXO DE INTEGRAÇÕES                            │
-│                                                                        │
-│   EventCard (Feed) ───────> Header Anti-Colisão (items-start)          │
-│                                                                        │
-│   BillingModal (Pix) ─────> SSE Listener (/api/zynpay/events)          │
-│                                      │                                 │
-│                                      ▼                                 │
-│                             Check Animado & Pro                        │
-│                                                                        │
-│   AdminPanel ─────────────> ZynPay Webhook Config & Ping Tester        │
-│                                                                        │
-│   ticketService ──────────> Supabase table `support_tickets`           │
-│                                                                        │
-│   BriefingView ───────────> Image Preloader + Local Cache SWR          │
-└────────────────────────────────────────────────────────────────────────┘
-```
+### Pilar B: Conteúdo Editorial & Automação de WhatsApp
+1. **Modelos de Templates Oficiais da Meta**:
+   - `fatosbr_briefing_matinal`: Resumo dos 3 principais fatos econômicos e políticos do dia com link de leitura direta.
+   - `fatosbr_breaking_news`: Alerta imediato de fatos extraordinários com alta relevância de mercado.
+   - `fatosbr_briefing_noturno`: Fechamento de mercado, cotações e o que esperar para o dia seguinte.
+2. **Diretrizes de Tom Editorial**:
+   - Linguagem concisa, monocromática, estritamente factual e acessível para todas as faixas etárias.
 
 ---
 
-### 4. Step-by-Step Implementation Steps
+### Pilar C: Jurídico, LGPD & Monetização
+1. **Conformidade Legal**:
+   - Termos de Uso, Política de Privacidade e Canal DPO já estruturados no `LegalCenterModal.tsx`.
+2. **Modelo de Negócio**:
+   - Plano Pro (R$ 29,90/mês ou R$ 249,00/ano no Pix).
+   - Período de cortesia (Trial de 7 dias) para novos cadastros.
 
-1. **Correção do `EventCard.tsx`**:
-   - Reestruturar o cabeçalho do card para separar a identificação da fonte e o badge de tempo das ações de topo, eliminando a colisão no mobile.
-2. **Configuração de Webhook ZynPay em `AdminPanel.tsx` e `AdminFinancialZynPayPanel.tsx`**:
-   - Integrar formulário de URL e Segredo com persistência em servidor/local.
-   - Adicionar ferramenta de simulação e teste de ping de webhook Pix.
-3. **SSE no `BillingModal.tsx`**:
-   - Inscrever o modal no canal de eventos em tempo real do `zynpayService`.
-   - Adicionar estado de pagamento aprovado com modal de check animado.
-4. **Aceleração dos Briefings em `BriefingView.tsx`**:
-   - Implementar pré-carregamento imediato de assets e leitura direta de cache sem loader bloqueante.
-5. **Integração Real de Tickets no `ticketService.ts`**:
-   - Adicionar chamadas reais ao Supabase (`supabase.from('support_tickets')`) para criação, listagem e resposta de tickets.
-6. **Verificação & Build**:
-   - Rodar `lint_applet` (`tsc --noEmit`) e `compile_applet`.
+---
+
+### Pilar D: Estratégia de Lançamento & Crescimento
+1. **Lançamento para Beta Fechado (Primeiros 50 Usuários)**:
+   - Teste prático do recebimento dos briefings via WhatsApp e abertura no leitor sem erros.
+2. **Indexação & SEO**:
+   - Otimização de tags OpenGraph e Twitter Cards para que os links compartilhados no WhatsApp e redes exibam prévias com imagem e título corretos.
+
+---
+
+## 3. Próximos Passos Imediatos de Execução
+
+1. **Implementação do Envio de Briefings WhatsApp no Admin**:
+   - Finalizar a integração técnica do `whatsappService.ts` com simulador de envio e webhook de status de entrega.
+2. **Configuração de Web Push no Service Worker**:
+   - Integrar permissão de notificações nativas no `ProfileView` e envio de teste.
+3. **Revisão e Ativação do Fluxo de Caixa**:
+   - Testar o ciclo completo: Geração do Pix no modal -> Confirmação SSE -> Liberação instantânea no banco de dados.

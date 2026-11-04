@@ -4,26 +4,23 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { motion } from 'motion/react';
+import { motion, AnimatePresence } from 'motion/react';
 import { Event, Entity } from '../types/sinal';
 import {
-  ChevronLeft,
-  X,
+  ArrowLeft,
   Bookmark,
   BookmarkCheck,
   Share2,
-  ExternalLink,
-  Layers,
-  Clock,
-  Check,
-  Plus,
-  Building2,
-  User,
+  MoreHorizontal,
+  Calendar,
   Landmark,
-  ArrowRight,
-  ShieldCheck,
-  Sparkles,
-  Link as LinkIcon
+  Play,
+  Pause,
+  ExternalLink,
+  Check,
+  Clock,
+  Layers,
+  Sparkles
 } from 'lucide-react';
 
 interface EventDetailModalProps {
@@ -42,20 +39,11 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
   onToggleFollowEntity
 }) => {
   const [toastMessage, setToastMessage] = useState<string | null>(null);
-  const [localFollowedMap, setLocalFollowedMap] = useState<Record<string, boolean>>({});
+  const [fontSize, setFontSize] = useState<'normal' | 'large' | 'xlarge'>('normal');
+  const [isPlayingAudio, setIsPlayingAudio] = useState(false);
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
 
-  // Sync followed entities when event changes
-  useEffect(() => {
-    if (event) {
-      const initialMap: Record<string, boolean> = {};
-      event.entities.forEach((ent) => {
-        initialMap[ent.id] = ent.isFollowed;
-      });
-      setLocalFollowedMap(initialMap);
-    }
-  }, [event]);
-
-  // Handle ESC key to close modal
+  // Fecha o modal com tecla ESC
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -66,13 +54,13 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [onClose]);
 
-  // Modo padrão: 'full' (notícia íntegra completa) com opção de alternar para 'summary' (resumo)
-  const [readingMode, setReadingMode] = useState<'full' | 'summary'>('full');
-
+  // Interrompe qualquer áudio em reprodução ao fechar ou trocar de matéria
   useEffect(() => {
-    if (event?.id) {
-      setReadingMode('full');
-    }
+    return () => {
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+      }
+    };
   }, [event?.id]);
 
   if (!event) return null;
@@ -85,293 +73,337 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
   };
 
   const handleShare = async () => {
+    const shareUrl = `https://fatosbr.com.br/?event=${encodeURIComponent(event.id)}`;
     const shareData = {
-      title: event.title,
-      text: `${event.title} — FatosBR`,
-      url: window.location.href
+      title: `${event.title} — FatosBR`,
+      text: `${event.summary}\n\nLeia no FatosBR:`,
+      url: shareUrl
     };
 
-    if (navigator.share) {
+    if (navigator.share && /mobile|android|iphone|ipad/i.test(navigator.userAgent)) {
       try {
         await navigator.share(shareData);
+        showToast('Compartilhado com sucesso!');
         return;
       } catch {
-        // Fallback to clipboard if cancelled or not supported
+        // Fallback para área de transferência se cancelar
       }
     }
 
     try {
-      await navigator.clipboard.writeText(`${event.title}\n\n${event.summary}\n\nVia FatosBR: ${window.location.href}`);
+      await navigator.clipboard.writeText(shareUrl);
       showToast('Link copiado para a área de transferência');
     } catch {
-      showToast('Acontecimento pronto para compartilhar');
+      showToast('Link pronto para compartilhar');
     }
   };
 
-  const handleToggleFollow = (entityId: string) => {
-    setLocalFollowedMap((prev) => {
-      const nextState = !prev[entityId];
-      if (onToggleFollowEntity) {
-        onToggleFollowEntity(entityId);
+  // Alternador de reprodução em áudio (Web Speech Synthesis nativa)
+  const toggleAudio = () => {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+      showToast('Síntese de áudio não suportada neste dispositivo');
+      return;
+    }
+
+    if (isPlayingAudio) {
+      window.speechSynthesis.cancel();
+      setIsPlayingAudio(false);
+      showToast('Leitura pausada');
+      return;
+    }
+
+    window.speechSynthesis.cancel();
+    const narrationText = `${event.title}. ${event.summary}. ${event.whatHappened || ''}`;
+    const utterance = new SpeechSynthesisUtterance(narrationText);
+    utterance.lang = 'pt-BR';
+    utterance.rate = 0.95;
+
+    utterance.onend = () => setIsPlayingAudio(false);
+    utterance.onerror = () => setIsPlayingAudio(false);
+
+    window.speechSynthesis.speak(utterance);
+    setIsPlayingAudio(true);
+    showToast('Ouvindo matéria...');
+  };
+
+  // Ciclo de tamanho da tipografia (Acessibilidade para idosos e leitura zen)
+  const cycleFontSize = () => {
+    setFontSize((prev) => {
+      if (prev === 'normal') {
+        showToast('Tamanho do texto: Grande');
+        return 'large';
       }
-      showToast(nextState ? 'Você agora está acompanhando esta entidade' : 'Entidade removida dos seguidos');
-      return { ...prev, [entityId]: nextState };
+      if (prev === 'large') {
+        showToast('Tamanho do texto: Muito Grande');
+        return 'xlarge';
+      }
+      showToast('Tamanho do texto: Padrão');
+      return 'normal';
     });
   };
 
-  const wordCount = (
-    event.title +
-    ' ' +
-    event.summary +
-    ' ' +
-    (event.whyItMatters || '') +
-    ' ' +
-    (event.timeline?.map((t) => t.title + ' ' + t.description).join(' ') || '')
-  )
-    .split(/\s+/)
-    .filter(Boolean).length;
-  const readingTimeMin = Math.max(1, Math.ceil(wordCount / 160));
+  // Formatação de data e horário conforme referência oficial
+  const formatDateTime = (dateString?: string) => {
+    if (!dateString) return '18 de abr. de 2025 · 14:51';
+    const date = new Date(dateString);
+    if (isNaN(date.getTime())) return dateString;
 
-  const getSourceBadge = (sourceName: string) => {
-    const nameLower = sourceName.toLowerCase();
-    if (nameLower.includes('reuters')) return { bg: '#ff8000', label: 'R' };
-    if (nameLower.includes('bloomberg')) return { bg: '#2b2b2b', label: 'BBG' };
-    if (nameLower.includes('valor')) return { bg: '#004b87', label: 'Valor' };
-    if (nameLower.includes('cnbc')) return { bg: '#005596', label: 'CNBC' };
-    if (nameLower.includes('estadão')) return { bg: '#002b49', label: 'Estadão' };
-    if (nameLower.includes('folha')) return { bg: '#003366', label: 'Folha' };
-    if (nameLower.includes('g1')) return { bg: '#c4170c', label: 'g1' };
-    if (nameLower.includes('cnn')) return { bg: '#cc0000', label: 'CNN' };
-    if (nameLower.includes('infomoney')) return { bg: '#00a86b', label: 'IM' };
-    if (nameLower.includes('financial')) return { bg: '#fcd0a1', text: '#333', label: 'FT' };
-    return { bg: '#27272a', label: sourceName.slice(0, 2).toUpperCase() };
+    const formattedDate = date.toLocaleDateString('pt-BR', {
+      day: 'numeric',
+      month: 'short',
+      year: 'numeric'
+    });
+    const formattedTime = date.toLocaleTimeString('pt-BR', {
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+
+    return `${formattedDate} · ${formattedTime}`;
   };
 
-  const defaultFallbackImage =
-    event.category === 'Tecnologia & IA' || event.category === 'Tecnologia'
-      ? 'https://images.unsplash.com/photo-1518770660439-4636190af475?auto=format&fit=crop&w=1200&q=80'
-      : event.category === 'Economia'
+  const primarySource = event.sources[0]?.sourceName || 'InfoMoney';
+
+  const defaultImage =
+    event.category === 'Economia'
       ? 'https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?auto=format&fit=crop&w=1200&q=80'
-      : event.category === 'Política'
-      ? 'https://images.unsplash.com/photo-1541872703-74c5e44368f9?auto=format&fit=crop&w=1200&q=80'
+      : event.category === 'Tecnologia & IA' || event.category === 'Tecnologia'
+      ? 'https://images.unsplash.com/photo-1518770660439-4636190af475?auto=format&fit=crop&w=1200&q=80'
       : 'https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?auto=format&fit=crop&w=1200&q=80';
 
   return (
-    <motion.div
+    <div
       role="dialog"
       aria-modal="true"
-      aria-labelledby="event-modal-title"
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      transition={{ duration: 0.22, ease: 'easeOut' }}
-      className="fixed inset-0 z-50 flex flex-col sm:items-center sm:justify-center bg-black/95 sm:bg-black/85 backdrop-blur-md p-0 sm:p-4 overflow-hidden"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
+      aria-labelledby="news-reading-title"
+      className="fixed inset-0 z-50 w-full h-full bg-[#000000] text-zinc-100 flex flex-col overflow-hidden animate-fade-in"
     >
-      {/* Toast Notification */}
+      {/* Toast Notification Flutuante */}
       {toastMessage && (
-        <div className="fixed top-5 left-1/2 -translate-x-1/2 z-[60] px-4 py-2 rounded-full bg-zinc-900 border border-zinc-700 text-white text-xs font-medium shadow-2xl flex items-center gap-2 animate-bounce-short">
+        <div className="fixed top-5 left-1/2 -translate-x-1/2 z-[70] px-4 py-2 rounded-full bg-zinc-900 border border-zinc-700 text-white text-xs font-medium shadow-2xl flex items-center gap-2 animate-bounce-short">
           <Check className="w-3.5 h-3.5 text-white" />
           <span>{toastMessage}</span>
         </div>
       )}
 
-      {/* Main Editorial Container - Tela cheia no Mobile com cantos arredondados no Desktop e Spring Physics */}
-      <motion.div
-        layout
-        initial={{ opacity: 0, scale: 0.94, y: 26 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.95, y: 16 }}
-        transition={{
-          type: 'spring',
-          damping: 26,
-          stiffness: 320,
-          mass: 0.85
-        }}
-        className="relative w-full h-full sm:h-auto sm:max-h-[92vh] sm:max-w-2xl sm:rounded-3xl border-0 sm:border border-[#1f2229] bg-[#0c0d10] text-zinc-100 shadow-2xl flex flex-col overflow-hidden will-change-transform"
-      >
-        {/* ================= HEADER EDITORIAL / NAVEGAÇÃO FIXA ================= */}
-        <header className="sticky top-0 z-40 flex items-center justify-between px-3 sm:px-6 py-2.5 sm:py-3.5 bg-[#0c0d10]/98 backdrop-blur-md border-b border-[#1f2229] shrink-0">
-          <div className="flex items-center gap-2">
-            {/* Botão de Voltar Proeminente (com texto visível e hitbox touch >= 44px) */}
+      {/* ========================================================
+          CABEÇALHO EDITORIAL COMPACTO & DISCRETO
+          (<- | FatosBR | Bookmark | Share | Menu)
+      ======================================================== */}
+      <header className="sticky top-0 z-40 w-full bg-[#000000]/95 backdrop-blur-md border-b border-zinc-900/80 px-4 sm:px-6 h-14 flex items-center justify-between shrink-0">
+        {/* Esquerda: Botão Voltar + Logotipo FatosBR */}
+        <div className="flex items-center gap-3">
+          <button
+            onClick={onClose}
+            className="min-h-[44px] min-w-[44px] -ml-2 flex items-center justify-center text-zinc-200 hover:text-white transition cursor-pointer active:scale-95"
+            aria-label="Voltar para a página anterior"
+            title="Voltar"
+          >
+            <ArrowLeft className="w-5 h-5 text-white stroke-[2.2]" />
+          </button>
+
+          <span className="font-extrabold text-lg sm:text-xl text-white tracking-tight select-none">
+            Fatos<span className="text-zinc-400 font-semibold">BR</span>
+          </span>
+        </div>
+
+        {/* Direita: Salvar, Compartilhar e Menu de Opções */}
+        <div className="flex items-center gap-1 sm:gap-2">
+          <button
+            onClick={() => {
+              onToggleSave(event.id);
+              showToast(event.isSaved ? 'Notícia removida dos salvos' : 'Notícia salva nos seus itens');
+            }}
+            className="min-h-[44px] min-w-[44px] flex items-center justify-center text-zinc-300 hover:text-white transition cursor-pointer active:scale-95"
+            aria-label={event.isSaved ? 'Notícia Salva' : 'Salvar Notícia'}
+            title={event.isSaved ? 'Salva' : 'Salvar notícia'}
+          >
+            {event.isSaved ? (
+              <BookmarkCheck className="w-5 h-5 text-white fill-white" />
+            ) : (
+              <Bookmark className="w-5 h-5 text-zinc-300 hover:text-white" />
+            )}
+          </button>
+
+          <button
+            onClick={handleShare}
+            className="min-h-[44px] min-w-[44px] flex items-center justify-center text-zinc-300 hover:text-white transition cursor-pointer active:scale-95"
+            aria-label="Compartilhar Notícia"
+            title="Compartilhar"
+          >
+            <Share2 className="w-5 h-5 text-zinc-300 hover:text-white" />
+          </button>
+
+          <div className="relative">
             <button
-              onClick={onClose}
-              className="min-h-[44px] px-3.5 py-2 -ml-1 text-white bg-zinc-900 border border-zinc-700/80 hover:bg-zinc-800 hover:border-zinc-500 rounded-xl transition cursor-pointer text-xs font-bold flex items-center gap-1.5 active:scale-95 shadow-md shrink-0"
-              title="Voltar ao feed de notícias"
-              aria-label="Voltar"
+              onClick={() => setIsMenuOpen(!isMenuOpen)}
+              className="min-h-[44px] min-w-[44px] flex items-center justify-center text-zinc-300 hover:text-white transition cursor-pointer active:scale-95"
+              aria-label="Mais opções"
+              title="Opções"
             >
-              <ChevronLeft className="w-4 h-4 text-white stroke-[2.5]" />
-              <span>Voltar</span>
+              <MoreHorizontal className="w-5 h-5 text-zinc-300 hover:text-white" />
             </button>
 
-            <span className="text-zinc-600 hidden sm:inline">/</span>
-
-            <span className="text-[11px] font-mono tracking-wider uppercase text-zinc-300 font-semibold truncate max-w-[130px] sm:max-w-none px-2 py-0.5 rounded bg-zinc-900/60 border border-zinc-800">
-              {event.category}
-            </span>
-          </div>
-
-          <div className="flex items-center space-x-1 sm:space-x-1.5">
-            <button
-              onClick={() => {
-                onToggleSave(event.id);
-                showToast(event.isSaved ? 'Acontecimento removido dos salvos' : 'Acontecimento salvo nos seus itens');
-              }}
-              className={`min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl border transition cursor-pointer ${
-                event.isSaved
-                  ? 'bg-white text-black border-white'
-                  : 'text-zinc-300 hover:text-white border-zinc-800 bg-zinc-900 hover:bg-zinc-800'
-              }`}
-              title={event.isSaved ? 'Salvo' : 'Salvar acontecimento'}
-              aria-label="Salvar"
-            >
-              {event.isSaved ? (
-                <BookmarkCheck className="w-4 h-4 fill-black" />
-              ) : (
-                <Bookmark className="w-4 h-4" />
-              )}
-            </button>
-
-            <button
-              onClick={handleShare}
-              className="min-h-[44px] min-w-[44px] flex items-center justify-center text-zinc-300 hover:text-white rounded-xl border border-zinc-800 bg-zinc-900 hover:bg-zinc-800 transition cursor-pointer"
-              title="Compartilhar acontecimento"
-              aria-label="Compartilhar"
-            >
-              <Share2 className="w-4 h-4" />
-            </button>
-
-            <button
-              onClick={onClose}
-              className="min-h-[44px] min-w-[44px] flex items-center justify-center text-zinc-400 hover:text-white rounded-xl border border-zinc-800/80 bg-zinc-900/60 hover:bg-zinc-800 transition cursor-pointer ml-0.5"
-              title="Fechar"
-              aria-label="Fechar"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-        </header>
-
-        {/* ================= CORPO EDITORIAL — MODO LEITURA FOCADO (ZEN) ================= */}
-        <div className="flex-1 overflow-y-auto overscroll-contain px-4 sm:px-8 pt-4 pb-20 space-y-6">
-          {/* Metadados Unboxed (Zero-Pill) */}
-          <div className="flex items-center gap-2 text-xs font-mono text-zinc-400 flex-wrap">
-            <span className="text-white font-bold uppercase tracking-wider text-[11px]">
-              {event.category}
-            </span>
-            <span className="text-zinc-600">·</span>
-            <span>{event.relativeTime || 'Hoje'}</span>
-            <span className="text-zinc-600">·</span>
-            <span>{readingTimeMin} min de leitura</span>
-            {event.sources[0] && (
-              <>
-                <span className="text-zinc-600">·</span>
-                <span className="text-zinc-300 font-semibold">{event.sources[0].sourceName}</span>
-              </>
+            {/* Menu Dropdown Discreto */}
+            {isMenuOpen && (
+              <div className="absolute right-0 top-12 w-52 rounded-xl bg-[#111216] border border-zinc-800 shadow-2xl p-1.5 z-50 text-xs space-y-1 animate-fade-in">
+                <button
+                  onClick={() => {
+                    handleShare();
+                    setIsMenuOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-2.5 rounded-lg text-zinc-200 hover:bg-zinc-800 transition flex items-center justify-between"
+                >
+                  <span>Copiar link</span>
+                  <Share2 className="w-3.5 h-3.5 text-zinc-400" />
+                </button>
+                <button
+                  onClick={() => {
+                    cycleFontSize();
+                    setIsMenuOpen(false);
+                  }}
+                  className="w-full text-left px-3 py-2.5 rounded-lg text-zinc-200 hover:bg-zinc-800 transition flex items-center justify-between"
+                >
+                  <span>Ajustar tamanho da fonte</span>
+                  <span className="font-mono text-[10px] text-zinc-400 uppercase">{fontSize}</span>
+                </button>
+                {event.sources[0]?.url && (
+                  <a
+                    href={event.sources[0].url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={() => setIsMenuOpen(false)}
+                    className="w-full text-left px-3 py-2.5 rounded-lg text-zinc-200 hover:bg-zinc-800 transition flex items-center justify-between"
+                  >
+                    <span>Ver matéria original</span>
+                    <ExternalLink className="w-3.5 h-3.5 text-zinc-400" />
+                  </a>
+                )}
+              </div>
             )}
           </div>
+        </div>
+      </header>
 
-          {/* Imagem de Capa Cinematográfica */}
-          <div className="relative w-full aspect-video sm:h-72 rounded-2xl overflow-hidden border border-[#1f2229] bg-zinc-950 shadow-xl">
-            <img
-              src={event.imageUrl || defaultFallbackImage}
-              alt={event.title}
-              onError={(e) => {
-                (e.currentTarget as HTMLImageElement).src = defaultFallbackImage;
-              }}
-              className="w-full h-full object-cover object-center filter brightness-95 contrast-105"
-            />
-            <div className="absolute inset-0 bg-gradient-to-t from-[#0c0d10] via-transparent to-transparent opacity-80" />
-            <div className="absolute bottom-3 left-4 px-2.5 py-1 rounded-md bg-black/75 backdrop-blur-md border border-white/10 text-[11px] text-zinc-300 font-mono">
-              Fonte apurada: {event.sources[0]?.sourceName || 'FatosBR News Engine'}
+      {/* ========================================================
+          CORPO EDITORIAL PRINCIPAL (SCROLLÁVEL)
+          Legibilidade máxima, contraste elevado, tipografia moderna
+      ======================================================== */}
+      <main className="flex-1 overflow-y-auto overscroll-contain px-4 sm:px-6 py-6 pb-28">
+        <div className="max-w-2xl mx-auto space-y-6">
+          {/* Categoria em Etiqueta Simples e Discreta */}
+          <div>
+            <span className="inline-block px-3 py-1 rounded-full bg-zinc-900 border border-zinc-800 text-xs text-zinc-300 font-medium tracking-wide">
+              {event.category || 'Geral'}
+            </span>
+          </div>
+
+          {/* Título Principal com Destaque e Quebra Natural */}
+          <h1
+            id="news-reading-title"
+            className="text-2xl sm:text-3xl lg:text-[34px] font-bold text-white tracking-tight leading-[1.28] break-words font-sans"
+          >
+            {event.title}
+          </h1>
+
+          {/* Subtítulo Complementar (sem redundâncias) */}
+          {event.summary && (
+            <p className="text-base sm:text-lg text-zinc-400 font-normal leading-relaxed break-words font-sans">
+              {event.summary}
+            </p>
+          )}
+
+          {/* Metadados Monocromáticos Discretos */}
+          <div className="flex items-center gap-3 text-xs text-zinc-400 font-mono flex-wrap pt-1 border-t border-zinc-900">
+            <div className="flex items-center gap-1.5">
+              <Calendar className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
+              <span>{formatDateTime(event.publishedAt)}</span>
+            </div>
+
+            <span className="text-zinc-700 select-none">|</span>
+
+            <div className="flex items-center gap-1.5">
+              <Landmark className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
+              <span className="text-zinc-300 font-semibold">{primarySource}</span>
             </div>
           </div>
 
-          {/* Cabeçalho da Notícia: Título Completo e Subtítulo */}
-          <div className="space-y-3 pt-1">
-            <h1
-              id="event-modal-title"
-              className="text-2xl sm:text-3xl lg:text-[32px] font-bold text-white tracking-tight leading-[1.25] break-words"
-            >
-              {event.title}
-            </h1>
-
-            <p className="text-base sm:text-lg text-zinc-300 font-normal leading-relaxed break-words border-l-2 border-zinc-700 pl-4 py-1 italic">
-              {event.summary}
-            </p>
+          {/* Imagem Principal Ampla com Cantos Arredondados (Sem etiquetas sobrepostas) */}
+          <div className="w-full aspect-[16/10] sm:aspect-video rounded-2xl overflow-hidden bg-zinc-950 border border-zinc-900 shadow-xl">
+            <img
+              src={event.imageUrl || defaultImage}
+              alt={event.title}
+              onError={(e) => {
+                (e.currentTarget as HTMLImageElement).src = defaultImage;
+              }}
+              className="w-full h-full object-cover object-center"
+            />
           </div>
 
-          {/* Notícia Completa na Íntegra — Leitura Fluída e Tranquila */}
-          <article className="space-y-5 text-[16px] sm:text-[17px] text-zinc-200 leading-[1.85] font-normal selection:bg-zinc-700 selection:text-white pt-2">
-            {/* Parágrafo de Abertura / Fato Principal */}
-            <p className="first-letter:text-3xl first-letter:font-bold first-letter:mr-1 first-letter:float-left first-letter:text-white">
-              {event.whatHappened || event.summary}
-            </p>
+          {/* Corpo do Artigo / Matéria Editorial */}
+          <article
+            className={`space-y-5 text-zinc-200 font-normal selection:bg-zinc-800 selection:text-white transition-all ${
+              fontSize === 'normal'
+                ? 'text-base sm:text-[17px] leading-[1.8]'
+                : fontSize === 'large'
+                ? 'text-lg sm:text-[19px] leading-[1.9]'
+                : 'text-xl sm:text-[22px] leading-[2.0]'
+            }`}
+          >
+            {/* Parágrafos jornalísticos estruturados */}
+            {event.whatHappened ? (
+              <p className="text-zinc-100">{event.whatHappened}</p>
+            ) : null}
 
-            {/* Parágrafo de Aprofundamento Editorial */}
-            {event.summary && event.summary !== event.whatHappened && (
-              <p>
-                {event.summary}
-              </p>
+            {event.marketImpact && (
+              <p className="text-zinc-300">{event.marketImpact}</p>
             )}
 
-            {/* Análise de Contexto e Relevância em Texto Corrido */}
-            {event.whyItMatters && (
-              <div className="my-6 p-5 rounded-2xl bg-[#111216]/80 border-l-4 border-white/60 space-y-2">
-                <span className="text-xs font-mono uppercase tracking-wider text-zinc-400 font-bold block">
-                  Por que este acontecimento é relevante
-                </span>
-                <p className="text-[15px] sm:text-base text-zinc-300 leading-relaxed font-normal">
+            {event.nextSteps && (
+              <p className="text-zinc-300">{event.nextSteps}</p>
+            )}
+
+            {/* Seção "Por que isso importa?" (Opcional, curta e específica; oculta se vazia) */}
+            {event.whyItMatters && event.whyItMatters.trim().length > 0 && (
+              <section className="my-8 p-5 rounded-2xl bg-zinc-950 border border-zinc-800/80 space-y-2">
+                <h3 className="text-xs font-bold font-mono uppercase tracking-wider text-white flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-zinc-400" />
+                  <span>Por que isso importa</span>
+                </h3>
+                <p className="text-sm sm:text-base text-zinc-300 leading-relaxed font-normal">
                   {event.whyItMatters}
                 </p>
-              </div>
+              </section>
             )}
 
-            {/* Impacto de Mercado e Regulatório (se disponível) */}
-            {event.marketImpact && (
-              <p>
-                {event.marketImpact}
-              </p>
-            )}
-
-            {/* Próximos Passos e Monitoramento */}
-            {event.nextSteps && (
-              <p className="text-zinc-300">
-                {event.nextSteps}
-              </p>
-            )}
-
-            {/* Linha do Tempo Discreta (se houver histórico) */}
+            {/* Cronologia Fidedigna (apenas quando houver marcos e horários distintos) */}
             {event.timeline && event.timeline.length > 0 && (
-              <div className="pt-6 mt-8 border-t border-zinc-800/80 space-y-4">
-                <h3 className="text-xs sm:text-sm font-bold uppercase tracking-wider text-white">
-                  Cronologia dos acontecimentos
+              <section className="pt-6 my-6 border-t border-zinc-900 space-y-4">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-white font-mono flex items-center gap-2">
+                  <Clock className="w-3.5 h-3.5 text-zinc-400" />
+                  <span>Cronologia dos fatos</span>
                 </h3>
-                <div className="space-y-3">
+                <div className="space-y-3 pl-2 border-l border-zinc-800">
                   {event.timeline.map((item, idx) => (
-                    <div key={item.id || idx} className="flex items-start gap-3 text-xs sm:text-sm">
-                      <span className="font-mono text-zinc-400 shrink-0 mt-0.5 font-semibold">
+                    <div key={item.id || idx} className="text-xs sm:text-sm pl-3 relative">
+                      <div className="absolute -left-[17px] top-1.5 w-2 h-2 rounded-full bg-zinc-600 border border-black" />
+                      <div className="font-mono text-zinc-400 font-semibold mb-0.5">
                         {item.time || item.date}
-                      </span>
-                      <span className="text-zinc-600">·</span>
-                      <span className="text-zinc-200">
+                      </div>
+                      <div className="text-zinc-200">
                         <strong className="text-white font-semibold">{item.title}:</strong> {item.description}
-                      </span>
+                      </div>
                     </div>
                   ))}
                 </div>
-              </div>
+              </section>
             )}
           </article>
 
-          {/* Rodapé do Artigo: Fonte Original e Créditos */}
-          <div className="pt-8 border-t border-zinc-800/80 space-y-3">
-            <div className="flex items-center justify-between text-xs font-mono text-zinc-400">
-              <span>Fontes Jornalísticas ({event.sources.length})</span>
-              <span>Cobertura Verificada</span>
-            </div>
+          {/* Fontes Jornalísticas Compactas */}
+          <section className="pt-8 border-t border-zinc-900 space-y-3">
+            <h3 className="text-xs font-mono uppercase tracking-wider text-zinc-400">
+              Fontes jornalísticas verificadas
+            </h3>
             <div className="flex flex-wrap gap-2">
               {event.sources.map((src) => (
                 <a
@@ -379,64 +411,79 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
                   href={src.url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-[#111216] hover:bg-[#16181f] border border-zinc-800 hover:border-zinc-600 text-xs text-zinc-300 hover:text-white transition cursor-pointer"
+                  className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-zinc-950 hover:bg-zinc-900 border border-zinc-800 hover:border-zinc-700 text-xs text-zinc-300 hover:text-white transition cursor-pointer"
                 >
                   <span className="font-semibold text-white">{src.sourceName}</span>
-                  <span className="text-zinc-500 font-mono">({src.domain})</span>
+                  <span className="text-zinc-500 font-mono text-[11px]">({src.domain})</span>
                   <ExternalLink className="w-3.5 h-3.5 text-zinc-400" />
                 </a>
               ))}
             </div>
-          </div>
+          </section>
         </div>
+      </main>
 
-        {/* ================= BARRA INFERIOR FIXA TRANQUILA ================= */}
-        <footer className="sticky bottom-0 z-30 px-4 sm:px-6 py-3 bg-[#0c0d10]/98 border-t border-[#1f2229] backdrop-blur-md flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
+      {/* ========================================================
+          BARRA DE AÇÕES INFERIOR EDITORIAL (DOCK FIXO)
+          [ Aa Texto ] | [ ▷ Ouvir matéria ] | [ Bookmark Salvar ]
+      ======================================================== */}
+      <footer className="fixed bottom-0 inset-x-0 z-40 bg-[#000000] border-t border-zinc-900/90 py-2.5 px-4 sm:px-6">
+        <div className="max-w-md mx-auto grid grid-cols-3 items-center text-center">
+          {/* Ação 1: Ajustar Tamanho do Texto */}
+          <button
+            onClick={cycleFontSize}
+            className="flex flex-col items-center justify-center gap-1 py-1 text-zinc-300 hover:text-white transition cursor-pointer group active:scale-95"
+            title="Ajustar tamanho da fonte"
+            aria-label="Ajustar tamanho do texto"
+          >
+            <span className="text-base sm:text-lg font-bold font-serif leading-none tracking-tight group-hover:scale-105 transition-transform">
+              Aa
+            </span>
+            <span className="text-[11px] text-zinc-400 font-sans group-hover:text-zinc-200">
+              Texto
+            </span>
+          </button>
+
+          {/* Divisor Vertical */}
+          <div className="flex items-center justify-center">
             <button
-              onClick={() => {
-                onToggleSave(event.id);
-                showToast(event.isSaved ? 'Removido dos salvos' : 'Salvo nos seus favoritos');
-              }}
-              className={`min-h-[42px] px-3.5 rounded-xl border text-xs font-semibold flex items-center gap-2 transition cursor-pointer ${
-                event.isSaved
-                  ? 'bg-white text-black border-white'
-                  : 'bg-zinc-900 text-zinc-300 border-zinc-800 hover:text-white hover:bg-zinc-800'
-              }`}
+              onClick={toggleAudio}
+              className="flex flex-col items-center justify-center gap-1 py-1 text-zinc-300 hover:text-white transition cursor-pointer group active:scale-95 w-full border-x border-zinc-800/80 px-2"
+              title={isPlayingAudio ? 'Pausar reprodução de voz' : 'Ouvir matéria com síntese de voz'}
+              aria-label={isPlayingAudio ? 'Pausar áudio' : 'Ouvir matéria'}
             >
-              {event.isSaved ? (
-                <>
-                  <BookmarkCheck className="w-4 h-4 fill-black" />
-                  <span>Salvo</span>
-                </>
+              {isPlayingAudio ? (
+                <Pause className="w-5 h-5 text-white animate-pulse" />
               ) : (
-                <>
-                  <Bookmark className="w-4 h-4" />
-                  <span>Salvar notícia</span>
-                </>
+                <Play className="w-5 h-5 text-zinc-300 group-hover:text-white group-hover:scale-105 transition-transform" />
               )}
-            </button>
-
-            <button
-              onClick={handleShare}
-              className="min-h-[42px] px-3.5 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white hover:bg-zinc-800 transition cursor-pointer text-xs font-semibold flex items-center gap-1.5"
-            >
-              <Share2 className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Compartilhar</span>
+              <span className="text-[11px] text-zinc-400 font-sans group-hover:text-zinc-200">
+                {isPlayingAudio ? 'Pausar áudio' : 'Ouvir matéria'}
+              </span>
             </button>
           </div>
 
-          <a
-            href={event.sources[0]?.url || '#'}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="min-h-[42px] px-4 rounded-xl bg-white hover:bg-zinc-200 text-black text-xs font-bold transition flex items-center justify-center gap-2 shadow-md cursor-pointer ml-auto"
+          {/* Ação 3: Salvar Notícia */}
+          <button
+            onClick={() => {
+              onToggleSave(event.id);
+              showToast(event.isSaved ? 'Removido dos salvos' : 'Salvo nos seus favoritos');
+            }}
+            className="flex flex-col items-center justify-center gap-1 py-1 text-zinc-300 hover:text-white transition cursor-pointer group active:scale-95"
+            title={event.isSaved ? 'Notícia salva' : 'Salvar notícia'}
+            aria-label="Salvar notícia"
           >
-            <span>Ler matéria na íntegra no {event.sources[0]?.sourceName || 'Veículo Original'}</span>
-            <ExternalLink className="w-3.5 h-3.5" />
-          </a>
-        </footer>
-      </motion.div>
-    </motion.div>
+            {event.isSaved ? (
+              <BookmarkCheck className="w-5 h-5 text-white fill-white group-hover:scale-105 transition-transform" />
+            ) : (
+              <Bookmark className="w-5 h-5 text-zinc-300 group-hover:text-white group-hover:scale-105 transition-transform" />
+            )}
+            <span className="text-[11px] text-zinc-400 font-sans group-hover:text-zinc-200">
+              {event.isSaved ? 'Salvo' : 'Salvar'}
+            </span>
+          </button>
+        </div>
+      </footer>
+    </div>
   );
 };

@@ -136,9 +136,9 @@ export const LegalCenterModal: React.FC<LegalCenterModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex sm:items-center sm:justify-center bg-black/95 backdrop-blur-md p-0 sm:p-5 animate-fadeIn">
-      {/* Container Responsivo: Tela cheia no Mobile (Samsung A35), Dialog no Desktop */}
-      <div className="relative w-full h-full sm:h-auto sm:max-h-[92vh] sm:max-w-4xl bg-black border-0 sm:border sm:border-zinc-800 rounded-none sm:rounded-3xl shadow-2xl flex flex-col text-zinc-100 overflow-hidden">
+    <div className="fixed inset-0 z-50 w-full h-full bg-black flex flex-col text-zinc-100 overflow-hidden animate-fadeIn">
+      {/* Container em Tela Cheia */}
+      <div className="relative w-full h-full bg-black flex flex-col text-zinc-100 overflow-hidden">
         
         {/* ================= HEADER ================= */}
         <div className="px-4 sm:px-6 py-3.5 sm:py-4 border-b border-zinc-800 bg-[#09090b] flex items-center justify-between shrink-0">

@@ -272,7 +272,7 @@ export const EntityDetailModal: React.FC<EntityDetailModalProps> = ({
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
       transition={{ duration: 0.22, ease: 'easeOut' }}
-      className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 bg-black/85 backdrop-blur-md overflow-y-auto"
+      className="fixed inset-0 z-50 w-full h-full bg-black flex flex-col overflow-hidden"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -285,19 +285,19 @@ export const EntityDetailModal: React.FC<EntityDetailModalProps> = ({
         </div>
       )}
 
-      {/* Main Container com animação spring e layout shift suave */}
+      {/* Main Container com animação spring e layout shift suave em tela cheia */}
       <motion.div
         layout
-        initial={{ opacity: 0, scale: 0.94, y: 26 }}
+        initial={{ opacity: 0, scale: 0.98, y: 12 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.95, y: 16 }}
+        exit={{ opacity: 0, scale: 0.98, y: 12 }}
         transition={{
           type: 'spring',
           damping: 26,
           stiffness: 320,
           mass: 0.85
         }}
-        className="relative w-full max-w-5xl min-h-screen sm:min-h-0 sm:max-h-[92vh] sm:rounded-3xl border-0 sm:border border-[#1f2229] bg-[#0c0d10] text-zinc-100 shadow-2xl flex flex-col overflow-hidden will-change-transform"
+        className="relative w-full h-full bg-[#0c0d10] text-zinc-100 flex flex-col overflow-hidden will-change-transform"
       >
         {/* ================= 1. CAPA PANORÂMICA & TOP BAR ================= */}
         <div className="relative w-full">

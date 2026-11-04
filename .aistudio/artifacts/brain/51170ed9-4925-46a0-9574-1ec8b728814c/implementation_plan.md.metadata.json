@@ -1,6 +1,6 @@
 {
-  "summary": "Plano de implementação detalhado para:\n1. Correção visual definitiva do overlap no EventCard (feed de notícias).\n2. Tela completa de configuração de Webhook ZynPay no AdminPanel com atualização de URL/segredo e ferramenta de teste de ping e simulação de payload Pix.\n3. Listener de Server-Sent Events (SSE) no checkout do BillingModal com check animado e transição automática para o plano Pro.\n4. Otimização de alta velocidade para os Briefings com cache instantâneo e preloading de imagens.\n5. Integração real dos tickets de suporte com persistência e sincronização no Supabase.",
-  "updatedAt": "2026-11-02T23:19:16.422126130Z",
+  "summary": "Plano mestre de conclusão e lançamento integral do FatosBR, englobando infraestrutura de código no AI Studio, automação de templates de WhatsApp Cloud API, esteira de conteúdo editorial, conformidade jurídica LGPD e estratégia de conversão de assinantes.",
+  "updatedAt": "2026-11-03T23:00:50.898184922Z",
   "requestFeedback": true,
   "userFacing": true
 }

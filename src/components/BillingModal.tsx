@@ -264,7 +264,7 @@ export const BillingModal: React.FC<BillingModalProps> = ({
     <div
       role="dialog"
       aria-modal="true"
-      className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 md:p-6 bg-black/85 backdrop-blur-md overflow-y-auto animate-fade-in"
+      className="fixed inset-0 z-50 w-full h-full bg-black flex flex-col overflow-hidden animate-fade-in"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -277,8 +277,8 @@ export const BillingModal: React.FC<BillingModalProps> = ({
         </div>
       )}
 
-      {/* Main Container */}
-      <div className="relative w-full max-w-5xl min-h-screen sm:min-h-0 sm:max-h-[92vh] sm:rounded-3xl border-0 sm:border border-[#1f2229] bg-[#0c0d10] text-zinc-100 shadow-2xl flex flex-col overflow-hidden">
+      {/* Main Container em Tela Cheia */}
+      <div className="relative w-full h-full bg-[#0c0d10] text-zinc-100 flex flex-col overflow-hidden">
         {/* ================= 1. HEADER ================= */}
         <header className="sticky top-0 z-30 flex items-center justify-between px-5 sm:px-8 py-4 bg-[#0c0d10]/95 backdrop-blur-md border-b border-[#1f2229]">
           <div className="flex items-center gap-3">

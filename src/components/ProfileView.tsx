@@ -233,6 +233,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
     answeredCount: answeredTicketsCount,
     createTicket: createSupportTicket,
     replyTicket: replySupportTicket,
+    resolveTicket: resolveSupportTicket,
     refreshTickets
   } = useSupportTickets({ userEmail: profile.email, userName: profile.name });
 
@@ -1203,21 +1204,16 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                   setSupportTab('list');
                   setActiveModal('contactSupport');
                 }}
-                className="p-3 rounded-xl hover:bg-[#16181f] transition cursor-pointer flex items-center justify-between group border border-zinc-800/80 bg-zinc-950/40"
+                className="p-3 rounded-xl hover:bg-[#16181f] transition cursor-pointer flex items-center justify-between group"
               >
                 <div className="flex items-center gap-3">
                   <Clock className="w-4 h-4 text-zinc-400 group-hover:text-white" />
                   <div>
-                    <div className="font-semibold text-white flex items-center gap-2">
+                    <div className="font-semibold text-white flex items-center gap-2 whitespace-nowrap">
                       <span>Meus Chamados</span>
                       {userTickets.length > 0 && (
-                        <span className="px-1.5 py-0.2 rounded-full text-[10px] font-mono bg-zinc-800 text-zinc-300 border border-zinc-700">
+                        <span className="px-1.5 py-0.5 rounded-full text-[10px] font-mono bg-zinc-800 text-zinc-300 border border-zinc-700">
                           {userTickets.length}
-                        </span>
-                      )}
-                      {answeredTicketsCount > 0 && (
-                        <span className="px-1.5 py-0.2 rounded-full text-[10px] font-mono bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                          {answeredTicketsCount} nova{answeredTicketsCount > 1 ? 's' : ''} resposta{answeredTicketsCount > 1 ? 's' : ''}
                         </span>
                       )}
                     </div>
@@ -2361,34 +2357,32 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
       )}
 
       {/* MODAL: CENTRAL DE SUPORTE E TICKETS EM TEMPO REAL */}
+      {/* MODAL: CENTRAL DE SUPORTE E TICKETS EM TEMPO REAL (TELA CHEIA) */}
       {activeModal === 'contactSupport' && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-sm p-4 animate-fade-in">
-          <div className="relative w-full max-w-xl rounded-2xl border border-[#1f2229] bg-[#0c0d10] p-6 text-zinc-100 shadow-2xl space-y-4 max-h-[90vh] flex flex-col overflow-hidden">
-            {/* Cabeçalho */}
-            <div className="flex items-center justify-between border-b border-zinc-800 pb-3 shrink-0">
-              <div>
-                <h3 className="text-base font-bold text-white flex items-center gap-2">
-                  <span>Suporte & Chamados</span>
-                  <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-1">
-                    <span className={`w-1.5 h-1.5 rounded-full ${isTicketsSyncing ? 'bg-emerald-400 animate-spin' : 'bg-emerald-400'}`} />
-                    <span>Supabase Live</span>
-                  </span>
-                </h3>
-                <p className="text-[11px] text-zinc-400 mt-0.5">
-                  Acompanhamento de tickets sincronizado com banco de dados em tempo real.
-                </p>
-              </div>
-              <button
-                onClick={() => {
-                  setActiveModal(null);
-                  setSelectedTicketId(null);
-                }}
-                className="p-1.5 text-zinc-400 hover:text-white rounded-lg transition"
-              >
-                <X className="w-4 h-4" />
-              </button>
+        <div className="fixed inset-0 z-50 w-full h-full bg-[#0c0d10] text-zinc-100 flex flex-col overflow-hidden animate-fade-in">
+          {/* Cabeçalho */}
+          <div className="w-full bg-[#0c0d10] border-b border-zinc-800 px-4 sm:px-8 py-4 flex items-center justify-between shrink-0">
+            <div>
+              <h3 className="text-base sm:text-lg font-bold text-white">
+                Suporte & Chamados
+              </h3>
+              <p className="text-[11px] sm:text-xs text-zinc-400 mt-0.5">
+                Acompanhamento de tickets e atendimento ao leitor em tempo real.
+              </p>
             </div>
+            <button
+              onClick={() => {
+                setActiveModal(null);
+                setSelectedTicketId(null);
+              }}
+              className="min-h-[44px] min-w-[44px] flex items-center justify-center text-zinc-400 hover:text-white rounded-xl hover:bg-zinc-800 transition cursor-pointer"
+              aria-label="Fechar modal"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
 
+          <div className="flex-1 w-full max-w-3xl mx-auto p-4 sm:p-6 flex flex-col overflow-hidden space-y-4">
             {/* Alternância de Abas: Novo Chamado vs Meus Chamados */}
             <div className="flex items-center justify-between gap-2 border-b border-zinc-800/80 pb-2 shrink-0">
               <div className="inline-flex rounded-xl p-1 bg-zinc-900 border border-zinc-800 text-xs">
@@ -2643,7 +2637,12 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                     {userTickets.map((t) => (
                       <div
                         key={t.id}
-                        onClick={() => setSelectedTicketId(t.id)}
+                        onClick={async () => {
+                          setSelectedTicketId(t.id);
+                          if (t.status === 'answered') {
+                            await resolveSupportTicket(t.id);
+                          }
+                        }}
                         className="p-3.5 rounded-xl bg-[#111216] hover:bg-zinc-900 border border-zinc-800/80 hover:border-zinc-700 transition cursor-pointer flex items-center justify-between gap-3 group"
                       >
                         <div className="space-y-1 min-w-0 flex-1">
