@@ -5,7 +5,8 @@
  * Vercel Serverless Function: NVIDIA NIM Chat Completions Proxy
  */
 
-import { getServerKeys, sendJson, setCorsHeaders, getClientIp, checkRateLimit, isAllowedDomain, readJsonBody } from '../../_lib/common';
+import { getServerKeys, sendJson, setCorsHeaders, isAllowedDomain, readJsonBody } from '../../_lib/common';
+import { enforceRateLimit } from '../../_lib/rateLimiter';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);
@@ -20,9 +21,9 @@ export default async function handler(req: any, res: any) {
     return sendJson(res, 405, { error: 'Método não permitido. Utilize POST.' });
   }
 
-  const clientIp = getClientIp(req);
-  if (!checkRateLimit(`nvidia_${clientIp}`, 30, 60000)) {
-    return sendJson(res, 429, { error: 'Rate limit excedido para inferência de IA. Aguarde um momento.' });
+  const rateLimitAllowed = await enforceRateLimit(req, res, 'ai');
+  if (!rateLimitAllowed) {
+    return;
   }
 
   const keys = getServerKeys();

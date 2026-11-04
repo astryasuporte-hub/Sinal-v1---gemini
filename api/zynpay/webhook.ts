@@ -4,19 +4,19 @@
  * 
  * Vercel Serverless Function: ZynPay Webhook Receiver & Cryptographic Validator
  * 
- * Segurança Implementada:
- * 1. Rejeição imediata de métodos não-POST (405 Method Not Allowed).
- * 2. Validação criptográfica HMAC-SHA256 da assinatura do webhook (x-zynpay-signature / x-signature).
- * 3. Remoção total de status padrão 'PAID' ou confiança em input do cliente.
- * 4. Proteção contra Replay Attack com idempotência estrita (Supabase / Postgres).
- * 5. Reconciliação direta servidor-a-servidor via API oficial ZynPay para confirmação de status e valor.
- * 6. Conferência de dados contra cobrança registrada no banco (ID, valor e moeda BRL).
- * 7. Ativação atômica e segura do plano Pro sem vazamento de dados ou segredos.
+ * Arquitetura de Segurança:
+ * 1. Restrição estrita de método HTTP (exclusivamente POST, 405 para outros).
+ * 2. Rate limiting distribuído e atômico no PostgreSQL com perfil 'webhooks'.
+ * 3. Validação criptográfica HMAC-SHA256 sobre payload bruto (x-zynpay-signature / x-signature).
+ * 4. Proteção contra Replay Attack com trava de idempotência atômica no banco.
+ * 5. Reconciliação direta servidor-a-servidor com API oficial ZynPay.
+ * 6. Falha segura: Se a validação upstream ou assinatura não puderem ser confirmadas, a confirmação automática permanece desabilitada.
+ * 7. Execução de confirmação e ativação Pro via RPC atômico PostgreSQL (SELECT ... FOR UPDATE).
  */
 
 import { sendJson, setCorsHeaders, readRawAndJsonBody, getServerKeys, getClientIp } from '../_lib/common';
 import { verifyWebhookSignature } from '../_lib/crypto';
-import { checkAndLockWebhookEvent, getChargeById, confirmPaymentAndActivateSubscription } from '../_lib/db';
+import { checkAndLockWebhookEvent, getChargeById, confirmPaymentAndActivateSubscriptionAtomic } from '../_lib/db';
 import { broadcastBillingEvent } from '../_lib/eventsHub';
 import { enforceRateLimit } from '../_lib/rateLimiter';
 
@@ -32,13 +32,14 @@ export default async function handler(req: any, res: any) {
   // 1. Apenas POST é permitido em endpoints de webhook
   if (req.method !== 'POST') {
     return sendJson(res, 405, {
-      error: 'Método não permitido. Endpoint de webhook aceita exclusivamente requisições POST.',
+      error: 'Método não permitido. O endpoint de webhook aceita exclusivamente requisições POST.',
       code: 'METHOD_NOT_ALLOWED'
     });
   }
 
-  // 2. Proteção contra DDoS e força bruta
-  if (!enforceRateLimit(req, res, { windowMs: 60000, maxRequests: 60, keyPrefix: 'whk_zyn' })) {
+  // 2. Rate Limiting atômico distribuído
+  const rateLimitAllowed = await enforceRateLimit(req, res, 'webhooks');
+  if (!rateLimitAllowed) {
     return;
   }
 
@@ -49,18 +50,27 @@ export default async function handler(req: any, res: any) {
   const { rawBody, body } = await readRawAndJsonBody(req);
   const payload = body || {};
 
-  // 4. Extrair e verificar assinatura criptográfica
+  // 4. Extração e validação da assinatura criptográfica HMAC
   const providedSignature =
     req.headers['x-zynpay-signature'] ||
     req.headers['x-signature'] ||
+    req.headers['x-hub-signature'] ||
     req.headers['signature'] ||
     null;
 
   if (!providedSignature) {
-    console.warn(`[Security Incident] Webhook recebido sem assinatura de ${getClientIp(req)}`);
+    console.warn(`[Security Incident] Webhook recebido sem assinatura criptográfica de ${getClientIp(req)}`);
     return sendJson(res, 401, {
-      error: 'Assinatura criptográfica obrigatória ausente no cabeçalho.',
+      error: 'Assinatura criptográfica obrigatória ausente no cabeçalho do webhook.',
       code: 'MISSING_SIGNATURE'
+    });
+  }
+
+  if (!webhookSecret) {
+    console.error('[Security Configuration] ZYNPAY_WEBHOOK_SECRET não configurado no ambiente.');
+    return sendJson(res, 503, {
+      error: 'Serviço de webhooks em manutenção de segurança. Segredo de validação não configurado.',
+      code: 'WEBHOOK_SECRET_UNCONFIGURED'
     });
   }
 
@@ -68,37 +78,53 @@ export default async function handler(req: any, res: any) {
   if (!isValidSignature) {
     console.warn(`[Security Incident] Assinatura HMAC inválida para webhook de ${getClientIp(req)}`);
     return sendJson(res, 403, {
-      error: 'Assinatura criptográfica inválida ou violada.',
+      error: 'Assinatura criptográfica inválida ou payload adulterado.',
       code: 'INVALID_SIGNATURE'
     });
   }
 
-  // 5. Validação estrutural do payload recebido
+  // 5. Validação estrutural do payload
   const eventId = String(payload.id || payload.eventId || '').trim();
   const chargeId = String(payload.chargeId || payload.data?.id || payload.charge?.id || '').trim();
   const eventType = String(payload.type || payload.event || '').trim().toLowerCase();
 
   if (!eventId || !chargeId) {
     return sendJson(res, 400, {
-      error: 'Payload incompleto. Identificadores de evento e cobrança são obrigatórios.',
+      error: 'Payload incompleto. Identificadores de evento (id) e cobrança (chargeId) são obrigatórios.',
       code: 'MALFORMED_PAYLOAD'
     });
   }
 
-  // 6. Proteção contra Replay Attack via Idempotência
-  const { isDuplicate } = await checkAndLockWebhookEvent(eventId, 'zynpay');
-  if (isDuplicate) {
-    return sendJson(res, 200, {
-      success: true,
-      received: true,
-      duplicate: true,
-      message: 'Evento já processado anteriormente (idempotência garantida).',
-      eventId
+  // 6. Trava de Idempotência Atômica no PostgreSQL
+  try {
+    const { isDuplicate } = await checkAndLockWebhookEvent(eventId, 'zynpay');
+    if (isDuplicate) {
+      return sendJson(res, 200, {
+        success: true,
+        received: true,
+        duplicate: true,
+        message: 'Evento já processado anteriormente (idempotência garantida).',
+        eventId
+      });
+    }
+  } catch (err: any) {
+    return sendJson(res, 503, {
+      error: 'Falha temporária ao registrar idempotência no banco de dados.',
+      code: 'DATABASE_LOCK_FAILED'
     });
   }
 
-  // 7. Conferir a cobrança registrada no banco de dados local
-  const storedCharge = await getChargeById(chargeId);
+  // 7. Validação da cobrança registrada no banco
+  let storedCharge = null;
+  try {
+    storedCharge = await getChargeById(chargeId);
+  } catch (err: any) {
+    return sendJson(res, 503, {
+      error: 'Falha ao consultar cobrança no banco de dados.',
+      code: 'DATABASE_QUERY_FAILED'
+    });
+  }
+
   if (!storedCharge) {
     console.warn(`[Security Alert] Cobrança não encontrada no banco: ${chargeId}`);
     return sendJson(res, 404, {
@@ -107,18 +133,16 @@ export default async function handler(req: any, res: any) {
     });
   }
 
-  // Se já estiver paga, encerra sem duplicar processamento
   if (storedCharge.status === 'PAID') {
     return sendJson(res, 200, {
       success: true,
-      message: 'Cobrança já se encontra com status pago.',
+      message: 'Cobrança já confirmada anteriormente.',
       chargeId
     });
   }
 
-  // 8. Reconciliação direta servidor-a-servidor com a API upstream da ZynPay
-  // NUNCA confiar no status recebido no payload do webhook sem verificação upstream
-  let verifiedPaid = false;
+  // 8. Reconciliação direta servidor-a-servidor com a API da ZynPay
+  // Regra de segurança: Se a validação não puder ser concluída, manter confirmação automática desabilitada
   let verifiedAmountCents = storedCharge.amountCents;
 
   if (keys.ZYNPAY) {
@@ -132,7 +156,7 @@ export default async function handler(req: any, res: any) {
       });
 
       if (!verifyRes.ok) {
-        console.error(`[Security Alert] Falha na reconciliação upstream com ZynPay: HTTP ${verifyRes.status}`);
+        console.error(`[Security Alert] Reconciliação upstream com ZynPay retornou status HTTP ${verifyRes.status}`);
         return sendJson(res, 502, {
           error: 'Falha ao validar a cobrança diretamente com o provedor ZynPay.',
           code: 'UPSTREAM_VERIFICATION_FAILED'
@@ -143,7 +167,6 @@ export default async function handler(req: any, res: any) {
       const upstreamStatus = String(upCharge.status || upCharge.data?.status || '').toUpperCase();
       const upstreamAmountCents = Number(upCharge.amount || upCharge.amountCents || 0);
 
-      // Validação estrita do status upstream
       if (upstreamStatus !== 'PAID' && upstreamStatus !== 'CONFIRMED') {
         console.warn(`[Security Alert] Status upstream não confirmado (${upstreamStatus}) para cobrança ${chargeId}`);
         return sendJson(res, 422, {
@@ -152,74 +175,73 @@ export default async function handler(req: any, res: any) {
         });
       }
 
-      // Validação estrita do valor cobrado vs valor pago
       if (upstreamAmountCents > 0 && upstreamAmountCents !== storedCharge.amountCents) {
         console.error(`[Security Tampering] Valor divergente: esperado ${storedCharge.amountCents}, upstream ${upstreamAmountCents}`);
         return sendJson(res, 422, {
-          error: 'Valor pago diverge do valor da cobrança registrada.',
+          error: 'Valor pago diverge do valor registrado na cobrança.',
           code: 'AMOUNT_MISMATCH'
         });
       }
 
-      verifiedPaid = true;
       verifiedAmountCents = upstreamAmountCents || storedCharge.amountCents;
     } catch (err: any) {
-      console.error(`[Error] Erro de rede ao reconciliar com ZynPay: ${err.message}`);
-      return sendJson(res, 500, {
+      console.error(`[Network Error] Falha de comunicação com API ZynPay: ${err.message}`);
+      return sendJson(res, 503, {
         error: 'Erro de comunicação ao validar pagamento com o provedor.',
         code: 'COMMUNICATION_ERROR'
       });
     }
   } else {
-    // Ambiente de desenvolvimento/teste sem ZYNPAY_API_KEY upstream:
-    // Apenas aceita se o payload veio com assinatura válida HMAC e tipo de evento charge.paid explícito
-    const declaredStatus = String(payload.status || payload.data?.status || '').toUpperCase();
-    if (eventType === 'charge.paid' || declaredStatus === 'PAID') {
-      verifiedPaid = true;
-    } else {
-      return sendJson(res, 400, {
-        error: 'Status do evento não corresponde a pagamento aprovado.',
-        code: 'UNCONFIRMED_STATUS'
+    // Caso ZYNPAY_API_KEY não esteja configurada no ambiente:
+    // Conforme especificação: "Se a validação não puder ser concluída, manter a confirmação automática desabilitada."
+    console.warn('[Security Notice] ZYNPAY_API_KEY ausente. Confirmação automática mantida desabilitada.');
+    return sendJson(res, 422, {
+      error: 'Validação upstream desabilitada. Cobrança registrada para conciliação manual.',
+      code: 'AUTOMATIC_CONFIRMATION_DISABLED'
+    });
+  }
+
+  // 9. Confirmação Atômica e Ativação Pro via RPC PostgreSQL
+  try {
+    const result = await confirmPaymentAndActivateSubscriptionAtomic({
+      chargeId,
+      eventId,
+      expectedAmountCents: verifiedAmountCents,
+      expectedCurrency: 'BRL',
+      provider: 'zynpay',
+      rawPayload: payload
+    });
+
+    if (!result.success) {
+      return sendJson(res, 422, {
+        error: result.error || 'Falha ao confirmar transação no banco.',
+        code: result.errorCode || 'TRANSACTION_REJECTED'
       });
     }
-  }
 
-  if (!verifiedPaid) {
-    return sendJson(res, 422, {
-      error: 'Pagamento não confirmado.',
-      code: 'PAYMENT_REJECTED'
+    // 10. Notificação instantânea via SSE para clientes conectados
+    broadcastBillingEvent({
+      type: 'PAYMENT_CONFIRMED',
+      chargeId,
+      status: 'PAID',
+      userEmail: storedCharge.userEmail,
+      amountCents: verifiedAmountCents,
+      timestamp: new Date().toISOString()
     });
-  }
 
-  // 9. Ativação atômica da assinatura e registro do pagamento
-  const activation = await confirmPaymentAndActivateSubscription({
-    chargeId,
-    userEmail: storedCharge.userEmail,
-    amountCents: verifiedAmountCents,
-    eventId
-  });
-
-  if (!activation.success) {
+    return sendJson(res, 200, {
+      success: true,
+      processed: true,
+      eventId,
+      chargeId,
+      status: 'PAID'
+    });
+  } catch (err: any) {
+    console.error('[Transaction Error] Erro crítico na transação atômica:', err.message);
     return sendJson(res, 500, {
-      error: 'Erro ao registrar confirmação do pagamento no banco.',
-      details: activation.error
+      error: 'Erro transacional ao confirmar pagamento e ativar assinatura.',
+      code: 'TRANSACTION_ROLLBACK',
+      details: err.message
     });
   }
-
-  // 10. Notificação em tempo real via SSE para a tela de BillingModal
-  broadcastBillingEvent({
-    type: 'payment_confirmed',
-    chargeId,
-    status: 'PAID',
-    userEmail: storedCharge.userEmail,
-    timestamp: new Date().toISOString()
-  });
-
-  return sendJson(res, 200, {
-    success: true,
-    processed: true,
-    eventId,
-    chargeId,
-    status: 'PAID'
-  });
 }

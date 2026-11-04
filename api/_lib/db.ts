@@ -2,203 +2,250 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  * 
- * Server-side Database & Idempotency Layer (Supabase Postgres)
+ * Server-Side Database & Financial Persistence Layer (Supabase PostgreSQL)
+ * 
+ * Diretrizes de Segurança:
+ * 1. ZERO fallback em memória em produção: Todas as transações financeiras devem ser persistidas.
+ * 2. Uso estrito de SUPABASE_SERVICE_ROLE_KEY no backend para contornar RLS de forma autenticada.
+ *    NUNCA utilizar a chave pública anon como substituta silenciosa de operações privilegiadas.
+ * 3. Atomicidade obrigatória: Confirmação de pagamento e ativação de plano ocorrem via RPC transacional no Postgres.
+ * 4. Isolamento estrito de testes: Mocks só podem ser injetados se FATOSBR_TEST_MODE='true' ou NODE_ENV='test'.
  */
 
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
-const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '';
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || '';
+const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '';
+// Exclusivamente chave de serviço com privilégios de backend
+const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
 let serverSupabaseClient: SupabaseClient | null = null;
 
-if (supabaseUrl && supabaseKey) {
+if (supabaseUrl && serviceRoleKey) {
   try {
-    serverSupabaseClient = createClient(supabaseUrl, supabaseKey, {
+    serverSupabaseClient = createClient(supabaseUrl, serviceRoleKey, {
       auth: { persistSession: false, autoRefreshToken: false }
     });
-  } catch {}
+  } catch (err: any) {
+    console.error('[Database Initialization Error]', err.message);
+  }
 }
 
-export function getServerSupabase(): SupabaseClient | null {
+export function isDatabaseConfigured(): boolean {
+  return Boolean(serverSupabaseClient && supabaseUrl && serviceRoleKey);
+}
+
+export function getServerSupabase(): SupabaseClient {
+  if (!serverSupabaseClient) {
+    throw new Error('DATABASE_UNAVAILABLE: O banco de dados Supabase não está configurado ou SUPABASE_SERVICE_ROLE_KEY está ausente no ambiente.');
+  }
   return serverSupabaseClient;
 }
 
-// Fallback em memória para ambientes de teste e desenvolvimento sem conexão com banco
-interface FallbackCharge {
-  id: string;
-  userEmail: string;
-  amountCents: number;
-  status: 'PENDING' | 'PAID' | 'FAILED' | 'CANCELLED';
-  description: string;
-  createdAt: string;
-  paidAt?: string;
+// -----------------------------------------------------------------------------
+// ADAPTADOR ISOLADO DE TESTE (Permitido EXCLUSIVAMENTE em ambiente de teste/harness)
+// -----------------------------------------------------------------------------
+export interface TestDatabaseAdapter {
+  recordPendingCharge: (charge: any) => Promise<boolean>;
+  getChargeById: (chargeId: string) => Promise<any | null>;
+  checkAndLockWebhookEvent: (eventId: string, provider: string) => Promise<{ isDuplicate: boolean }>;
+  confirmPaymentAndActivateSubscription: (params: any) => Promise<{ success: boolean; duplicate?: boolean; error?: string; error_code?: string }>;
 }
 
-const memoryCharges = new Map<string, FallbackCharge>();
-const memoryProcessedEvents = new Set<string>();
+let activeTestAdapter: TestDatabaseAdapter | null = null;
+
+export function setTestDatabaseAdapter(adapter: TestDatabaseAdapter | null): void {
+  const isTestEnv = process.env.NODE_ENV === 'test' || process.env.FATOSBR_TEST_MODE === 'true';
+  if (!isTestEnv && adapter !== null) {
+    throw new Error('SECURITY_VIOLATION: Adaptador de teste não pode ser ativado em ambiente de produção.');
+  }
+  activeTestAdapter = adapter;
+}
+
+// -----------------------------------------------------------------------------
+// OPERAÇÕES FINANCEIRAS PERSISTENTES
+// -----------------------------------------------------------------------------
+
+export interface StoredCharge {
+  id: string;
+  userEmail: string;
+  userId?: string | null;
+  amountCents: number;
+  currency: string;
+  status: 'PENDING' | 'PROCESSING' | 'PAID' | 'FAILED' | 'EXPIRED' | 'CANCELLED';
+  description: string;
+  qrCodeText?: string;
+  createdAt: string;
+  updatedAt: string;
+  paidAt?: string | null;
+}
 
 /**
- * Cria ou registra uma cobrança pendente
+ * Cria ou registra uma cobrança Pix pendente no Supabase PostgreSQL.
+ * Falhas no banco de dados lançam exceção e impedem retorno de falso-positivo.
  */
 export async function recordPendingCharge(charge: {
   id: string;
   userEmail: string;
+  userId?: string | null;
   amountCents: number;
   description: string;
   qrCodeText?: string;
 }): Promise<boolean> {
+  if (activeTestAdapter) {
+    return activeTestAdapter.recordPendingCharge(charge);
+  }
+
   const supabase = getServerSupabase();
   const now = new Date().toISOString();
 
-  // 1. Persistência em memória
-  memoryCharges.set(charge.id, {
+  const { error } = await supabase.from('payments').insert({
     id: charge.id,
-    userEmail: charge.userEmail,
-    amountCents: charge.amountCents,
+    user_id: charge.userId || null,
+    user_email: charge.userEmail.toLowerCase().trim(),
+    amount_cents: charge.amountCents,
+    currency: 'BRL',
     status: 'PENDING',
+    provider: 'zynpay',
     description: charge.description,
-    createdAt: now
+    qr_code_text: charge.qrCodeText || null,
+    created_at: now,
+    updated_at: now
   });
 
-  // 2. Persistência no Supabase
-  if (supabase) {
-    try {
-      await supabase.from('payments').upsert({
-        id: charge.id,
-        user_email: charge.userEmail,
-        amount_cents: charge.amountCents,
-        currency: 'BRL',
-        status: 'PENDING',
-        qr_code_text: charge.qrCodeText || null,
-        created_at: now,
-        updated_at: now
-      });
-      return true;
-    } catch {}
+  if (error) {
+    console.error(`[DB Error] Falha crítica ao persistir cobrança ${charge.id}:`, error.message);
+    throw new Error(`DATABASE_PERSISTENCE_FAILED: Não foi possível registrar a cobrança no banco de dados (${error.message})`);
   }
 
   return true;
 }
 
 /**
- * Consulta cobrança registrada por ID
+ * Consulta cobrança no banco de dados por ID.
  */
-export async function getChargeById(chargeId: string): Promise<FallbackCharge | null> {
-  const supabase = getServerSupabase();
-
-  if (supabase) {
-    try {
-      const { data, error } = await supabase
-        .from('payments')
-        .select('*')
-        .eq('id', chargeId)
-        .maybeSingle();
-
-      if (!error && data) {
-        return {
-          id: data.id,
-          userEmail: data.user_email,
-          amountCents: data.amount_cents,
-          status: data.status,
-          description: data.description || 'Assinatura FatosBR Pro',
-          createdAt: data.created_at,
-          paidAt: data.paid_at
-        };
-      }
-    } catch {}
+export async function getChargeById(chargeId: string): Promise<StoredCharge | null> {
+  if (activeTestAdapter) {
+    return activeTestAdapter.getChargeById(chargeId);
   }
 
-  return memoryCharges.get(chargeId) || null;
+  const supabase = getServerSupabase();
+  const { data, error } = await supabase
+    .from('payments')
+    .select('*')
+    .eq('id', chargeId)
+    .maybeSingle();
+
+  if (error) {
+    console.error(`[DB Error] Erro ao consultar cobrança ${chargeId}:`, error.message);
+    throw new Error(`DATABASE_QUERY_FAILED: Falha ao consultar cobrança (${error.message})`);
+  }
+
+  if (!data) return null;
+
+  return {
+    id: data.id,
+    userId: data.user_id,
+    userEmail: data.user_email,
+    amountCents: data.amount_cents,
+    currency: data.currency || 'BRL',
+    status: data.status,
+    description: data.description || 'Assinatura FatosBR Pro',
+    qrCodeText: data.qr_code_text,
+    createdAt: data.created_at,
+    updatedAt: data.updated_at,
+    paidAt: data.paid_at
+  };
 }
 
 /**
- * Verifica idempotência de um evento de webhook (evita processamento duplicado)
+ * Valida idempotência de evento de webhook inserindo registro inicial na tabela webhook_events.
  */
 export async function checkAndLockWebhookEvent(eventId: string, provider = 'zynpay'): Promise<{ isDuplicate: boolean }> {
-  // 1. Verificação local em memória
-  if (memoryProcessedEvents.has(eventId)) {
-    return { isDuplicate: true };
+  if (activeTestAdapter) {
+    return activeTestAdapter.checkAndLockWebhookEvent(eventId, provider);
   }
 
   const supabase = getServerSupabase();
-  if (supabase) {
-    try {
-      // Tenta inserir na tabela de idempotência com chave primária (ID único)
-      const { error } = await supabase.from('webhook_events').insert({
-        id: eventId,
-        provider,
-        event_type: 'charge.paid',
-        processed_at: new Date().toISOString(),
-        status: 'PROCESSING'
-      });
+  const now = new Date().toISOString();
 
-      // Erro 23505 = unique_violation no Postgres (evento duplicado concorrente)
-      if (error && (error.code === '23505' || error.message.includes('duplicate'))) {
-        return { isDuplicate: true };
-      }
-    } catch {}
+  // Tenta inserir o evento. Se já existir chave primária (id), viola constraint 23505
+  const { error } = await supabase.from('webhook_events').insert({
+    id: eventId,
+    provider,
+    event_type: 'charge.paid',
+    status: 'PROCESSING',
+    created_at: now,
+    processed_at: now
+  });
+
+  if (error) {
+    // 23505 = unique_violation no PostgreSQL
+    if (error.code === '23505' || error.message.toLowerCase().includes('duplicate') || error.message.toLowerCase().includes('unique')) {
+      return { isDuplicate: true };
+    }
+    console.error(`[DB Error] Falha de idempotência no evento ${eventId}:`, error.message);
+    throw new Error(`DATABASE_LOCK_FAILED: Falha na trava de idempotência (${error.message})`);
   }
 
-  memoryProcessedEvents.add(eventId);
   return { isDuplicate: false };
 }
 
 /**
- * Confirma pagamento e ativa assinatura Pro do usuário de forma atômica
+ * Confirma pagamento e ativa assinatura Pro de forma ATÔMICA via RPC PostgreSQL
+ * Executa as 7 validações de negócio em uma única transação garantida pelo banco.
  */
-export async function confirmPaymentAndActivateSubscription(params: {
+export async function confirmPaymentAndActivateSubscriptionAtomic(params: {
   chargeId: string;
-  userEmail: string;
-  amountCents: number;
   eventId: string;
-}): Promise<{ success: boolean; error?: string }> {
-  const { chargeId, userEmail, amountCents, eventId } = params;
-  const now = new Date().toISOString();
-
-  // 1. Atualiza cobrança em memória
-  const stored = memoryCharges.get(chargeId);
-  if (stored) {
-    stored.status = 'PAID';
-    stored.paidAt = now;
+  expectedAmountCents: number;
+  expectedCurrency?: string;
+  provider?: string;
+  rawPayload?: any;
+}): Promise<{
+  success: boolean;
+  duplicate?: boolean;
+  error?: string;
+  errorCode?: string;
+  chargeId?: string;
+  userEmail?: string;
+}> {
+  if (activeTestAdapter) {
+    const res = await activeTestAdapter.confirmPaymentAndActivateSubscription(params);
+    return {
+      success: res.success,
+      duplicate: res.duplicate,
+      error: res.error,
+      errorCode: res.error_code,
+      chargeId: params.chargeId
+    };
   }
 
   const supabase = getServerSupabase();
-  if (supabase) {
-    try {
-      // Atualiza status do pagamento
-      await supabase
-        .from('payments')
-        .update({
-          status: 'PAID',
-          paid_at: now,
-          updated_at: now
-        })
-        .eq('id', chargeId);
 
-      // Atualiza perfil do usuário para Pro Ativo
-      if (userEmail) {
-        await supabase
-          .from('profiles')
-          .update({
-            plan_name: 'FatosBR Pro',
-            subscription_status: 'ACTIVE',
-            updated_at: now
-          })
-          .eq('email', userEmail.toLowerCase().trim());
-      }
+  const { data, error } = await supabase.rpc('confirm_payment_and_activate_subscription_atomic', {
+    p_charge_id: params.chargeId,
+    p_event_id: params.eventId,
+    p_expected_amount_cents: params.expectedAmountCents,
+    p_expected_currency: params.expectedCurrency || 'BRL',
+    p_provider: params.provider || 'zynpay',
+    p_raw_payload: params.rawPayload || {}
+  });
 
-      // Marca evento como finalizado com sucesso
-      await supabase
-        .from('webhook_events')
-        .update({ status: 'COMPLETED' })
-        .eq('id', eventId);
-
-      return { success: true };
-    } catch (err: any) {
-      return { success: false, error: err.message };
-    }
+  if (error) {
+    console.error(`[DB Error] Falha na execução da transação atômica RPC:`, error.message);
+    throw new Error(`ATOMIC_TRANSACTION_FAILED: ${error.message}`);
   }
 
-  return { success: true };
+  if (!data || typeof data !== 'object') {
+    throw new Error('ATOMIC_TRANSACTION_INVALID_RESPONSE: Resposta da RPC vazia ou malformada.');
+  }
+
+  return {
+    success: Boolean(data.success),
+    duplicate: Boolean(data.duplicate),
+    error: data.error,
+    errorCode: data.error_code,
+    chargeId: data.charge_id || params.chargeId,
+    userEmail: data.user_email
+  };
 }

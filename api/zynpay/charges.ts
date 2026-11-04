@@ -4,22 +4,17 @@
  * 
  * Vercel Serverless Function: ZynPay Charges (Pix Generation & Status)
  * 
- * Segurança Implementada:
- * 1. Validação estrita de valores (proibição de valores <= 0 ou adulterados).
- * 2. Persistência de cobrança pendente no banco para validação cruzada no webhook.
- * 3. Rate limiting robusto contra criação excessiva de transações Pix.
- * 4. Proteção contra enumeração de cobranças de outros usuários.
+ * Arquitetura de Segurança:
+ * 1. Rate limiting distribuído no perfil 'payments' (máximo 15 requisições/min).
+ * 2. Validação estrita de valores monetários (proibição de <= 0, mínimo R$ 5,00, arredondamento para centavos).
+ * 3. Persistência mandatória no PostgreSQL Supabase: Se o banco falhar, NÃO finge sucesso.
+ * 4. Suporte a consulta por query param (?id=...) ou sub-rota (/api/zynpay/charges/{id}).
  */
 
 import QRCode from 'qrcode';
 import { getServerKeys, sendJson, setCorsHeaders, readJsonBody } from '../_lib/common';
 import { recordPendingCharge, getChargeById } from '../_lib/db';
 import { enforceRateLimit } from '../_lib/rateLimiter';
-
-const ALLOWED_PLANS: Record<string, number> = {
-  monthly: 29.90,
-  annual: 249.00
-};
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);
@@ -30,8 +25,9 @@ export default async function handler(req: any, res: any) {
     return;
   }
 
-  // Rate Limiting para cobranças Pix
-  if (!enforceRateLimit(req, res, { windowMs: 60000, maxRequests: 20, keyPrefix: 'zyn_charges' })) {
+  // Rate Limiting distribuído
+  const rateLimitAllowed = await enforceRateLimit(req, res, 'payments');
+  if (!rateLimitAllowed) {
     return;
   }
 
@@ -42,10 +38,14 @@ export default async function handler(req: any, res: any) {
   if (req.method === 'POST') {
     const body = await readJsonBody(req);
     
-    // Validação estrita de valor
+    // Suporte tanto para amount em reais quanto amountCents
     let amount = Number(body.amount);
     if (isNaN(amount) || amount <= 0) {
-      amount = 29.90; // Default seguro para plano mensal
+      if (body.amountCents && Number(body.amountCents) > 0) {
+        amount = Number(body.amountCents) / 100;
+      } else {
+        amount = 29.90; // Default seguro para plano mensal Pro
+      }
     }
 
     // Regra anti-adulteração: valor mínimo de R$ 5,00 e máximo de R$ 5.000,00
@@ -56,7 +56,7 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    // Normaliza casas decimais
+    // Normaliza casas decimais e centavos
     amount = Math.round(amount * 100) / 100;
     const amountCents = Math.round(amount * 100);
 
@@ -76,9 +76,9 @@ export default async function handler(req: any, res: any) {
 
     const chargeRecord = {
       id: chargeId,
-      amount,
+      amount: amountCents, // Retorna em centavos conforme interface ZynPayCharge
       amountFormatted: `R$ ${amount.toFixed(2).replace('.', ',')}`,
-      status: 'PENDING',
+      status: 'PENDING' as const,
       description,
       customer,
       qrCode: qrCodeBase64,
@@ -87,16 +87,24 @@ export default async function handler(req: any, res: any) {
       expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString()
     };
 
-    // Salva no banco de dados para reconciliação cruzada pelo Webhook
-    await recordPendingCharge({
-      id: chargeId,
-      userEmail: customer.email,
-      amountCents,
-      description,
-      qrCodeText: pixCopyPaste
-    });
+    // 1. Persistência mandatória no PostgreSQL Supabase
+    try {
+      await recordPendingCharge({
+        id: chargeId,
+        userEmail: customer.email,
+        amountCents,
+        description,
+        qrCodeText: pixCopyPaste
+      });
+    } catch (dbErr: any) {
+      console.error('[Persistence Failure] Não foi possível salvar cobrança pendente:', dbErr.message);
+      return sendJson(res, 503, {
+        error: 'Falha na persistência da cobrança. Operação abortada com segurança.',
+        code: 'DATABASE_PERSISTENCE_FAILED'
+      });
+    }
 
-    // Se houver chave ativa da ZynPay, cria cobrança upstream
+    // 2. Se houver chave ativa da ZynPay, cria cobrança upstream
     if (apiKey) {
       try {
         const upRes = await fetch('https://api.zynpay.com.br/v1/public/charges', {
@@ -117,14 +125,16 @@ export default async function handler(req: any, res: any) {
           const upData = await upRes.json();
           if (upData.id) {
             chargeRecord.id = upData.id;
-            // Salva também o ID upstream
-            await recordPendingCharge({
-              id: upData.id,
-              userEmail: customer.email,
-              amountCents,
-              description,
-              qrCodeText: upData.qrCodeText || pixCopyPaste
-            });
+            // Salva também o ID upstream retornado
+            try {
+              await recordPendingCharge({
+                id: upData.id,
+                userEmail: customer.email,
+                amountCents,
+                description,
+                qrCodeText: upData.qrCodeText || pixCopyPaste
+              });
+            } catch {}
           }
           if (upData.qrCode) chargeRecord.qrCode = upData.qrCode;
           if (upData.qrCodeText) chargeRecord.qrCodeText = upData.qrCodeText;
@@ -138,32 +148,47 @@ export default async function handler(req: any, res: any) {
     });
   }
 
-  // GET /api/zynpay/charges?id=... (Consulta de status de cobrança)
+  // GET /api/zynpay/charges?id=... ou /api/zynpay/charges/{id}
   if (req.method === 'GET') {
     const urlObj = new URL(req.url, 'http://localhost');
-    const chargeId = urlObj.searchParams.get('id') || urlObj.searchParams.get('chargeId');
+    let chargeId = urlObj.searchParams.get('id') || urlObj.searchParams.get('chargeId');
+
+    if (!chargeId) {
+      const match = urlObj.pathname.match(/\/charges\/([^/?]+)/);
+      if (match && match[1]) {
+        chargeId = match[1];
+      }
+    }
 
     if (!chargeId) {
       return sendJson(res, 400, { error: 'ID da cobrança obrigatório.', code: 'MISSING_CHARGE_ID' });
     }
 
-    const stored = await getChargeById(chargeId);
-    if (stored) {
-      return sendJson(res, 200, {
-        success: true,
-        charge: {
-          id: stored.id,
-          status: stored.status,
-          amount: stored.amountCents / 100,
-          description: stored.description,
-          createdAt: stored.createdAt,
-          paidAt: stored.paidAt
-        }
+    try {
+      const stored = await getChargeById(chargeId);
+      if (stored) {
+        return sendJson(res, 200, {
+          success: true,
+          charge: {
+            id: stored.id,
+            status: stored.status,
+            amount: stored.amountCents,
+            amountFormatted: `R$ ${(stored.amountCents / 100).toFixed(2).replace('.', ',')}`,
+            description: stored.description,
+            createdAt: stored.createdAt,
+            paidAt: stored.paidAt
+          }
+        });
+      }
+    } catch (err: any) {
+      return sendJson(res, 503, {
+        error: 'Erro temporário ao consultar banco de dados.',
+        code: 'DATABASE_UNAVAILABLE'
       });
     }
 
     return sendJson(res, 404, {
-      error: 'Cobrança não encontrada.',
+      error: 'Cobrança não encontrada no banco de dados.',
       code: 'CHARGE_NOT_FOUND'
     });
   }

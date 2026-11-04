@@ -5,7 +5,8 @@
  * Vercel Serverless Function: Resend Support Ticket Notification
  */
 
-import { getServerKeys, sendJson, setCorsHeaders, readJsonBody, checkRateLimit, getClientIp } from '../_lib/common';
+import { getServerKeys, sendJson, setCorsHeaders, readJsonBody } from '../_lib/common';
+import { enforceRateLimit } from '../_lib/rateLimiter';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);
@@ -20,9 +21,9 @@ export default async function handler(req: any, res: any) {
     return sendJson(res, 405, { error: 'Método não permitido. Utilize POST.' });
   }
 
-  const clientIp = getClientIp(req);
-  if (!checkRateLimit(`ticket_send_${clientIp}`, 15, 60000)) {
-    return sendJson(res, 429, { error: 'Rate limit excedido para notificações de chamado.' });
+  const rateLimitAllowed = await enforceRateLimit(req, res, 'general');
+  if (!rateLimitAllowed) {
+    return;
   }
 
   const keys = getServerKeys();

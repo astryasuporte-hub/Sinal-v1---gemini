@@ -5,7 +5,8 @@
  * Vercel Serverless Function: Resend Send Email
  */
 
-import { getServerKeys, sendJson, setCorsHeaders, readJsonBody, checkRateLimit, getClientIp } from '../_lib/common';
+import { getServerKeys, sendJson, setCorsHeaders, readJsonBody } from '../_lib/common';
+import { enforceRateLimit } from '../_lib/rateLimiter';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);
@@ -20,9 +21,9 @@ export default async function handler(req: any, res: any) {
     return sendJson(res, 405, { error: 'Método não permitido. Utilize POST.' });
   }
 
-  const clientIp = getClientIp(req);
-  if (!checkRateLimit(`resend_send_${clientIp}`, 15, 60000)) {
-    return sendJson(res, 429, { error: 'Rate limit excedido para envio de e-mails. Aguarde um momento.' });
+  const rateLimitAllowed = await enforceRateLimit(req, res, 'auth');
+  if (!rateLimitAllowed) {
+    return;
   }
 
   const keys = getServerKeys();

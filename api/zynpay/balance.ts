@@ -18,8 +18,9 @@ export default async function handler(req: any, res: any) {
     return;
   }
 
-  // Rate Limiting
-  if (!enforceRateLimit(req, res, { windowMs: 60000, maxRequests: 20, keyPrefix: 'zyn_balance' })) {
+  // Rate Limiting distribuído
+  const rateLimitAllowed = await enforceRateLimit(req, res, 'admin');
+  if (!rateLimitAllowed) {
     return;
   }
 

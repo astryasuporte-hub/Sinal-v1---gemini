@@ -5,7 +5,8 @@
  * Vercel Serverless Function: NewsAPI Proxy
  */
 
-import { getServerKeys, sendJson, setCorsHeaders, getClientIp, checkRateLimit, isAllowedDomain } from '../_lib/common';
+import { getServerKeys, sendJson, setCorsHeaders, isAllowedDomain } from '../_lib/common';
+import { enforceRateLimit } from '../_lib/rateLimiter';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);
@@ -16,9 +17,9 @@ export default async function handler(req: any, res: any) {
     return;
   }
 
-  const clientIp = getClientIp(req);
-  if (!checkRateLimit(`newsapi_${clientIp}`, 30, 60000)) {
-    return sendJson(res, 429, { error: 'Rate limit excedido. Aguarde um momento antes de nova requisição.' });
+  const rateLimitAllowed = await enforceRateLimit(req, res, 'general');
+  if (!rateLimitAllowed) {
+    return;
   }
 
   const keys = getServerKeys();

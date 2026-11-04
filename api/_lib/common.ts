@@ -27,38 +27,7 @@ export function isAllowedDomain(urlStr: string): boolean {
   }
 }
 
-// In-memory rate limiting per IP / client identifier
-interface RateLimitBucket {
-  tokens: number;
-  lastRefill: number;
-}
-const rateLimitMap = new Map<string, RateLimitBucket>();
 
-export function checkRateLimit(clientId: string, maxTokens = 60, refillIntervalMs = 60000): boolean {
-  const now = Date.now();
-  let bucket = rateLimitMap.get(clientId);
-
-  if (!bucket) {
-    bucket = { tokens: maxTokens - 1, lastRefill: now };
-    rateLimitMap.set(clientId, bucket);
-    return true;
-  }
-
-  // Refill tokens
-  const elapsed = now - bucket.lastRefill;
-  if (elapsed >= refillIntervalMs) {
-    bucket.tokens = maxTokens - 1;
-    bucket.lastRefill = now;
-    return true;
-  }
-
-  if (bucket.tokens > 0) {
-    bucket.tokens -= 1;
-    return true;
-  }
-
-  return false;
-}
 
 export function maskSecret(secret?: string | null): string {
   if (!secret || secret.trim().length === 0) return 'Não configurado';

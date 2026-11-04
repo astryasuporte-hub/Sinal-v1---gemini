@@ -5,7 +5,8 @@
  * Vercel Serverless Function: Auth Verify OTP
  */
 
-import { sendJson, setCorsHeaders, readJsonBody, checkRateLimit, getClientIp } from '../_lib/common';
+import { sendJson, setCorsHeaders, readJsonBody } from '../_lib/common';
+import { enforceRateLimit } from '../_lib/rateLimiter';
 import { otpStore } from './send-otp';
 
 export default async function handler(req: any, res: any) {
@@ -21,9 +22,9 @@ export default async function handler(req: any, res: any) {
     return sendJson(res, 405, { error: 'Método não permitido. Utilize POST.' });
   }
 
-  const clientIp = getClientIp(req);
-  if (!checkRateLimit(`otp_verify_${clientIp}`, 10, 60000)) {
-    return sendJson(res, 429, { error: 'Muitas tentativas de validação. Aguarde 1 minuto.' });
+  const rateLimitAllowed = await enforceRateLimit(req, res, 'auth');
+  if (!rateLimitAllowed) {
+    return;
   }
 
   const body = await readJsonBody(req);
