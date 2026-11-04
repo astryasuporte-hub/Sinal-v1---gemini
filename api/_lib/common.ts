@@ -68,41 +68,72 @@ export function maskSecret(secret?: string | null): string {
 }
 
 export function getClientIp(req: any): string {
-  return (
-    req.headers?.['x-forwarded-for']?.split(',')[0]?.trim() ||
-    req.headers?.['x-real-ip'] ||
-    req.socket?.remoteAddress ||
-    '127.0.0.1'
-  );
+  // Use trusted header from proxy/Vercel or socket address, preventing client spoofing
+  const cfIp = req.headers?.['cf-connecting-ip'];
+  const realIp = req.headers?.['x-real-ip'];
+  const forwarded = req.headers?.['x-forwarded-for'];
+  
+  if (cfIp && typeof cfIp === 'string') return cfIp.trim();
+  if (realIp && typeof realIp === 'string') return realIp.trim();
+  if (forwarded && typeof forwarded === 'string') {
+    // Leftmost is original client, following are proxies
+    const firstIp = forwarded.split(',')[0].trim();
+    if (firstIp) return firstIp;
+  }
+  return req.socket?.remoteAddress || '127.0.0.1';
 }
 
 export function setCorsHeaders(res: any): void {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, x-zynpay-signature, x-signature');
 }
 
-export function sendJson(res: any, statusCode: number, data: any): void {
+export function sendJson(res: any, statusCode: number, data: any, headers?: Record<string, string>): void {
   setCorsHeaders(res);
   res.setHeader('Content-Type', 'application/json');
+  if (headers) {
+    for (const [k, v] of Object.entries(headers)) {
+      res.setHeader(k, v);
+    }
+  }
   res.statusCode = statusCode;
   res.end(JSON.stringify(data));
 }
 
-export async function readJsonBody(req: any): Promise<any> {
-  if (req.body && typeof req.body === 'object') {
-    return req.body;
+export async function readRawAndJsonBody(req: any): Promise<{ rawBody: string; body: any }> {
+  if (req.rawBody && typeof req.rawBody === 'string') {
+    let body = {};
+    try {
+      body = JSON.parse(req.rawBody);
+    } catch {}
+    return { rawBody: req.rawBody, body };
   }
+
+  if (req.body && typeof req.body === 'object' && Object.keys(req.body).length > 0) {
+    const raw = JSON.stringify(req.body);
+    return { rawBody: raw, body: req.body };
+  }
+
   const buffers: Buffer[] = [];
   for await (const chunk of req) {
     buffers.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
-  const str = Buffer.concat(buffers).toString('utf-8');
-  try {
-    return JSON.parse(str);
-  } catch {
-    return {};
+  const rawBody = Buffer.concat(buffers).toString('utf-8');
+  let body = {};
+  if (rawBody.trim().length > 0) {
+    try {
+      body = JSON.parse(rawBody);
+    } catch {
+      body = {};
+    }
   }
+  return { rawBody, body };
+}
+
+export async function readJsonBody(req: any): Promise<any> {
+  const { body } = await readRawAndJsonBody(req);
+  return body;
 }
 
 // Server Secret Keys strictly resolved from process.env

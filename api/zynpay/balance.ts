@@ -2,10 +2,12 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  * 
- * Vercel Serverless Function: ZynPay Balance Endpoint
+ * Vercel Serverless Function: ZynPay Balance Endpoint (Admin Protected)
  */
 
-import { getServerKeys, sendJson, setCorsHeaders, getClientIp, checkRateLimit } from '../_lib/common';
+import { getServerKeys, sendJson, setCorsHeaders } from '../_lib/common';
+import { verifyAdminRequest } from '../_lib/adminAuth';
+import { enforceRateLimit } from '../_lib/rateLimiter';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);
@@ -16,9 +18,18 @@ export default async function handler(req: any, res: any) {
     return;
   }
 
-  const clientIp = getClientIp(req);
-  if (!checkRateLimit(`zyn_balance_${clientIp}`, 30, 60000)) {
-    return sendJson(res, 429, { error: 'Rate limit excedido para consulta de saldo.' });
+  // Rate Limiting
+  if (!enforceRateLimit(req, res, { windowMs: 60000, maxRequests: 20, keyPrefix: 'zyn_balance' })) {
+    return;
+  }
+
+  // Verificação de privilégios de Administrador
+  const isAdmin = await verifyAdminRequest(req);
+  if (!isAdmin) {
+    return sendJson(res, 401, {
+      error: 'Acesso restrito. Consulta de saldo financeiro requer autenticação de administrador.',
+      code: 'UNAUTHORIZED_ADMIN'
+    });
   }
 
   const keys = getServerKeys();

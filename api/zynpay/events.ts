@@ -6,6 +6,7 @@
  */
 
 import { setCorsHeaders } from '../_lib/common';
+import { subscribeBillingEvents } from '../_lib/eventsHub';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);
@@ -27,12 +28,22 @@ export default async function handler(req: any, res: any) {
   // Initial connection payload
   res.write(`data: ${JSON.stringify({ type: 'connected', timestamp: new Date().toISOString() })}\n\n`);
 
+  // Subscribe to real-time payment confirmation events
+  const unsubscribe = subscribeBillingEvents((payload) => {
+    try {
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    } catch {}
+  });
+
   // Heartbeat to keep connection alive
   const interval = setInterval(() => {
-    res.write(`data: ${JSON.stringify({ type: 'ping', timestamp: new Date().toISOString() })}\n\n`);
-  }, 10000);
+    try {
+      res.write(`data: ${JSON.stringify({ type: 'ping', timestamp: new Date().toISOString() })}\n\n`);
+    } catch {}
+  }, 15000);
 
   req.on('close', () => {
+    unsubscribe();
     clearInterval(interval);
     res.end();
   });
