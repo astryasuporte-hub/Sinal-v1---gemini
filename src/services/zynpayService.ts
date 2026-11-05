@@ -205,11 +205,19 @@ class ZynPayService {
   }
 
   /**
-   * Consulta o status em tempo real de uma cobrança específica
+   * Consulta o status em tempo real de uma cobrança específica com autenticação do pagador
    */
   public async getChargeStatus(chargeId: string): Promise<{ success: boolean; charge?: ZynPayCharge; error?: string }> {
     try {
-      const response = await fetch(`/api/zynpay/charges/${encodeURIComponent(chargeId)}`);
+      const { data: { session } } = await supabase.auth.getSession();
+      const headers: Record<string, string> = {};
+      if (session?.access_token) {
+        headers['Authorization'] = `Bearer ${session.access_token}`;
+      }
+
+      const response = await fetch(`/api/zynpay/charges/${encodeURIComponent(chargeId)}`, {
+        headers
+      });
       const data = await response.json();
 
       if (!response.ok) {
@@ -254,7 +262,13 @@ class ZynPayService {
    */
   public async listCharges(): Promise<{ success: boolean; charges: ZynPayCharge[]; error?: string }> {
     try {
-      const response = await fetch('/api/zynpay/charges');
+      const { data: { session } } = await supabase.auth.getSession();
+      const headers: Record<string, string> = {};
+      if (session?.access_token) {
+        headers['Authorization'] = `Bearer ${session.access_token}`;
+      }
+
+      const response = await fetch('/api/zynpay/charges', { headers });
       const data = await response.json();
       return {
         success: true,

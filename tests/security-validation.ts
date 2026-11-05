@@ -150,9 +150,43 @@ class MockDatabaseHarness implements TestDatabaseAdapter {
       provider: 'zynpay',
       description: charge.description,
       qr_code_text: charge.qrCodeText,
+      idempotency_key: charge.idempotencyKey,
+      checkout_data: {
+        idempotency_key: charge.idempotencyKey,
+        user_email: charge.userEmail,
+        description: charge.description,
+        qr_code_text: charge.qrCodeText
+      },
       created_at: new Date().toISOString()
     });
     return true;
+  }
+
+  async getChargeByIdempotencyKey(userId: string, idempotencyKey: string): Promise<any | null> {
+    if (this.forceError) throw new Error(this.forceError);
+    for (const c of this.charges.values()) {
+      const matchUser = userId && c.user_id === userId;
+      const matchKey = c.idempotency_key === idempotencyKey || c.checkout_data?.idempotency_key === idempotencyKey;
+      if (matchUser && matchKey) {
+        return {
+          id: c.id,
+          providerPaymentId: c.provider_payment_id || c.id,
+          userId: c.user_id,
+          userEmail: c.user_email,
+          amount: c.amount,
+          amountCents: c.amount,
+          currency: c.currency,
+          status: c.status,
+          description: c.description,
+          qrCodeText: c.qr_code_text,
+          createdAt: c.created_at,
+          updatedAt: c.created_at,
+          approvedAt: c.approved_at,
+          paidAt: c.approved_at
+        };
+      }
+    }
+    return null;
   }
 
   async getActivePendingCharge(userId: string | null, email?: string): Promise<any | null> {
@@ -401,6 +435,50 @@ async function main() {
     },
     getCharge: async (chargeId: string) => {
       const dbCharge = dbHarness.charges.get(chargeId);
+      if (chargeId.includes('tamper_amount')) {
+        return {
+          id: chargeId,
+          amount: 100, // divergente dos 2990 esperados
+          currency: 'BRL',
+          status: 'PAID',
+          description: 'FatosBR Pro',
+          qrCodeText: 'pix_code',
+          createdAt: new Date().toISOString()
+        };
+      }
+      if (chargeId.includes('zero_amount')) {
+        return {
+          id: chargeId,
+          amount: 0, // valor zero/inválido
+          currency: 'BRL',
+          status: 'PAID',
+          description: 'FatosBR Pro',
+          qrCodeText: 'pix_code',
+          createdAt: new Date().toISOString()
+        };
+      }
+      if (chargeId.includes('bad_currency')) {
+        return {
+          id: chargeId,
+          amount: dbCharge?.amount || 2990,
+          currency: 'USD', // moeda inválida
+          status: 'PAID',
+          description: 'FatosBR Pro',
+          qrCodeText: 'pix_code',
+          createdAt: new Date().toISOString()
+        };
+      }
+      if (chargeId.includes('not_paid')) {
+        return {
+          id: chargeId,
+          amount: dbCharge?.amount || 2990,
+          currency: 'BRL',
+          status: 'PENDING', // não confirmada
+          description: 'FatosBR Pro',
+          qrCodeText: 'pix_code',
+          createdAt: new Date().toISOString()
+        };
+      }
       // Para fluxos de webhook (onde o webhook notifica que o Pix foi pago no gateway):
       if (chargeId.includes('wh_ok') || chargeId.includes('atomic') || dbCharge?.status === 'PAID') {
         return {
@@ -931,6 +1009,150 @@ async function main() {
     assert(out.json?.code === 'ACTIVE_PENDING_CHARGE_DIFFERENT_PLAN', 'Código deve ser ACTIVE_PENDING_CHARGE_DIFFERENT_PLAN');
   });
 
+  await runTest('2.20 GET /api/zynpay/charges sem token Bearer é rejeitado com HTTP 401 UNAUTHORIZED_CHARGE_QUERY', async () => {
+    rateStore.reset();
+    const { res, result } = createMockRes();
+    const req = createMockReq({
+      method: 'GET',
+      url: '/api/zynpay/charges?id=zyn_test_anon'
+    });
+    await chargesHandler(req, res);
+    const out = result();
+    assert(out.statusCode === 401, `Esperado 401 para consulta sem auth, recebido ${out.statusCode}`);
+    assert(out.json?.code === 'UNAUTHORIZED_CHARGE_QUERY', 'Código deve ser UNAUTHORIZED_CHARGE_QUERY');
+  });
+
+  await runTest('2.21 GET /api/zynpay/charges com token inválido/expirado é rejeitado com HTTP 403 INVALID_SESSION', async () => {
+    rateStore.reset();
+    const { res, result } = createMockRes();
+    const req = createMockReq({
+      method: 'GET',
+      url: '/api/zynpay/charges?id=zyn_test_invalid_token',
+      headers: { authorization: 'Bearer invalid_token' }
+    });
+    await chargesHandler(req, res);
+    const out = result();
+    assert(out.statusCode === 403, `Esperado 403 para sessão inválida, recebido ${out.statusCode}`);
+    assert(out.json?.code === 'INVALID_SESSION', 'Código deve ser INVALID_SESSION');
+  });
+
+  await runTest('2.22 Prevenção de IDOR: GET de cobrança de outro usuário retorna HTTP 404 neutro', async () => {
+    rateStore.reset();
+    const ownerUserId = 'user_vitima_idor_01';
+    const attackerUserId = 'user_atacante_02';
+
+    // Cria cobrança pertencente à vítima
+    await recordPendingCharge({
+      providerPaymentId: 'zyn_idor_victim_charge',
+      userId: ownerUserId,
+      userEmail: `${ownerUserId}@fatosbr.com.br`,
+      amountCents: 2990,
+      description: 'Plano Pro Vítima'
+    });
+
+    // Atacante tenta consultar a cobrança da vítima
+    const { res, result } = createMockRes();
+    const req = createMockReq({
+      method: 'GET',
+      url: '/api/zynpay/charges?id=zyn_idor_victim_charge',
+      headers: { authorization: `Bearer ${attackerUserId}` }
+    });
+    await chargesHandler(req, res);
+    const out = result();
+
+    // Deve retornar 404 neutro para não revelar a existência da cobrança e impedir enumeração
+    assert(out.statusCode === 404, `Esperado 404 neutro contra IDOR, recebido ${out.statusCode}`);
+    assert(out.json?.code === 'CHARGE_NOT_FOUND', 'Código deve ser CHARGE_NOT_FOUND');
+    assert(!out.json?.charge, 'NUNCA deve expor dados de cobrança alheia');
+  });
+
+  await runTest('2.23 GET de cobrança própria retorna HTTP 200 com status e dados completos', async () => {
+    rateStore.reset();
+    const ownerUserId = 'user_legitimo_dono';
+    const chargeId = 'zyn_legit_owner_charge';
+
+    await recordPendingCharge({
+      providerPaymentId: chargeId,
+      userId: ownerUserId,
+      userEmail: `${ownerUserId}@fatosbr.com.br`,
+      amountCents: 2990,
+      description: 'Plano Pro FatosBR'
+    });
+
+    const { res, result } = createMockRes();
+    const req = createMockReq({
+      method: 'GET',
+      url: `/api/zynpay/charges?id=${chargeId}`,
+      headers: { authorization: `Bearer ${ownerUserId}` }
+    });
+    await chargesHandler(req, res);
+    const out = result();
+
+    assert(out.statusCode === 200, `Esperado 200 para o legítimo proprietário, recebido ${out.statusCode}`);
+    assert(out.json?.success === true, 'Deve retornar success: true');
+    assert(out.json?.charge?.id === chargeId, 'Deve retornar o ID correto da cobrança');
+    assert(out.json?.charge?.amount === 2990, 'Deve retornar o valor correto');
+  });
+
+  await runTest('2.24 GET de cobrança via ADMIN_SECRET permite auditoria autorizada com HTTP 200', async () => {
+    rateStore.reset();
+    process.env.ADMIN_SECRET = 'secret_admin_token_fatosbr_2026';
+    const chargeId = 'zyn_audit_admin_charge';
+
+    await recordPendingCharge({
+      providerPaymentId: chargeId,
+      userId: 'user_aleatorio_qualquer',
+      userEmail: 'aleatorio@fatosbr.com.br',
+      amountCents: 2990,
+      description: 'Auditoria Admin'
+    });
+
+    const { res, result } = createMockRes();
+    const req = createMockReq({
+      method: 'GET',
+      url: `/api/zynpay/charges?id=${chargeId}`,
+      headers: { authorization: 'Bearer secret_admin_token_fatosbr_2026' }
+    });
+    await chargesHandler(req, res);
+    const out = result();
+
+    assert(out.statusCode === 200, `Esperado 200 para acesso administrativo, recebido ${out.statusCode}`);
+    assert(out.json?.charge?.id === chargeId, 'Admin deve conseguir auditar a cobrança');
+  });
+
+  await runTest('2.25 Idempotência persistente: retry com a mesma chave lógica retorna a cobrança sem nova chamada ao gateway', async () => {
+    rateStore.reset();
+    const userId = 'user_idemp_persistent_test';
+    const clientKey = 'intent_unique_key_999';
+
+    // 1ª tentativa
+    const { res: res1, result: result1 } = createMockRes();
+    const req1 = createMockReq({
+      method: 'POST',
+      url: '/api/zynpay/charges',
+      headers: { authorization: `Bearer ${userId}` },
+      body: { planId: 'pro', idempotencyKey: clientKey }
+    });
+    await chargesHandler(req1, res1);
+    const out1 = result1();
+    assert(out1.statusCode === 200, 'Primeira criação deve retornar 200');
+
+    // 2ª tentativa com a mesma chave
+    const { res: res2, result: result2 } = createMockRes();
+    const req2 = createMockReq({
+      method: 'POST',
+      url: '/api/zynpay/charges',
+      headers: { authorization: `Bearer ${userId}` },
+      body: { planId: 'pro', idempotencyKey: clientKey }
+    });
+    await chargesHandler(req2, res2);
+    const out2 = result2();
+
+    assert(out2.statusCode === 200, 'Retry deve retornar 200');
+    assert(out2.json?.reused === true, 'Flag reused deve ser true');
+    assert(out1.json?.charge?.id === out2.json?.charge?.id, 'ID retornado deve ser estritamente o mesmo');
+  });
+
   // ---------------------------------------------------------------------------
   // CATEGORIA 3: AUDITORIA REAL ZYNPAY & WEBHOOK
   // ---------------------------------------------------------------------------
@@ -1069,6 +1291,138 @@ async function main() {
 
     assert(out.statusCode === 401, `Esperado 401 para header genérico, recebido ${out.statusCode}`);
     assert(out.json?.code === 'MISSING_SIGNATURE', 'Código deve ser MISSING_SIGNATURE');
+  });
+
+  await runTest('3.8 Webhook: Rejeição de confirmação se valor upstream divergir do esperado (HTTP 422 AMOUNT_MISMATCH)', async () => {
+    const chargeId = 'zyn_tamper_amount_99';
+    await recordPendingCharge({
+      providerPaymentId: chargeId,
+      userId: 'user_tamper_test',
+      userEmail: 'tamper@fatosbr.com.br',
+      amountCents: 2990,
+      description: 'Plano Pro'
+    });
+
+    const payloadObj = {
+      id: 'evt_tamper_01',
+      event: 'pix.charge.paid',
+      data: { charge_id: chargeId }
+    };
+    const rawBody = JSON.stringify(payloadObj);
+    const sig = crypto.createHmac('sha256', testSecret).update(rawBody).digest('hex');
+
+    const { res, result } = createMockRes();
+    const req = createMockReq({
+      method: 'POST',
+      url: '/api/zynpay/webhook',
+      headers: { 'x-zinpay-signature': sig },
+      rawBody
+    });
+    await webhookHandler(req, res);
+    const out = result();
+
+    assert(out.statusCode === 422, `Esperado 422 para valor divergente, recebido ${out.statusCode}`);
+    assert(out.json?.code === 'AMOUNT_MISMATCH', 'Código deve ser AMOUNT_MISMATCH');
+    assert(dbHarness.userSubscriptions.get('user_tamper_test') !== 'active', 'NUNCA deve ativar Pro para valor divergente');
+  });
+
+  await runTest('3.9 Webhook: Rejeição de confirmação se valor upstream for zero ou negativo (HTTP 422 INVALID_UPSTREAM_AMOUNT)', async () => {
+    const chargeId = 'zyn_zero_amount_88';
+    await recordPendingCharge({
+      providerPaymentId: chargeId,
+      userId: 'user_zero_test',
+      userEmail: 'zero@fatosbr.com.br',
+      amountCents: 2990,
+      description: 'Plano Pro'
+    });
+
+    const payloadObj = {
+      id: 'evt_zero_01',
+      event: 'pix.charge.paid',
+      data: { charge_id: chargeId }
+    };
+    const rawBody = JSON.stringify(payloadObj);
+    const sig = crypto.createHmac('sha256', testSecret).update(rawBody).digest('hex');
+
+    const { res, result } = createMockRes();
+    const req = createMockReq({
+      method: 'POST',
+      url: '/api/zynpay/webhook',
+      headers: { 'x-zinpay-signature': sig },
+      rawBody
+    });
+    await webhookHandler(req, res);
+    const out = result();
+
+    assert(out.statusCode === 422, `Esperado 422 para valor upstream inválido, recebido ${out.statusCode}`);
+    assert(out.json?.code === 'INVALID_UPSTREAM_AMOUNT', 'Código deve ser INVALID_UPSTREAM_AMOUNT');
+    assert(dbHarness.userSubscriptions.get('user_zero_test') !== 'active', 'NUNCA deve ativar Pro para valor zero/negativo');
+  });
+
+  await runTest('3.10 Webhook: Rejeição se moeda upstream não for BRL (HTTP 422 CURRENCY_MISMATCH)', async () => {
+    const chargeId = 'zyn_bad_currency_77';
+    await recordPendingCharge({
+      providerPaymentId: chargeId,
+      userId: 'user_bad_curr_test',
+      userEmail: 'curr@fatosbr.com.br',
+      amountCents: 2990,
+      description: 'Plano Pro'
+    });
+
+    const payloadObj = {
+      id: 'evt_bad_curr_01',
+      event: 'pix.charge.paid',
+      data: { charge_id: chargeId }
+    };
+    const rawBody = JSON.stringify(payloadObj);
+    const sig = crypto.createHmac('sha256', testSecret).update(rawBody).digest('hex');
+
+    const { res, result } = createMockRes();
+    const req = createMockReq({
+      method: 'POST',
+      url: '/api/zynpay/webhook',
+      headers: { 'x-zinpay-signature': sig },
+      rawBody
+    });
+    await webhookHandler(req, res);
+    const out = result();
+
+    assert(out.statusCode === 422, `Esperado 422 para moeda não-BRL, recebido ${out.statusCode}`);
+    assert(out.json?.code === 'CURRENCY_MISMATCH', 'Código deve ser CURRENCY_MISMATCH');
+    assert(dbHarness.userSubscriptions.get('user_bad_curr_test') !== 'active', 'NUNCA deve ativar Pro para moeda divergente');
+  });
+
+  await runTest('3.11 Webhook: Rejeição se cobrança upstream não estiver em status PAID (HTTP 422 PAYMENT_NOT_CONFIRMED)', async () => {
+    const chargeId = 'zyn_not_paid_66';
+    await recordPendingCharge({
+      providerPaymentId: chargeId,
+      userId: 'user_not_paid_test',
+      userEmail: 'notpaid@fatosbr.com.br',
+      amountCents: 2990,
+      description: 'Plano Pro'
+    });
+
+    const payloadObj = {
+      id: 'evt_not_paid_01',
+      event: 'pix.charge.paid',
+      data: { charge_id: chargeId }
+    };
+    const rawBody = JSON.stringify(payloadObj);
+    const sig = crypto.createHmac('sha256', testSecret).update(rawBody).digest('hex');
+
+    const { res, result } = createMockRes();
+    const req = createMockReq({
+      method: 'POST',
+      url: '/api/zynpay/webhook',
+      headers: { 'x-zinpay-signature': sig },
+      rawBody
+    });
+    await webhookHandler(req, res);
+    const out = result();
+
+    assert(out.statusCode === 422, `Esperado 422 para status upstream não-PAID, recebido ${out.statusCode}`);
+    assert(out.json?.code === 'PAYMENT_NOT_CONFIRMED', 'Código deve ser PAYMENT_NOT_CONFIRMED');
+    assert(dbHarness.userSubscriptions.get('user_not_paid_test') !== 'active', 'NUNCA deve ativar Pro se gateway não confirmou PAID');
   });
 
   // ---------------------------------------------------------------------------

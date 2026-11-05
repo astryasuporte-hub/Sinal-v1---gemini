@@ -16,14 +16,15 @@
 
 import crypto from 'crypto';
 import QRCode from 'qrcode';
-import { sendJson, setCorsHeaders, readJsonBody } from '../_lib/common';
+import { sendJson, setCorsHeaders, readJsonBody, getServerKeys } from '../_lib/common';
 import {
   getServerSupabase,
   checkUserActiveSubscription,
   getActivePendingChargeForUser,
   cancelOrExpirePendingCharge,
   recordOfficialZynPayCharge,
-  getChargeById
+  getChargeById,
+  getChargeByIdempotencyKey
 } from '../_lib/db';
 import { resolvePlanPrice } from '../_lib/plans';
 import { createPixChargeOnGateway, fetchChargeFromGateway } from '../_lib/zynpayClient';
@@ -266,6 +267,56 @@ export default async function handler(req: any, res: any) {
       idempotencyKey = `fatosbr_chk_${userId}_${attemptHash}`;
     }
 
+    // 6.1 Idempotência Persistente: reutiliza resposta se a tentativa lógica já foi registrada
+    try {
+      const existingByIdempotency = await getChargeByIdempotencyKey(userId, idempotencyKey);
+      if (existingByIdempotency) {
+        if (existingByIdempotency.status === 'PAID') {
+          return sendJson(res, 200, {
+            success: true,
+            reused: true,
+            idempotent: true,
+            message: 'Esta cobrança já foi confirmada como paga.',
+            charge: {
+              id: existingByIdempotency.providerPaymentId,
+              amount: existingByIdempotency.amountCents,
+              amountFormatted: planConfig.amountFormatted,
+              status: 'PAID',
+              description: existingByIdempotency.description,
+              customer: { name: customerName, email: userEmail },
+              createdAt: existingByIdempotency.createdAt,
+              paidAt: existingByIdempotency.paidAt
+            }
+          });
+        }
+        if (existingByIdempotency.status === 'PENDING' || existingByIdempotency.status === 'PROCESSING') {
+          let qrCodeBase64 = '';
+          if (existingByIdempotency.qrCodeText) {
+            try { qrCodeBase64 = await QRCode.toDataURL(existingByIdempotency.qrCodeText, { width: 320, margin: 2 }); } catch {}
+          }
+          return sendJson(res, 200, {
+            success: true,
+            reused: true,
+            idempotent: true,
+            charge: {
+              id: existingByIdempotency.providerPaymentId,
+              amount: existingByIdempotency.amountCents,
+              amountFormatted: planConfig.amountFormatted,
+              status: existingByIdempotency.status,
+              description: existingByIdempotency.description,
+              customer: { name: customerName, email: userEmail },
+              qrCode: qrCodeBase64,
+              qrCodeText: existingByIdempotency.qrCodeText,
+              createdAt: existingByIdempotency.createdAt,
+              expiresAt: existingByIdempotency.expirationDate || new Date(new Date(existingByIdempotency.createdAt).getTime() + 15 * 60 * 1000).toISOString()
+            }
+          });
+        }
+      }
+    } catch (idempErr: any) {
+      console.warn('[Idempotency Check Notice]', idempErr.message);
+    }
+
     // 7. Criação de cobrança oficial pela API oficial da ZynPay (ZERO PIX FICTÍCIO)
     let gatewayResponse;
     try {
@@ -365,6 +416,48 @@ export default async function handler(req: any, res: any) {
   // GET /api/zynpay/charges?id=... ou /api/zynpay/charges/{id} (Consulta e Reconciliação)
   // ===========================================================================
   if (req.method === 'GET') {
+    // 1. Autenticação obrigatória (Bearer Token) — Prevenção de IDOR/BOLA
+    const authHeader = req.headers?.authorization || '';
+    if (!authHeader.startsWith('Bearer ')) {
+      return sendJson(res, 401, {
+        error: 'Autenticação obrigatória para consultar detalhes de cobrança.',
+        code: 'UNAUTHORIZED_CHARGE_QUERY'
+      });
+    }
+
+    const token = authHeader.slice(7).trim();
+    if (!token) {
+      return sendJson(res, 401, {
+        error: 'Token de autenticação ausente.',
+        code: 'MISSING_AUTH_TOKEN'
+      });
+    }
+
+    let authenticatedUser: any = null;
+    let isAdmin = false;
+    const keys = getServerKeys();
+    if (keys.ADMIN_SECRET && token === keys.ADMIN_SECRET) {
+      isAdmin = true;
+    } else {
+      try {
+        const supabase = getServerSupabase();
+        const { data: { user }, error: authErr } = await supabase.auth.getUser(token);
+        if (authErr || !user) {
+          return sendJson(res, 403, {
+            error: 'Sessão inválida ou expirada. Autentique-se novamente.',
+            code: 'INVALID_SESSION'
+          });
+        }
+        authenticatedUser = user;
+      } catch (authException: any) {
+        console.error('[Auth Error] Falha ao validar token na consulta de cobrança:', authException.message);
+        return sendJson(res, 403, {
+          error: 'Falha na validação da identidade do solicitante.',
+          code: 'AUTH_VALIDATION_FAILED'
+        });
+      }
+    }
+
     const urlObj = new URL(req.url, 'http://localhost');
     let chargeId = urlObj.searchParams.get('id') || urlObj.searchParams.get('chargeId');
 
@@ -381,51 +474,72 @@ export default async function handler(req: any, res: any) {
 
     try {
       const stored = await getChargeById(chargeId);
-      if (stored) {
-        // Se a cobrança local ainda estiver PENDING, tenta reconciliar ativamente com a ZynPay
-        if (stored.status === 'PENDING') {
-          try {
-            const upCharge = await fetchChargeFromGateway(stored.providerPaymentId);
-            if (upCharge && upCharge.status !== 'PENDING') {
-              stored.status = upCharge.status;
-            }
-          } catch {}
-        }
-
-        let qrCodeBase64 = '';
-        if (stored.qrCodeText) {
-          try {
-            qrCodeBase64 = await QRCode.toDataURL(stored.qrCodeText, { width: 320, margin: 2 });
-          } catch {}
-        }
-
-        return sendJson(res, 200, {
-          success: true,
-          charge: {
-            id: stored.providerPaymentId,
-            status: stored.status,
-            amount: stored.amountCents,
-            amountFormatted: `R$ ${(stored.amountCents / 100).toFixed(2).replace('.', ',')}`,
-            description: stored.description,
-            qrCode: qrCodeBase64,
-            qrCodeText: stored.qrCodeText,
-            createdAt: stored.createdAt,
-            paidAt: stored.paidAt,
-            expiresAt: stored.expirationDate || new Date(new Date(stored.createdAt).getTime() + 15 * 60 * 1000).toISOString()
-          }
+      if (!stored) {
+        return sendJson(res, 404, {
+          error: 'Cobrança não encontrada no banco de dados.',
+          code: 'CHARGE_NOT_FOUND'
         });
       }
+
+      // 2. Prevenção de IDOR/BOLA:
+      // O usuário solicitante deve ser comprovadamente o proprietário da cobrança (ou admin autorizado)
+      if (!isAdmin) {
+        const userIdMatch = Boolean(
+          authenticatedUser?.id && stored.userId && stored.userId === authenticatedUser.id
+        );
+        const userEmailMatch = Boolean(
+          authenticatedUser?.email &&
+          stored.userEmail &&
+          stored.userEmail.toLowerCase().trim() === authenticatedUser.email.toLowerCase().trim()
+        );
+
+        if (!userIdMatch && !userEmailMatch) {
+          // Resposta 404 neutra para prevenir enumeração de identificadores
+          return sendJson(res, 404, {
+            error: 'Cobrança não encontrada no banco de dados.',
+            code: 'CHARGE_NOT_FOUND'
+          });
+        }
+      }
+
+      // Se a cobrança local ainda estiver PENDING, tenta reconciliar ativamente com a ZynPay
+      if (stored.status === 'PENDING') {
+        try {
+          const upCharge = await fetchChargeFromGateway(stored.providerPaymentId);
+          if (upCharge && upCharge.status !== 'PENDING') {
+            stored.status = upCharge.status;
+          }
+        } catch {}
+      }
+
+      let qrCodeBase64 = '';
+      if (stored.qrCodeText) {
+        try {
+          qrCodeBase64 = await QRCode.toDataURL(stored.qrCodeText, { width: 320, margin: 2 });
+        } catch {}
+      }
+
+      return sendJson(res, 200, {
+        success: true,
+        charge: {
+          id: stored.providerPaymentId,
+          status: stored.status,
+          amount: stored.amountCents,
+          amountFormatted: `R$ ${(stored.amountCents / 100).toFixed(2).replace('.', ',')}`,
+          description: stored.description,
+          qrCode: qrCodeBase64,
+          qrCodeText: stored.qrCodeText,
+          createdAt: stored.createdAt,
+          paidAt: stored.paidAt,
+          expiresAt: stored.expirationDate || new Date(new Date(stored.createdAt).getTime() + 15 * 60 * 1000).toISOString()
+        }
+      });
     } catch (err: any) {
       return sendJson(res, 503, {
         error: 'Erro temporário ao consultar banco de dados.',
         code: 'DATABASE_UNAVAILABLE'
       });
     }
-
-    return sendJson(res, 404, {
-      error: 'Cobrança não encontrada no banco de dados.',
-      code: 'CHARGE_NOT_FOUND'
-    });
   }
 
   return sendJson(res, 405, { error: 'Método não permitido.', code: 'METHOD_NOT_ALLOWED' });

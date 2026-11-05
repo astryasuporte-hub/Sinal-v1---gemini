@@ -1,6 +1,6 @@
 {
-  "summary": "Plano mestre de conclusão e lançamento integral do FatosBR, englobando infraestrutura de código no AI Studio, automação de templates de WhatsApp Cloud API, esteira de conteúdo editorial, conformidade jurídica LGPD e estratégia de conversão de assinantes.",
-  "updatedAt": "2026-11-03T23:00:50.898184922Z",
+  "summary": "Relatório de conclusão das correções definitivas de segurança financeira da ZynPay na FatosBR (IDOR, reconciliação upstream estrita, moeda BRL e idempotência persistente).",
+  "updatedAt": "2026-11-05T23:36:15.156715232Z",
   "requestFeedback": true,
   "userFacing": true
 }

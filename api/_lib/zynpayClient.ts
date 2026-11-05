@@ -75,13 +75,16 @@ export function validateMonetaryAmountCents(val: any, fieldName = 'amountCents')
   return num;
 }
 
-export function validateCurrency(val: any): string {
-  if (val !== undefined && val !== null) {
+export function validateCurrency(val: any, options: { required?: boolean } = {}): string {
+  if (val !== undefined && val !== null && String(val).trim() !== '') {
     const cur = String(val).trim().toUpperCase();
     if (cur !== 'BRL') {
       throw new Error(`GATEWAY_INVALID_RESPONSE: Moeda não suportada '${val}'. Somente BRL é aceita pelo sistema.`);
     }
     return cur;
+  }
+  if (options.required) {
+    throw new Error('GATEWAY_INVALID_RESPONSE: Moeda ausente ou nula na resposta do gateway de pagamento.');
   }
   return 'BRL';
 }
@@ -159,7 +162,7 @@ export function validateZynPayConsultationResponse(raw: any, expectedChargeId: s
 
   const rawAmount = data.amountCents !== undefined ? data.amountCents : data.amount;
   const amountCents = validateMonetaryAmountCents(rawAmount, 'amountCents');
-  const currency = validateCurrency(data.currency);
+  const currency = validateCurrency(data.currency, { required: true });
   const status = mapZynPayStatus(data.status);
 
   const qrCodeText = String(

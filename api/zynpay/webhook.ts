@@ -153,7 +153,7 @@ export default async function handler(req: any, res: any) {
 
   // 8. Reconciliação direta servidor-a-servidor com a API da ZynPay
   // Regra de segurança: Se a validação não puder ser concluída, manter confirmação automática desabilitada
-  let verifiedAmountCents = storedCharge.amountCents;
+  let verifiedAmountCents = 0;
 
   try {
     const upCharge = await fetchChargeFromGateway(chargeId);
@@ -165,6 +165,16 @@ export default async function handler(req: any, res: any) {
       });
     }
 
+    // 8.1 Validação de correspondência de ID
+    if (upCharge.id !== storedCharge.providerPaymentId && upCharge.id !== storedCharge.id) {
+      console.error(`[Security Alert] Identificador divergente na consulta ZynPay: ${upCharge.id} vs ${storedCharge.providerPaymentId}`);
+      return sendJson(res, 422, {
+        error: 'Identificador de cobrança divergente no provedor oficial.',
+        code: 'CHARGE_ID_MISMATCH'
+      });
+    }
+
+    // 8.2 Validação de status PAID
     if (upCharge.status !== 'PAID') {
       console.warn(`[Security Alert] Status upstream não confirmado (${upCharge.status}) para cobrança ${chargeId}`);
       return sendJson(res, 422, {
@@ -173,7 +183,16 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    if (upCharge.amount > 0 && upCharge.amount !== storedCharge.amountCents) {
+    // 8.3 Validação estrita de valor: inteiro positivo e idêntico ao registrado
+    if (!Number.isInteger(upCharge.amount) || upCharge.amount <= 0) {
+      console.error(`[Security Alert] Valor monetário upstream inválido (${upCharge.amount}) para cobrança ${chargeId}`);
+      return sendJson(res, 422, {
+        error: 'Valor pago retornado pelo provedor é inválido.',
+        code: 'INVALID_UPSTREAM_AMOUNT'
+      });
+    }
+
+    if (upCharge.amount !== storedCharge.amountCents) {
       console.error(`[Security Tampering] Valor divergente: esperado ${storedCharge.amountCents}, upstream ${upCharge.amount}`);
       return sendJson(res, 422, {
         error: 'Valor pago diverge do valor registrado na cobrança.',
@@ -181,7 +200,17 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    verifiedAmountCents = upCharge.amount || storedCharge.amountCents;
+    // 8.4 Validação estrita de moeda
+    if (upCharge.currency !== 'BRL') {
+      console.error(`[Security Tampering] Moeda upstream não suportada: ${upCharge.currency}`);
+      return sendJson(res, 422, {
+        error: 'Moeda da cobrança diverge do padrão nacional BRL.',
+        code: 'CURRENCY_MISMATCH'
+      });
+    }
+
+    // Valor comprovado sem qualquer fallback permissivo
+    verifiedAmountCents = upCharge.amount;
   } catch (err: any) {
     if (err.message?.includes('GATEWAY_UNCONFIGURED')) {
       console.warn('[Security Notice] ZYNPAY_API_KEY ausente. Confirmação automática mantida desabilitada.');

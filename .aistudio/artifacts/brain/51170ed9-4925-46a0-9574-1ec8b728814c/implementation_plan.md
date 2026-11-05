@@ -1,67 +1,37 @@
-# Plano Mestre de Conclusão e Lançamento Integral — FatosBR
+# FATOSBR — CONCLUÍDO: HARDENING DEFINITIVO ZYNPAY & SUPABASE POSTGRESQL
 
-Plano abrangente para finalizar todas as frentes necessárias para colocar o **FatosBR** no ar como um produto jornalístico profissional, lucrativo e escalável.
+## 1. Escopo das Correções Executadas
 
----
+### 1.1 Eliminação Definitiva de IDOR / BOLA no `GET /api/zynpay/charges`
+- **Autenticação Obrigatória**: Consulta de cobranças exige agora `Authorization: Bearer <token>`.
+- **Validação de Sessão Supabase**: Validação rigorosa via `supabase.auth.getUser(token)` obtendo o `userId` real do pagador.
+- **Proteção de Titularidade Fail-Closed**: Verifica se `stored.userId === authenticatedUser.id` (ou correspondência por email seguro). Usuários não autenticados recebem HTTP 401 (`UNAUTHORIZED_CHARGE_QUERY`), sessões inválidas recebem HTTP 403 (`INVALID_SESSION`) e tentativas de acessar cobrança de terceiros recebem HTTP 404 neutro (`CHARGE_NOT_FOUND`) para impedir enumeração de cobranças.
+- **Acesso Administrativo Seguro**: Permite auditoria administrativa legítima via token mestre `ADMIN_SECRET`.
+- **Frontend Atualizado**: `src/services/zynpayService.ts` injeta `Authorization: Bearer ${session.access_token}` nos métodos `getChargeStatus` e `listCharges`.
 
-## 1. O Papel das Ferramentas: AI Studio vs. ChatGPT Plus
+### 1.2 Webhook e Reconciliação Upstream Estrita (`api/zynpay/webhook.ts` & `api/_lib/zynpayClient.ts`)
+- **Eliminação de Fallbacks Permissivos**: Removido `verifiedAmountCents = upCharge.amount || storedCharge.amountCents`.
+- **Validação Upstream 100% Obrigatória**:
+  1. Cobrança localizada na API oficial da ZynPay (`fetchChargeFromGateway`).
+  2. Identificador correspondente (`upCharge.id === storedCharge.providerPaymentId`).
+  3. Status comprovado como `PAID` no gateway (rejeita com HTTP 422 `PAYMENT_NOT_CONFIRMED` se divergente).
+  4. Valor inteiro positivo em centavos exatamente idêntico ao registrado (`upCharge.amount === storedCharge.amountCents`). Rejeita com HTTP 422 `AMOUNT_MISMATCH` ou `INVALID_UPSTREAM_AMOUNT` sem ativar Pro.
+  5. Moeda BRL explicitamente confirmada (`validateCurrency(data.currency, { required: true })`). Rejeita com HTTP 422 `CURRENCY_MISMATCH` se não for BRL.
+  6. Idempotência por evento atômica em `internal.billing_events` prevenindo ataques de repetição.
+  7. Confirmação atômica e ativação Pro via RPC PostgreSQL `public.confirm_payment_and_activate_subscription_atomic`.
 
-| Frente de Trabalho | Onde Fazer | Como Executar |
-| :--- | :--- | :--- |
-| **Código, Banco & Infraestrutura** | **Google AI Studio Build** (Aqui) | Desenvolvimento direto, compilação, testes, integração Supabase, ZynPay SSE e Vite. Sem necessidade de copiar e colar. |
-| **Templates & Roteiros de WhatsApp** | **ChatGPT Plus + AI Studio** | O ChatGPT Plus pode gerar e refinar variações de copywriting; o AI Studio implementa os templates diretamente no código da API da Meta. |
-| **Diretrizes Editoriais & Prompts** | **ChatGPT Plus + AI Studio** | Criação de personas e regras anti-viés político para alimentação do motor de síntese. |
-| **Marketing de Aquisição & Vendas** | **ChatGPT Plus** | Roteiros de posts, anúncios para redes sociais e emails de onboarding para os primeiros 1.000 assinantes. |
-
----
-
-## 2. Pilares de Execução para Conclusão do FatosBR
-
-### Pilar A: Engenharia & Funcionalidades Finais (AI Studio)
-1. **Conexão Real do WhatsApp Cloud API**:
-   - Configuração de envio de mensagens no `src/services/whatsappService.ts` com suporte a templates aprovados pela Meta.
-   - Painel administrativo no `AdminPanel.tsx` para envio em massa do Briefing Matinal e Alertas de Breaking News com métricas de entrega.
-2. **Web Push API (Notificações no Navegador Fechado)**:
-   - Registro de Service Worker para envio de alertas urgentes via Firebase Cloud Messaging (FCM).
-3. **Esteira de Pagamentos Pix (ZynPay)**:
-   - Validação da reconciliação com SSE no `BillingModal.tsx` e gestão de assinaturas no Supabase.
-4. **Auditoria de Performance**:
-   - Garantir carregamento inicial do feed em menos de 300ms com estratégia de cache em memória + localStorage (SWR).
+### 1.3 Idempotência Real e Persistente por Tentativa de Checkout (`api/zynpay/charges.ts` & `api/_lib/db.ts`)
+- **Consulta Persistente Antes do Gateway**: Implementado `getChargeByIdempotencyKey(userId, idempotencyKey)` no PostgreSQL server-side.
+- **Retries da Mesma Tentativa**: Reenvios da mesma chave retornam imediatamente a cobrança original já registrada (`reused: true`), evitando cobranças duplicadas ou novas chamadas desnecessárias à ZynPay.
+- **Respeito a `billing_one_pending`**: Tratamento atômico de concorrência com reutilização de cobrança pendente para o mesmo plano.
 
 ---
 
-### Pilar B: Conteúdo Editorial & Automação de WhatsApp
-1. **Modelos de Templates Oficiais da Meta**:
-   - `fatosbr_briefing_matinal`: Resumo dos 3 principais fatos econômicos e políticos do dia com link de leitura direta.
-   - `fatosbr_breaking_news`: Alerta imediato de fatos extraordinários com alta relevância de mercado.
-   - `fatosbr_briefing_noturno`: Fechamento de mercado, cotações e o que esperar para o dia seguinte.
-2. **Diretrizes de Tom Editorial**:
-   - Linguagem concisa, monocromática, estritamente factual e acessível para todas as faixas etárias.
+## 2. Resultados dos Testes Automatizados
 
----
-
-### Pilar C: Jurídico, LGPD & Monetização
-1. **Conformidade Legal**:
-   - Termos de Uso, Política de Privacidade e Canal DPO já estruturados no `LegalCenterModal.tsx`.
-2. **Modelo de Negócio**:
-   - Plano Pro (R$ 29,90/mês ou R$ 249,00/ano no Pix).
-   - Período de cortesia (Trial de 7 dias) para novos cadastros.
-
----
-
-### Pilar D: Estratégia de Lançamento & Crescimento
-1. **Lançamento para Beta Fechado (Primeiros 50 Usuários)**:
-   - Teste prático do recebimento dos briefings via WhatsApp e abertura no leitor sem erros.
-2. **Indexação & SEO**:
-   - Otimização de tags OpenGraph e Twitter Cards para que os links compartilhados no WhatsApp e redes exibam prévias com imagem e título corretos.
-
----
-
-## 3. Próximos Passos Imediatos de Execução
-
-1. **Implementação do Envio de Briefings WhatsApp no Admin**:
-   - Finalizar a integração técnica do `whatsappService.ts` com simulador de envio e webhook de status de entrega.
-2. **Configuração de Web Push no Service Worker**:
-   - Integrar permissão de notificações nativas no `ProfileView` e envio de teste.
-3. **Revisão e Ativação do Fluxo de Caixa**:
-   - Testar o ciclo completo: Geração do Pix no modal -> Confirmação SSE -> Liberação instantânea no banco de dados.
+- **Suíte Executada**: `tests/security-validation.ts`
+- **Total de Testes**: **47 testes**
+- **Testes Passados**: **47 (100%)**
+- **Testes Falhos**: **0 (0%)**
+- **Compilação TypeScript**: `tsc --noEmit` concluído sem nenhum erro.
+- **Vite Production Build**: `npm run build` gerou os bundles sem falhas.

@@ -84,6 +84,7 @@ export interface TestDatabaseAdapter {
   }>;
   getActivePendingCharge?: (userId: string | null, email?: string) => Promise<any | null>;
   checkActiveSubscription?: (userId: string | null, email?: string) => Promise<boolean>;
+  getChargeByIdempotencyKey?: (userId: string, idempotencyKey: string) => Promise<any | null>;
 }
 
 let activeTestAdapter: TestDatabaseAdapter | null = null;
@@ -688,6 +689,71 @@ export async function getChargeById(chargeId: string): Promise<StoredCharge | nu
     };
   } catch (err: any) {
     console.error(`[Postgres Error] Falha ao consultar cobrança ${chargeId}:`, err.message);
+    throw new Error(`DATABASE_QUERY_FAILED: ${err.message}`);
+  }
+}
+
+/**
+ * Consulta cobrança associada a uma chave de idempotência específica e usuário no PostgreSQL.
+ * Permite que retries da mesma tentativa lógica de checkout retornem a mesma cobrança sem duplicação.
+ */
+export async function getChargeByIdempotencyKey(userId: string, idempotencyKey: string): Promise<StoredCharge | null> {
+  if (activeTestAdapter?.getChargeByIdempotencyKey) {
+    return activeTestAdapter.getChargeByIdempotencyKey(userId, idempotencyKey);
+  }
+
+  if (!isPostgresConfigured()) {
+    throw new Error('POSTGRES_UNAVAILABLE: Operações financeiras exigem conexão PostgreSQL configurada.');
+  }
+
+  try {
+    const queryText = `
+      SELECT 
+        id,
+        provider_payment_id,
+        user_id,
+        amount,
+        currency,
+        status,
+        checkout_data,
+        expiration_date,
+        approved_at,
+        created_at,
+        updated_at
+      FROM internal.billing_payments
+      WHERE user_id = $1
+        AND checkout_data->>'idempotency_key' = $2
+      ORDER BY created_at DESC
+      LIMIT 1
+    `;
+    const res = await executeSql(queryText, [userId, idempotencyKey]);
+    if (res.rows.length === 0) {
+      return null;
+    }
+    const data = res.rows[0];
+    const amount = Number(data.amount || 0);
+
+    return {
+      id: data.id,
+      providerPaymentId: data.provider_payment_id || data.id,
+      userId: data.user_id,
+      userEmail: data.checkout_data?.user_email || '',
+      amount,
+      amountCents: amount,
+      currency: data.currency || 'BRL',
+      status: data.status,
+      description: data.checkout_data?.description || 'Assinatura FatosBR Pro',
+      planId: data.checkout_data?.plan_id,
+      idempotencyKey: data.checkout_data?.idempotency_key,
+      qrCodeText: data.checkout_data?.qr_code_text,
+      expirationDate: data.expiration_date,
+      createdAt: data.created_at,
+      updatedAt: data.updated_at,
+      approvedAt: data.approved_at,
+      paidAt: data.approved_at
+    };
+  } catch (err: any) {
+    console.error(`[Postgres Error] Falha ao consultar por idempotência (${idempotencyKey}):`, err.message);
     throw new Error(`DATABASE_QUERY_FAILED: ${err.message}`);
   }
 }
