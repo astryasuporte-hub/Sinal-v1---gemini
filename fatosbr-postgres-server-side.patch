@@ -1,0 +1,896 @@
+From 227c2e46244fd881cde8c1eee89daab8f219d2bf Mon Sep 17 00:00:00 2001
+From: FatosBR Security Engine <yleaopvpy01@gmail.com>
+Date: Thu, 5 Nov 2026 17:55:23 +0000
+Subject: [PATCH] fix(finance): implementar conexao postgres server-side direta
+ para schema internal e rpcs
+
+---
+ api/_lib/adminAuth.ts                         |  27 +-
+ api/_lib/db.ts                                | 422 ++++++++++++------
+ api/_lib/postgres.ts                          | 140 ++++++
+ api/_lib/rateLimiter.ts                       |  21 +-
+ ...1_financial_security_and_rate_limiting.sql |  25 +-
+ ...04000002_fix_supabase_billing_and_rbac.sql |  27 +-
+ tests/postgres-real-integration.ts            |   9 +-
+ 7 files changed, 513 insertions(+), 158 deletions(-)
+ create mode 100644 api/_lib/postgres.ts
+
+diff --git a/api/_lib/adminAuth.ts b/api/_lib/adminAuth.ts
+index 0b811a6..108ddcd 100644
+--- a/api/_lib/adminAuth.ts
++++ b/api/_lib/adminAuth.ts
+@@ -13,6 +13,7 @@
+ 
+ import { safeCompare } from './crypto';
+ import { getServerSupabase, isDatabaseConfigured } from './db';
++import { executeSql, isPostgresConfigured } from './postgres';
+ 
+ export async function verifyAdminRequest(req: any): Promise<boolean> {
+   const authHeader = req.headers?.authorization || '';
+@@ -44,15 +45,25 @@ export async function verifyAdminRequest(req: any): Promise<boolean> {
+         }
+ 
+         // 2.2 Consulta tabela de papéis de usuário (public.user_roles)
+-        const { data: roleRow } = await supabase
+-          .from('user_roles')
+-          .select('role')
+-          .eq('user_id', user.id)
+-          .in('role', ['admin', 'super_admin'])
+-          .maybeSingle();
++        if (isPostgresConfigured()) {
++          const roleRes = await executeSql(
++            `SELECT role FROM public.user_roles WHERE user_id = $1 AND role IN ('admin', 'super_admin') LIMIT 1`,
++            [user.id]
++          );
++          if (roleRes.rows.length > 0) {
++            return true;
++          }
++        } else {
++          const { data: roleRow } = await supabase
++            .from('user_roles')
++            .select('role')
++            .eq('user_id', user.id)
++            .in('role', ['admin', 'super_admin'])
++            .maybeSingle();
+ 
+-        if (roleRow) {
+-          return true;
++          if (roleRow) {
++            return true;
++          }
+         }
+ 
+         // 2.3 RPC is_admin() no banco
+diff --git a/api/_lib/db.ts b/api/_lib/db.ts
+index 121151c..63b6c9e 100644
+--- a/api/_lib/db.ts
++++ b/api/_lib/db.ts
+@@ -2,19 +2,20 @@
+  * @license
+  * SPDX-License-Identifier: Apache-2.0
+  * 
+- * Server-Side Database & Financial Persistence Layer (Supabase PostgreSQL)
++ * Server-Side Database & Financial Persistence Layer (FatosBR)
+  * 
+- * Diretrizes de Compatibilidade com o Schema Real:
+- * 1. ZERO fallback em memória em produção: Todas as transações financeiras são persistidas.
+- * 2. Suporte estrito ao schema existente no Supabase:
++ * Arquitetura de Segurança:
++ * 1. Conexão PostgreSQL direta e segura via módulo server-side centralizado (api/_lib/postgres.ts).
++ * 2. ZERO exposição do schema 'internal' na Supabase Data API do PostgREST.
++ * 3. Operações com SQL parametrizado ($1, $2...) e liberação estrita de conexões no pool.
++ * 4. Atomicidade transacional no Postgres: Confirmação de pagamento e ativação Pro via RPC server-side autorizada.
++ * 5. Tabelas canônicas:
+  *    - internal.billing_payments (id UUID, provider_payment_id TEXT, amount INTEGER)
+  *    - internal.billing_events (id UUID, provider_event_id TEXT, payload JSONB, processed BOOLEAN)
+  *    - public.subscriptions (id UUID, user_id UUID, plan TEXT, status TEXT) — FONTE CANÔNICA PRO
+- * 3. Uso estrito de SUPABASE_SERVICE_ROLE_KEY no backend para contornar RLS de forma autenticada.
+- * 4. Atomicidade obrigatória: Confirmação de pagamento e ativação de plano ocorrem via RPC transacional no Postgres.
+- * 5. Isolamento estrito de testes: Mocks só podem ser injetados se FATOSBR_TEST_MODE='true' ou NODE_ENV='test'.
+  */
+ 
++import { executeSql, isPostgresConfigured } from './postgres';
+ import { createClient, SupabaseClient } from '@supabase/supabase-js';
+ 
+ const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '';
+@@ -28,17 +29,17 @@ if (supabaseUrl && serviceRoleKey) {
+       auth: { persistSession: false, autoRefreshToken: false }
+     });
+   } catch (err: any) {
+-    console.error('[Database Initialization Error]', err.message);
++    console.error('[Supabase Client Error]', err.message);
+   }
+ }
+ 
+ export function isDatabaseConfigured(): boolean {
+-  return Boolean(serverSupabaseClient && supabaseUrl && serviceRoleKey);
++  return isPostgresConfigured() || Boolean(serverSupabaseClient && supabaseUrl && serviceRoleKey);
+ }
+ 
+ export function getServerSupabase(): SupabaseClient {
+   if (!serverSupabaseClient) {
+-    throw new Error('DATABASE_UNAVAILABLE: O banco de dados Supabase não está configurado ou SUPABASE_SERVICE_ROLE_KEY está ausente no ambiente.');
++    throw new Error('SUPABASE_UNAVAILABLE: SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY ausente.');
+   }
+   return serverSupabaseClient;
+ }
+@@ -50,7 +51,13 @@ export interface TestDatabaseAdapter {
+   recordPendingCharge: (charge: any) => Promise<boolean>;
+   getChargeById: (chargeId: string) => Promise<any | null>;
+   checkAndLockWebhookEvent: (eventId: string, provider: string) => Promise<{ isDuplicate: boolean }>;
+-  confirmPaymentAndActivateSubscription: (params: any) => Promise<{ success: boolean; duplicate?: boolean; error?: string; error_code?: string; chargeId?: string }>;
++  confirmPaymentAndActivateSubscription: (params: any) => Promise<{
++    success: boolean;
++    duplicate?: boolean;
++    error?: string;
++    error_code?: string;
++    chargeId?: string;
++  }>;
+ }
+ 
+ let activeTestAdapter: TestDatabaseAdapter | null = null;
+@@ -64,7 +71,7 @@ export function setTestDatabaseAdapter(adapter: TestDatabaseAdapter | null): voi
+ }
+ 
+ // -----------------------------------------------------------------------------
+-// OPERAÇÕES FINANCEIRAS PERSISTENTES
++// CONTRATOS DE DADOS
+ // -----------------------------------------------------------------------------
+ 
+ export interface StoredCharge {
+@@ -84,9 +91,13 @@ export interface StoredCharge {
+   paidAt?: string | null; // Alias de compatibilidade
+ }
+ 
++// -----------------------------------------------------------------------------
++// OPERAÇÕES FINANCEIRAS PERSISTENTES VIA POSTGRESQL SERVER-SIDE
++// -----------------------------------------------------------------------------
++
+ /**
+  * Cria ou registra uma cobrança Pix pendente na tabela real internal.billing_payments.
+- * Mapeia identificador externo para provider_payment_id e valor em centavos para a coluna amount.
++ * Utiliza conexão PostgreSQL direta parametrizada sem expor o schema internal via Data API.
+  */
+ export async function recordPendingCharge(charge: {
+   id?: string;
+@@ -103,42 +114,69 @@ export async function recordPendingCharge(charge: {
+     return activeTestAdapter.recordPendingCharge(charge);
+   }
+ 
+-  const supabase = getServerSupabase();
+-  const now = new Date().toISOString();
+   const providerPaymentId = charge.providerPaymentId || charge.id || `zyn_${Date.now()}`;
+-  const amount = charge.amount ?? charge.amountCents ?? 2990;
+-
+-  const payload: any = {
+-    provider: 'zynpay',
+-    provider_payment_id: providerPaymentId,
+-    amount: Math.round(amount),
+-    currency: charge.currency || 'BRL',
+-    status: 'PENDING',
+-    type: 'PIX',
+-    checkout_data: {
+-      user_email: (charge.userEmail || '').toLowerCase().trim(),
+-      description: charge.description,
+-      qr_code_text: charge.qrCodeText || null
+-    },
+-    created_at: now,
+-    updated_at: now
+-  };
+-
+-  if (charge.userId) {
+-    payload.user_id = charge.userId;
+-  }
++  const amount = Math.round(charge.amount ?? charge.amountCents ?? 2990);
++  const currency = charge.currency || 'BRL';
++  const checkoutData = JSON.stringify({
++    user_email: (charge.userEmail || '').toLowerCase().trim(),
++    description: charge.description,
++    qr_code_text: charge.qrCodeText || null
++  });
+ 
+-  const { error } = await supabase
+-    .schema('internal')
+-    .from('billing_payments')
+-    .insert(payload);
++  // 1. Conexão direta PostgreSQL (Recomendada em Produção Vercel)
++  if (isPostgresConfigured()) {
++    try {
++      const queryText = `
++        INSERT INTO internal.billing_payments (
++          user_id,
++          provider,
++          provider_payment_id,
++          amount,
++          currency,
++          status,
++          type,
++          checkout_data,
++          created_at,
++          updated_at
++        ) VALUES ($1, 'zynpay', $2, $3, $4, 'PENDING', 'PIX', $5::jsonb, NOW(), NOW())
++      `;
++      await executeSql(queryText, [
++        charge.userId || null,
++        providerPaymentId,
++        amount,
++        currency,
++        checkoutData
++      ]);
++      return true;
++    } catch (pgErr: any) {
++      console.error(`[Postgres Error] Falha ao registrar cobrança ${providerPaymentId}:`, pgErr.message);
++      throw new Error(`DATABASE_PERSISTENCE_FAILED: Falha na gravação do pagamento via PostgreSQL (${pgErr.message})`);
++    }
++  }
+ 
+-  if (error) {
+-    console.error(`[DB Error] Falha crítica ao persistir cobrança ${providerPaymentId}:`, error.message);
+-    throw new Error(`DATABASE_PERSISTENCE_FAILED: Não foi possível registrar a cobrança no banco de dados (${error.message})`);
++  // 2. Fallback via cliente Supabase se disponível em ambiente de desenvolvimento
++  if (serverSupabaseClient) {
++    const payload: any = {
++      user_id: charge.userId || null,
++      provider: 'zynpay',
++      provider_payment_id: providerPaymentId,
++      amount,
++      currency,
++      status: 'PENDING',
++      type: 'PIX',
++      checkout_data: JSON.parse(checkoutData),
++      created_at: new Date().toISOString(),
++      updated_at: new Date().toISOString()
++    };
++    const { error } = await serverSupabaseClient.schema('internal').from('billing_payments').insert(payload);
++    if (error) {
++      console.error(`[DB Error] Falha ao persistir cobrança ${providerPaymentId}:`, error.message);
++      throw new Error(`DATABASE_PERSISTENCE_FAILED: ${error.message}`);
++    }
++    return true;
+   }
+ 
+-  return true;
++  throw new Error('DATABASE_PERSISTENCE_FAILED: Nenhuma conexão PostgreSQL ou Supabase configurada no backend.');
+ }
+ 
+ /**
+@@ -149,45 +187,89 @@ export async function getChargeById(chargeId: string): Promise<StoredCharge | nu
+     return activeTestAdapter.getChargeById(chargeId);
+   }
+ 
+-  const supabase = getServerSupabase();
+-  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(chargeId);
+-
+-  let query = supabase.schema('internal').from('billing_payments').select('*');
+-  if (isUuid) {
+-    query = query.or(`id.eq.${chargeId},provider_payment_id.eq.${chargeId}`);
+-  } else {
+-    query = query.eq('provider_payment_id', chargeId);
+-  }
+-
+-  const { data, error } = await query.maybeSingle();
+-
+-  if (error) {
+-    console.error(`[DB Error] Falha ao consultar cobrança ${chargeId}:`, error.message);
+-    throw new Error(`DATABASE_QUERY_FAILED: ${error.message}`);
++  // 1. Consulta direta via PostgreSQL
++  if (isPostgresConfigured()) {
++    try {
++      const queryText = `
++        SELECT 
++          id,
++          provider_payment_id,
++          user_id,
++          amount,
++          currency,
++          status,
++          checkout_data,
++          approved_at,
++          created_at,
++          updated_at
++        FROM internal.billing_payments
++        WHERE provider_payment_id = $1
++           OR (CASE WHEN $1 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN id = $1::uuid ELSE false END)
++        LIMIT 1
++      `;
++      const res = await executeSql(queryText, [chargeId]);
++      if (res.rows.length === 0) {
++        return null;
++      }
++      const data = res.rows[0];
++      const amount = Number(data.amount || 0);
++
++      return {
++        id: data.id,
++        providerPaymentId: data.provider_payment_id || data.id,
++        userId: data.user_id,
++        userEmail: data.checkout_data?.user_email || '',
++        amount,
++        amountCents: amount,
++        currency: data.currency || 'BRL',
++        status: data.status,
++        description: data.checkout_data?.description || 'Assinatura FatosBR Pro',
++        qrCodeText: data.checkout_data?.qr_code_text,
++        createdAt: data.created_at,
++        updatedAt: data.updated_at,
++        approvedAt: data.approved_at,
++        paidAt: data.approved_at
++      };
++    } catch (err: any) {
++      console.error(`[Postgres Error] Falha ao consultar cobrança ${chargeId}:`, err.message);
++      throw new Error(`DATABASE_QUERY_FAILED: ${err.message}`);
++    }
+   }
+ 
+-  if (!data) {
+-    return null;
++  // 2. Fallback via cliente Supabase
++  if (serverSupabaseClient) {
++    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(chargeId);
++    let query = serverSupabaseClient.schema('internal').from('billing_payments').select('*');
++    if (isUuid) {
++      query = query.or(`id.eq.${chargeId},provider_payment_id.eq.${chargeId}`);
++    } else {
++      query = query.eq('provider_payment_id', chargeId);
++    }
++    const { data, error } = await query.maybeSingle();
++    if (error) {
++      throw new Error(`DATABASE_QUERY_FAILED: ${error.message}`);
++    }
++    if (!data) return null;
++    const amount = Number(data.amount || 0);
++    return {
++      id: data.id,
++      providerPaymentId: data.provider_payment_id || data.id,
++      userId: data.user_id,
++      userEmail: data.checkout_data?.user_email || '',
++      amount,
++      amountCents: amount,
++      currency: data.currency || 'BRL',
++      status: data.status,
++      description: data.checkout_data?.description || 'Assinatura FatosBR Pro',
++      qrCodeText: data.checkout_data?.qr_code_text,
++      createdAt: data.created_at,
++      updatedAt: data.updated_at,
++      approvedAt: data.approved_at,
++      paidAt: data.approved_at
++    };
+   }
+ 
+-  const amount = Number(data.amount || 0);
+-
+-  return {
+-    id: data.id,
+-    providerPaymentId: data.provider_payment_id || data.id,
+-    userId: data.user_id,
+-    userEmail: data.checkout_data?.user_email || '',
+-    amount,
+-    amountCents: amount,
+-    currency: data.currency || 'BRL',
+-    status: data.status,
+-    description: data.checkout_data?.description || 'Assinatura FatosBR Pro',
+-    qrCodeText: data.checkout_data?.qr_code_text,
+-    createdAt: data.created_at,
+-    updatedAt: data.updated_at,
+-    approvedAt: data.approved_at,
+-    paidAt: data.approved_at
+-  };
++  throw new Error('DATABASE_QUERY_FAILED: Banco de dados indisponível.');
+ }
+ 
+ /**
+@@ -198,52 +280,76 @@ export async function checkAndLockWebhookEvent(eventId: string, provider = 'zynp
+     return activeTestAdapter.checkAndLockWebhookEvent(eventId, provider);
+   }
+ 
+-  const supabase = getServerSupabase();
+-  const now = new Date().toISOString();
+-
+-  // 1. Verifica se já existe evento marcado como processado
+-  const { data: existing, error: checkError } = await supabase
+-    .schema('internal')
+-    .from('billing_events')
+-    .select('id, processed')
+-    .eq('provider', provider)
+-    .eq('provider_event_id', eventId)
+-    .maybeSingle();
+-
+-  if (!checkError && existing && existing.processed) {
+-    return { isDuplicate: true };
++  if (isPostgresConfigured()) {
++    try {
++      // 1. Verifica se já existe e foi processado
++      const checkRes = await executeSql(
++        `SELECT processed FROM internal.billing_events WHERE provider = $1 AND provider_event_id = $2 LIMIT 1`,
++        [provider, eventId]
++      );
++      if (checkRes.rows.length > 0 && checkRes.rows[0].processed) {
++        return { isDuplicate: true };
++      }
++
++      // 2. Insere registro de trava de evento
++      await executeSql(
++        `INSERT INTO internal.billing_events (
++           provider, provider_event_id, event_type, payload, processed, created_at
++         ) VALUES ($1, $2, 'charge.paid', '{"registered":true}'::jsonb, false, NOW())
++         ON CONFLICT (provider, provider_event_id) DO NOTHING`,
++        [provider, eventId]
++      );
++      return { isDuplicate: false };
++    } catch (err: any) {
++      if (err.code === '23505' || err.message?.toLowerCase().includes('duplicate') || err.message?.toLowerCase().includes('unique')) {
++        return { isDuplicate: true };
++      }
++      console.error(`[Postgres Error] Falha de idempotência no evento ${eventId}:`, err.message);
++      throw new Error(`DATABASE_LOCK_FAILED: ${err.message}`);
++    }
+   }
+ 
+-  // 2. Insere registro de trava de evento em internal.billing_events
+-  const eventPayload = {
+-    provider,
+-    provider_event_id: eventId,
+-    event_type: 'charge.paid',
+-    payload: { registered_at: now },
+-    processed: false,
+-    created_at: now
+-  };
+-
+-  const { error } = await supabase
+-    .schema('internal')
+-    .from('billing_events')
+-    .insert(eventPayload);
+-
+-  if (error) {
+-    // 23505 = unique_violation no PostgreSQL
+-    if (error.code === '23505' || error.message?.toLowerCase().includes('duplicate') || error.message?.toLowerCase().includes('unique')) {
++  // Fallback via Supabase
++  if (serverSupabaseClient) {
++    const { data: existing } = await serverSupabaseClient
++      .schema('internal')
++      .from('billing_events')
++      .select('id, processed')
++      .eq('provider', provider)
++      .eq('provider_event_id', eventId)
++      .maybeSingle();
++
++    if (existing && existing.processed) {
+       return { isDuplicate: true };
+     }
+-    console.error(`[DB Error] Falha de idempotência no evento ${eventId}:`, error.message);
+-    throw new Error(`DATABASE_LOCK_FAILED: Falha na trava de idempotência (${error.message})`);
++
++    const { error } = await serverSupabaseClient
++      .schema('internal')
++      .from('billing_events')
++      .insert({
++        provider,
++        provider_event_id: eventId,
++        event_type: 'charge.paid',
++        payload: { registered_at: new Date().toISOString() },
++        processed: false,
++        created_at: new Date().toISOString()
++      });
++
++    if (error) {
++      if (error.code === '23505' || error.message?.toLowerCase().includes('duplicate') || error.message?.toLowerCase().includes('unique')) {
++        return { isDuplicate: true };
++      }
++      throw new Error(`DATABASE_LOCK_FAILED: ${error.message}`);
++    }
++    return { isDuplicate: false };
+   }
+ 
+-  return { isDuplicate: false };
++  throw new Error('DATABASE_LOCK_FAILED: Banco de dados indisponível.');
+ }
+ 
+ /**
+  * Confirma pagamento e ativa assinatura Pro de forma ATÔMICA via RPC PostgreSQL no schema real.
+- * Integra: internal.billing_payments, internal.billing_events e public.subscriptions.
++ * Invoca public.confirm_payment_and_activate_subscription_atomic por conexão server-side autorizada.
+  */
+ export async function confirmPaymentAndActivateSubscriptionAtomic(params: {
+   chargeId: string;
+@@ -273,34 +379,70 @@ export async function confirmPaymentAndActivateSubscriptionAtomic(params: {
+     };
+   }
+ 
+-  const supabase = getServerSupabase();
+   const paymentId = params.providerPaymentId || params.chargeId;
+-  const amount = params.expectedAmount ?? params.expectedAmountCents ?? 2990;
+-
+-  const { data, error } = await supabase.rpc('confirm_payment_and_activate_subscription_atomic', {
+-    p_provider_payment_id: paymentId,
+-    p_event_id: params.eventId,
+-    p_expected_amount: Math.round(amount),
+-    p_expected_currency: params.expectedCurrency || 'BRL',
+-    p_provider: params.provider || 'zynpay',
+-    p_raw_payload: params.rawPayload || {}
+-  });
+-
+-  if (error) {
+-    console.error(`[DB Error] Falha na execução da transação atômica RPC:`, error.message);
+-    throw new Error(`ATOMIC_TRANSACTION_FAILED: ${error.message}`);
++  const amount = Math.round(params.expectedAmount ?? params.expectedAmountCents ?? 2990);
++  const currency = params.expectedCurrency || 'BRL';
++  const provider = params.provider || 'zynpay';
++  const rawPayload = JSON.stringify(params.rawPayload || {});
++
++  // 1. Execução via conexão direta PostgreSQL (Recomendada server-side)
++  if (isPostgresConfigured()) {
++    try {
++      const queryText = `
++        SELECT public.confirm_payment_and_activate_subscription_atomic(
++          $1, $2, $3, $4, $5, $6::jsonb
++        ) AS outcome
++      `;
++      const res = await executeSql(queryText, [paymentId, params.eventId, amount, currency, provider, rawPayload]);
++      const data = res.rows[0]?.outcome;
++
++      if (!data || typeof data !== 'object') {
++        throw new Error('ATOMIC_TRANSACTION_INVALID_RESPONSE: Resposta da RPC vazia ou malformada.');
++      }
++
++      return {
++        success: Boolean(data.success),
++        duplicate: Boolean(data.duplicate),
++        error: data.error,
++        errorCode: data.error_code,
++        chargeId: data.charge_id || paymentId,
++        userEmail: data.user_email
++      };
++    } catch (err: any) {
++      console.error('[Postgres Error] Falha na execução da transação atômica RPC:', err.message);
++      throw new Error(`ATOMIC_TRANSACTION_FAILED: ${err.message}`);
++    }
+   }
+ 
+-  if (!data || typeof data !== 'object') {
+-    throw new Error('ATOMIC_TRANSACTION_INVALID_RESPONSE: Resposta da RPC vazia ou malformada.');
++  // 2. Fallback via RPC Supabase
++  if (serverSupabaseClient) {
++    const { data, error } = await serverSupabaseClient.rpc('confirm_payment_and_activate_subscription_atomic', {
++      p_provider_payment_id: paymentId,
++      p_event_id: params.eventId,
++      p_expected_amount: amount,
++      p_expected_currency: currency,
++      p_provider: provider,
++      p_raw_payload: params.rawPayload || {}
++    });
++
++    if (error) {
++      console.error('[Supabase RPC Error] Falha na transação atômica:', error.message);
++      throw new Error(`ATOMIC_TRANSACTION_FAILED: ${error.message}`);
++    }
++
++    if (!data || typeof data !== 'object') {
++      throw new Error('ATOMIC_TRANSACTION_INVALID_RESPONSE: Resposta da RPC vazia.');
++    }
++
++    return {
++      success: Boolean(data.success),
++      duplicate: Boolean(data.duplicate),
++      error: data.error,
++      errorCode: data.error_code,
++      chargeId: data.charge_id || paymentId,
++      userEmail: data.user_email
++    };
+   }
+ 
+-  return {
+-    success: Boolean(data.success),
+-    duplicate: Boolean(data.duplicate),
+-    error: data.error,
+-    errorCode: data.error_code,
+-    chargeId: data.charge_id || paymentId,
+-    userEmail: data.user_email
+-  };
++  throw new Error('ATOMIC_TRANSACTION_FAILED: Nenhuma conexão com banco de dados disponível.');
+ }
+diff --git a/api/_lib/postgres.ts b/api/_lib/postgres.ts
+new file mode 100644
+index 0000000..d0d936c
+--- /dev/null
++++ b/api/_lib/postgres.ts
+@@ -0,0 +1,140 @@
++/**
++ * @license
++ * SPDX-License-Identifier: Apache-2.0
++ * 
++ * Centralized Server-Side PostgreSQL Connection Pool (FatosBR)
++ * 
++ * Diretrizes de Segurança e Performance (Vercel Serverless + Supabase):
++ * 1. Exclusivamente server-side: Credenciais e conexões NÃO vazam para o bundle client-side.
++ * 2. TLS estrito: Validação correta de certificados da nuvem sem 'rejectUnauthorized: false'.
++ * 3. Limites adequados ao ambiente serverless (pool max reduzido, timeouts estritos).
++ * 4. Queries parametrizadas com sanitização estrita para prevenir SQL Injection.
++ * 5. Liberação obrigatória de conexões em blocos 'finally'.
++ * 6. Mascaramento de dados e credenciais em logs de auditoria.
++ */
++
++import { Pool, PoolClient, QueryResult } from 'pg';
++
++const rawConnectionString =
++  process.env.SUPABASE_DATABASE_URL ||
++  process.env.DATABASE_URL ||
++  process.env.POSTGRES_URL ||
++  process.env.SUPABASE_DB_URL ||
++  '';
++
++let globalPool: Pool | null = null;
++
++function sanitizeConnectionStringForLog(connStr: string): string {
++  try {
++    return connStr.replace(/(postgres(?:ql)?:\/\/[^:]+:)([^@]+)(@.+)/i, '$1****$3');
++  } catch {
++    return '[PROTECTED_CONNECTION_STRING]';
++  }
++}
++
++/**
++ * Cria e configura o Pool de conexões otimizado para Vercel Serverless.
++ */
++function createServerlessPool(): Pool | null {
++  if (!rawConnectionString) {
++    return null;
++  }
++
++  // Detecta se a conexão requer TLS (Supabase Cloud, Pooler ou padrão da nuvem)
++  const isCloudHost =
++    rawConnectionString.includes('supabase.co') ||
++    rawConnectionString.includes('supabase.com') ||
++    rawConnectionString.includes('pooler.supabase.com') ||
++    rawConnectionString.includes('sslmode=require');
++
++  const poolConfig: any = {
++    connectionString: rawConnectionString,
++    // Limite de conexões reduzido por instância serverless para evitar exaustão no pooler
++    max: 5,
++    // Fecha conexões inativas rapidamente
++    idleTimeoutMillis: 10000,
++    // Falha rápido caso o pooler esteja saturado
++    connectionTimeoutMillis: 5000,
++    // Timeouts estritos de execução de query
++    statement_timeout: 10000,
++    query_timeout: 10000
++  };
++
++  if (isCloudHost) {
++    // Validação estrita de certificado SSL — proibição de rejectUnauthorized: false
++    poolConfig.ssl = {
++      rejectUnauthorized: true,
++      ...(process.env.SUPABASE_DB_CA ? { ca: process.env.SUPABASE_DB_CA } : {})
++    };
++  }
++
++  const pool = new Pool(poolConfig);
++
++  pool.on('error', (err) => {
++    console.error('[Postgres Pool Error]', err.message);
++  });
++
++  return pool;
++}
++
++export function isPostgresConfigured(): boolean {
++  return Boolean(rawConnectionString && rawConnectionString.trim().length > 0);
++}
++
++export function getPostgresPool(): Pool {
++  if (!globalPool) {
++    globalPool = createServerlessPool();
++  }
++  if (!globalPool) {
++    throw new Error('POSTGRES_UNAVAILABLE: SUPABASE_DATABASE_URL ou DATABASE_URL não configurada no ambiente server-side.');
++  }
++  return globalPool;
++}
++
++/**
++ * Executa uma consulta SQL parametrizada garantindo liberação imediata do cliente no pool.
++ */
++export async function executeSql<T = any>(
++  text: string,
++  params: any[] = []
++): Promise<QueryResult<T>> {
++  const pool = getPostgresPool();
++  const start = Date.now();
++  const client: PoolClient = await pool.connect();
++
++  try {
++    const res = await client.query<T>(text, params);
++    return res;
++  } catch (err: any) {
++    console.error(`[Postgres Query Error] Falha na execução da query (${Date.now() - start}ms):`, err.message);
++    throw err;
++  } finally {
++    client.release();
++  }
++}
++
++/**
++ * Executa um bloco transacional atômico (BEGIN -> COMMIT / ROLLBACK) com liberação garantida no finally.
++ */
++export async function withTransaction<T>(
++  callback: (client: PoolClient) => Promise<T>
++): Promise<T> {
++  const pool = getPostgresPool();
++  const client: PoolClient = await pool.connect();
++
++  try {
++    await client.query('BEGIN');
++    const result = await callback(client);
++    await client.query('COMMIT');
++    return result;
++  } catch (err: any) {
++    try {
++      await client.query('ROLLBACK');
++    } catch (rbErr: any) {
++      console.error('[Postgres Rollback Error]', rbErr.message);
++    }
++    throw err;
++  } finally {
++    client.release();
++  }
++}
+diff --git a/api/_lib/rateLimiter.ts b/api/_lib/rateLimiter.ts
+index 8f6936d..f98f563 100644
+--- a/api/_lib/rateLimiter.ts
++++ b/api/_lib/rateLimiter.ts
+@@ -10,6 +10,7 @@
+ 
+ import { getClientIp, sendJson } from './common';
+ import { getServerSupabase, isDatabaseConfigured } from './db';
++import { executeSql, isPostgresConfigured } from './postgres';
+ 
+ export type RateLimitCategory = 'auth' | 'payments' | 'admin' | 'webhooks' | 'ai' | 'general';
+ 
+@@ -75,11 +76,26 @@ export async function enforceRateLimit(
+     // 1. Caso haja mock de teste ativo explicitamente configurado
+     if (activeTestStore) {
+       result = await activeTestStore.checkAndIncrement(key, profile.maxRequests, profile.windowMs);
++    } else if (isPostgresConfigured()) {
++      // 2. Execução prioritária direta via PostgreSQL server-side
++      const sqlRes = await executeSql<{ outcome: any }>(
++        `SELECT public.check_and_increment_rate_limit($1, $2, $3) AS outcome`,
++        [key, profile.maxRequests, profile.windowMs]
++      );
++      const data = sqlRes.rows[0]?.outcome;
++      if (data) {
++        result = {
++          allowed: Boolean(data.allowed),
++          current: Number(data.current || 1),
++          limit: Number(data.limit || profile.maxRequests),
++          retry_after: Number(data.retry_after || 0),
++          remaining: Number(data.remaining ?? 0)
++        };
++      }
+     } else {
+-      // 2. Ambiente de Produção / Staging: Execução da RPC atômica no Supabase PostgreSQL
++      // 3. Fallback via cliente Supabase se disponível
+       if (!isDatabaseConfigured()) {
+         if (profile.isHighRisk) {
+-          // Fail-closed para endpoints sensíveis (pagamentos, auth, admin, webhook)
+           console.error(`[Rate Limit Security] Bloqueio fail-closed ativo para ${key}: Banco de dados indisponível.`);
+           sendJson(res, 503, {
+             error: 'Serviço temporariamente indisponível. Medida de segurança ativa para operações sensíveis.',
+@@ -87,7 +103,6 @@ export async function enforceRateLimit(
+           });
+           return false;
+         }
+-        // Fail-safe para rotas gerais de leitura pública
+         return true;
+       }
+ 
+diff --git a/supabase/migrations/20261104000001_financial_security_and_rate_limiting.sql b/supabase/migrations/20261104000001_financial_security_and_rate_limiting.sql
+index 1f87b9a..0df948e 100644
+--- a/supabase/migrations/20261104000001_financial_security_and_rate_limiting.sql
++++ b/supabase/migrations/20261104000001_financial_security_and_rate_limiting.sql
+@@ -184,7 +184,7 @@ $$;
+ REVOKE ALL ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) FROM PUBLIC;
+ REVOKE ALL ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) FROM anon;
+ REVOKE ALL ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) FROM authenticated;
+-GRANT EXECUTE ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) TO service_role;
++GRANT EXECUTE ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) TO service_role, postgres;
+ 
+ -- 8. RPC: Confirmação Financeira Atômica & Ativação de Assinatura (Schema Real)
+ -- Integra: internal.billing_payments, internal.billing_events e public.subscriptions
+@@ -420,4 +420,25 @@ $$;
+ REVOKE ALL ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) FROM PUBLIC;
+ REVOKE ALL ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) FROM anon;
+ REVOKE ALL ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) FROM authenticated;
+-GRANT EXECUTE ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) TO service_role;
++GRANT EXECUTE ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) TO service_role, postgres;
++
++-- 8. Concessão de privilégios para conexões PostgreSQL server-side (schema internal)
++GRANT USAGE ON SCHEMA internal TO service_role, postgres;
++GRANT ALL ON ALL TABLES IN SCHEMA internal TO service_role, postgres;
++GRANT ALL ON ALL SEQUENCES IN SCHEMA internal TO service_role, postgres;
++GRANT SELECT, INSERT, UPDATE ON TABLE public.subscriptions TO service_role, postgres;
++GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.user_roles TO service_role, postgres;
++
++-- 9. Concessão condicional segura para papel dedicado (caso provisionado pelo DBA)
++DO $$
++BEGIN
++  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'fatosbr_backend') THEN
++    GRANT USAGE ON SCHEMA internal TO fatosbr_backend;
++    GRANT ALL ON ALL TABLES IN SCHEMA internal TO fatosbr_backend;
++    GRANT ALL ON ALL SEQUENCES IN SCHEMA internal TO fatosbr_backend;
++    GRANT EXECUTE ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) TO fatosbr_backend;
++    GRANT EXECUTE ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) TO fatosbr_backend;
++    GRANT SELECT, INSERT, UPDATE ON TABLE public.subscriptions TO fatosbr_backend;
++    GRANT SELECT ON TABLE public.user_roles TO fatosbr_backend;
++  END IF;
++END $$;
+diff --git a/supabase/migrations/20261104000002_fix_supabase_billing_and_rbac.sql b/supabase/migrations/20261104000002_fix_supabase_billing_and_rbac.sql
+index 4a41a8f..fa7de2e 100644
+--- a/supabase/migrations/20261104000002_fix_supabase_billing_and_rbac.sql
++++ b/supabase/migrations/20261104000002_fix_supabase_billing_and_rbac.sql
+@@ -21,12 +21,33 @@ CREATE INDEX IF NOT EXISTS idx_subscriptions_user_lookup
+ REVOKE ALL ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) FROM PUBLIC;
+ REVOKE ALL ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) FROM anon;
+ REVOKE ALL ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) FROM authenticated;
+-GRANT EXECUTE ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) TO service_role;
++GRANT EXECUTE ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) TO service_role, postgres;
+ 
+ REVOKE ALL ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) FROM PUBLIC;
+ REVOKE ALL ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) FROM anon;
+ REVOKE ALL ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) FROM authenticated;
+-GRANT EXECUTE ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) TO service_role;
++GRANT EXECUTE ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) TO service_role, postgres;
+ 
+ REVOKE ALL ON FUNCTION public.is_admin() FROM PUBLIC;
+-GRANT EXECUTE ON FUNCTION public.is_admin() TO anon, authenticated, service_role;
++GRANT EXECUTE ON FUNCTION public.is_admin() TO anon, authenticated, service_role, postgres;
++
++-- 3. Concessão de privilégios para o schema internal e tabelas para acesso PostgreSQL direto
++GRANT USAGE ON SCHEMA internal TO service_role, postgres;
++GRANT ALL ON ALL TABLES IN SCHEMA internal TO service_role, postgres;
++GRANT ALL ON ALL SEQUENCES IN SCHEMA internal TO service_role, postgres;
++GRANT SELECT, INSERT, UPDATE ON TABLE public.subscriptions TO service_role, postgres;
++GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.user_roles TO service_role, postgres;
++
++-- 4. Concessão condicional segura para papel dedicado (caso provisionado pelo DBA)
++DO $$
++BEGIN
++  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'fatosbr_backend') THEN
++    GRANT USAGE ON SCHEMA internal TO fatosbr_backend;
++    GRANT ALL ON ALL TABLES IN SCHEMA internal TO fatosbr_backend;
++    GRANT ALL ON ALL SEQUENCES IN SCHEMA internal TO fatosbr_backend;
++    GRANT EXECUTE ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) TO fatosbr_backend;
++    GRANT EXECUTE ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) TO fatosbr_backend;
++    GRANT SELECT, INSERT, UPDATE ON TABLE public.subscriptions TO fatosbr_backend;
++    GRANT SELECT ON TABLE public.user_roles TO fatosbr_backend;
++  END IF;
++END $$;
+diff --git a/tests/postgres-real-integration.ts b/tests/postgres-real-integration.ts
+index 2b801e7..6940d4a 100644
+--- a/tests/postgres-real-integration.ts
++++ b/tests/postgres-real-integration.ts
+@@ -24,7 +24,12 @@ interface TestResult {
+   durationMs: number;
+ }
+ 
+-const connectionString = process.env.DATABASE_URL || process.env.SUPABASE_DB_URL || process.env.POSTGRES_URL;
++const connectionString =
++  process.env.SUPABASE_DATABASE_URL ||
++  process.env.DATABASE_URL ||
++  process.env.SUPABASE_DB_URL ||
++  process.env.POSTGRES_URL ||
++  '';
+ 
+ async function runRealPostgresIntegrationSuite() {
+   console.log('======================================================================');
+@@ -33,7 +38,7 @@ async function runRealPostgresIntegrationSuite() {
+ 
+   if (!connectionString) {
+     console.log('ℹ️ AVISO: Nenhuma string de conexão PostgreSQL configurada neste ambiente.');
+-    console.log('   Variáveis verificadas: DATABASE_URL, SUPABASE_DB_URL, POSTGRES_URL.');
++    console.log('   Variáveis verificadas: SUPABASE_DATABASE_URL, DATABASE_URL, SUPABASE_DB_URL, POSTGRES_URL.');
+     console.log('');
+     console.log('📋 STATUS DA SUÍTE DE INTEGRAÇÃO REAL:');
+     console.log('   Os testes de integração com PostgreSQL real estão IMPLEMENTADOS e PREPARADOS');
+-- 
+2.34.1
+

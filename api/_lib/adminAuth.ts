@@ -13,6 +13,7 @@
 
 import { safeCompare } from './crypto';
 import { getServerSupabase, isDatabaseConfigured } from './db';
+import { executeSql, isPostgresConfigured } from './postgres';
 
 export async function verifyAdminRequest(req: any): Promise<boolean> {
   const authHeader = req.headers?.authorization || '';
@@ -44,15 +45,25 @@ export async function verifyAdminRequest(req: any): Promise<boolean> {
         }
 
         // 2.2 Consulta tabela de papéis de usuário (public.user_roles)
-        const { data: roleRow } = await supabase
-          .from('user_roles')
-          .select('role')
-          .eq('user_id', user.id)
-          .in('role', ['admin', 'super_admin'])
-          .maybeSingle();
+        if (isPostgresConfigured()) {
+          const roleRes = await executeSql(
+            `SELECT role FROM public.user_roles WHERE user_id = $1 AND role IN ('admin', 'super_admin') LIMIT 1`,
+            [user.id]
+          );
+          if (roleRes.rows.length > 0) {
+            return true;
+          }
+        } else {
+          const { data: roleRow } = await supabase
+            .from('user_roles')
+            .select('role')
+            .eq('user_id', user.id)
+            .in('role', ['admin', 'super_admin'])
+            .maybeSingle();
 
-        if (roleRow) {
-          return true;
+          if (roleRow) {
+            return true;
+          }
         }
 
         // 2.3 RPC is_admin() no banco

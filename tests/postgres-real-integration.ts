@@ -24,7 +24,12 @@ interface TestResult {
   durationMs: number;
 }
 
-const connectionString = process.env.DATABASE_URL || process.env.SUPABASE_DB_URL || process.env.POSTGRES_URL;
+const connectionString =
+  process.env.SUPABASE_DATABASE_URL ||
+  process.env.DATABASE_URL ||
+  process.env.SUPABASE_DB_URL ||
+  process.env.POSTGRES_URL ||
+  '';
 
 async function runRealPostgresIntegrationSuite() {
   console.log('======================================================================');
@@ -33,7 +38,7 @@ async function runRealPostgresIntegrationSuite() {
 
   if (!connectionString) {
     console.log('ℹ️ AVISO: Nenhuma string de conexão PostgreSQL configurada neste ambiente.');
-    console.log('   Variáveis verificadas: DATABASE_URL, SUPABASE_DB_URL, POSTGRES_URL.');
+    console.log('   Variáveis verificadas: SUPABASE_DATABASE_URL, DATABASE_URL, SUPABASE_DB_URL, POSTGRES_URL.');
     console.log('');
     console.log('📋 STATUS DA SUÍTE DE INTEGRAÇÃO REAL:');
     console.log('   Os testes de integração com PostgreSQL real estão IMPLEMENTADOS e PREPARADOS');

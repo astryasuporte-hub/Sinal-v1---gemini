@@ -184,7 +184,7 @@ $$;
 REVOKE ALL ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) FROM anon;
 REVOKE ALL ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) FROM authenticated;
-GRANT EXECUTE ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) TO service_role;
+GRANT EXECUTE ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) TO service_role, postgres;
 
 -- 8. RPC: Confirmação Financeira Atômica & Ativação de Assinatura (Schema Real)
 -- Integra: internal.billing_payments, internal.billing_events e public.subscriptions
@@ -420,4 +420,25 @@ $$;
 REVOKE ALL ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) FROM anon;
 REVOKE ALL ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) FROM authenticated;
-GRANT EXECUTE ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) TO service_role;
+GRANT EXECUTE ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) TO service_role, postgres;
+
+-- 8. Concessão de privilégios para conexões PostgreSQL server-side (schema internal)
+GRANT USAGE ON SCHEMA internal TO service_role, postgres;
+GRANT ALL ON ALL TABLES IN SCHEMA internal TO service_role, postgres;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA internal TO service_role, postgres;
+GRANT SELECT, INSERT, UPDATE ON TABLE public.subscriptions TO service_role, postgres;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.user_roles TO service_role, postgres;
+
+-- 9. Concessão condicional segura para papel dedicado (caso provisionado pelo DBA)
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'fatosbr_backend') THEN
+    GRANT USAGE ON SCHEMA internal TO fatosbr_backend;
+    GRANT ALL ON ALL TABLES IN SCHEMA internal TO fatosbr_backend;
+    GRANT ALL ON ALL SEQUENCES IN SCHEMA internal TO fatosbr_backend;
+    GRANT EXECUTE ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) TO fatosbr_backend;
+    GRANT EXECUTE ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) TO fatosbr_backend;
+    GRANT SELECT, INSERT, UPDATE ON TABLE public.subscriptions TO fatosbr_backend;
+    GRANT SELECT ON TABLE public.user_roles TO fatosbr_backend;
+  END IF;
+END $$;

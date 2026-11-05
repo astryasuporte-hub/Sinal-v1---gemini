@@ -10,6 +10,7 @@
 
 import { getClientIp, sendJson } from './common';
 import { getServerSupabase, isDatabaseConfigured } from './db';
+import { executeSql, isPostgresConfigured } from './postgres';
 
 export type RateLimitCategory = 'auth' | 'payments' | 'admin' | 'webhooks' | 'ai' | 'general';
 
@@ -75,11 +76,26 @@ export async function enforceRateLimit(
     // 1. Caso haja mock de teste ativo explicitamente configurado
     if (activeTestStore) {
       result = await activeTestStore.checkAndIncrement(key, profile.maxRequests, profile.windowMs);
+    } else if (isPostgresConfigured()) {
+      // 2. Execução prioritária direta via PostgreSQL server-side
+      const sqlRes = await executeSql<{ outcome: any }>(
+        `SELECT public.check_and_increment_rate_limit($1, $2, $3) AS outcome`,
+        [key, profile.maxRequests, profile.windowMs]
+      );
+      const data = sqlRes.rows[0]?.outcome;
+      if (data) {
+        result = {
+          allowed: Boolean(data.allowed),
+          current: Number(data.current || 1),
+          limit: Number(data.limit || profile.maxRequests),
+          retry_after: Number(data.retry_after || 0),
+          remaining: Number(data.remaining ?? 0)
+        };
+      }
     } else {
-      // 2. Ambiente de Produção / Staging: Execução da RPC atômica no Supabase PostgreSQL
+      // 3. Fallback via cliente Supabase se disponível
       if (!isDatabaseConfigured()) {
         if (profile.isHighRisk) {
-          // Fail-closed para endpoints sensíveis (pagamentos, auth, admin, webhook)
           console.error(`[Rate Limit Security] Bloqueio fail-closed ativo para ${key}: Banco de dados indisponível.`);
           sendJson(res, 503, {
             error: 'Serviço temporariamente indisponível. Medida de segurança ativa para operações sensíveis.',
@@ -87,7 +103,6 @@ export async function enforceRateLimit(
           });
           return false;
         }
-        // Fail-safe para rotas gerais de leitura pública
         return true;
       }
 
