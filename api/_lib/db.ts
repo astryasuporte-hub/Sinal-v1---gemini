@@ -110,6 +110,8 @@ export interface StoredCharge {
   currency: string;
   status: 'PENDING' | 'PROCESSING' | 'PAID' | 'FAILED' | 'EXPIRED' | 'CANCELLED';
   description: string;
+  planId?: string;
+  idempotencyKey?: string;
   qrCodeText?: string;
   expirationDate?: string | null;
   createdAt: string;
@@ -226,6 +228,8 @@ export async function getActivePendingChargeForUser(userId: string | null, userE
       currency: row.currency || 'BRL',
       status: row.status,
       description: row.checkout_data?.description || 'Assinatura FatosBR Pro',
+      planId: row.checkout_data?.plan_id,
+      idempotencyKey: row.checkout_data?.idempotency_key,
       qrCodeText: row.checkout_data?.qr_code_text,
       expirationDate: row.expiration_date,
       createdAt: row.created_at,
@@ -280,6 +284,7 @@ export async function recordOfficialZynPayCharge(params: {
   planId: string;
   userEmail: string;
   description: string;
+  idempotencyKey?: string;
 }): Promise<StoredCharge> {
   if (activeTestAdapter) {
     await activeTestAdapter.recordPendingCharge({
@@ -300,6 +305,8 @@ export async function recordOfficialZynPayCharge(params: {
       currency: params.gatewayCharge.currency || 'BRL',
       status: params.gatewayCharge.status || 'PENDING',
       description: params.description,
+      planId: params.planId,
+      idempotencyKey: params.idempotencyKey,
       qrCodeText: params.gatewayCharge.qrCodeText,
       expirationDate: params.gatewayCharge.expirationDate,
       createdAt: new Date().toISOString(),
@@ -315,7 +322,9 @@ export async function recordOfficialZynPayCharge(params: {
     plan_id: params.planId,
     user_email: params.userEmail,
     description: params.description,
-    qr_code_text: params.gatewayCharge.qrCodeText
+    qr_code_text: params.gatewayCharge.qrCodeText,
+    idempotency_key: params.idempotencyKey || null,
+    attempt_state: 'PENDING'
   });
 
   try {

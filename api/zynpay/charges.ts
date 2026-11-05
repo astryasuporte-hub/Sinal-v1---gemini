@@ -138,38 +138,73 @@ export default async function handler(req: any, res: any) {
     }
 
     if (existingPending) {
-      // Consulta estado real no gateway oficial ZynPay antes de qualquer alteração de status
+      // 5.1 Consulta estado real no gateway oficial ZynPay antes de qualquer alteração de status
       let upstreamCharge = null;
+      let gatewayCheckFailed = false;
       try {
         upstreamCharge = await fetchChargeFromGateway(existingPending.providerPaymentId);
       } catch (gwErr: any) {
+        gatewayCheckFailed = true;
         console.warn(`[Gateway Check Notice] Não foi possível consultar cobrança ${existingPending.providerPaymentId} na ZynPay: ${gwErr.message}`);
       }
 
-      const upstreamStatus = upstreamCharge?.status || existingPending.status;
+      // Regra 6.2: Se a ZynPay estiver indisponível, não marcar como expirada, não marcar como paga,
+      // não criar substituta e não liberar índice sem confirmação.
+      if (gatewayCheckFailed && !upstreamCharge) {
+        if (existingPending.amountCents === planAmountCents) {
+          const qrCodeText = existingPending.qrCodeText || '';
+          let qrCodeBase64 = '';
+          if (qrCodeText) {
+            try { qrCodeBase64 = await QRCode.toDataURL(qrCodeText, { width: 320, margin: 2 }); } catch {}
+          }
+          return sendJson(res, 200, {
+            success: true,
+            reused: true,
+            gatewayStatusUnconfirmed: true,
+            charge: {
+              id: existingPending.providerPaymentId,
+              amount: existingPending.amountCents,
+              amountFormatted: planConfig.amountFormatted,
+              status: existingPending.status,
+              description: existingPending.description,
+              customer: { name: customerName, email: userEmail },
+              qrCode: qrCodeBase64,
+              qrCodeText,
+              createdAt: existingPending.createdAt,
+              expiresAt: existingPending.expirationDate || new Date(new Date(existingPending.createdAt).getTime() + 15 * 60 * 1000).toISOString()
+            }
+          });
+        } else {
+          return sendJson(res, 503, {
+            error: 'Serviço de consulta ao gateway temporariamente indisponível. Cobrança pendente anterior mantida.',
+            code: 'GATEWAY_UNAVAILABLE_PENDING_CHECK'
+          });
+        }
+      }
+
+      const upstreamStatus = upstreamCharge?.status || null;
 
       // Se no gateway já foi confirmada como paga, impede criação duplicada
       if (upstreamStatus === 'PAID') {
         return sendJson(res, 409, {
-          error: 'Esta cobrança já foi confirmada como paga. Sua assinatura Pro está sendo ativada.',
+          error: 'Esta cobrança já foi confirmada como paga no provedor oficial. Sua assinatura Pro está sendo ativada.',
           code: 'CHARGE_ALREADY_PAID'
         });
       }
 
-      // Se no gateway foi cancelada ou expirada oficialmente, atualiza o status no banco local
+      // Se no gateway foi cancelada ou expirada oficialmente, sincroniza o banco local
       if (upstreamStatus === 'CANCELLED' || upstreamStatus === 'EXPIRED') {
         await cancelOrExpirePendingCharge(existingPending.id, upstreamStatus);
-      } else {
-        // Cobrança ainda pendente: verifica a expiração oficial do gateway
-        const expiresAtTime = upstreamCharge?.expirationDate 
-          ? new Date(upstreamCharge.expirationDate).getTime()
-          : (existingPending.expirationDate ? new Date(existingPending.expirationDate).getTime() : 0);
+      } else if (upstreamStatus === 'PENDING') {
+        // Cobrança confirmada como pendente no gateway:
+        // Verifica a expiração oficial registrada no provedor (Regra 6.3)
+        const expiresAtTime = upstreamCharge?.expirationDate ? new Date(upstreamCharge.expirationDate).getTime() : 0;
         const isOfficialExpired = expiresAtTime > 0 && Date.now() > expiresAtTime;
 
         if (isOfficialExpired) {
           await cancelOrExpirePendingCharge(existingPending.id, 'EXPIRED');
         } else if (existingPending.amountCents === planAmountCents) {
-          // Reutiliza a cobrança pendente existente de forma confiável
+          // Reutiliza a cobrança pendente existente para o mesmo plano
           const qrCodeText = upstreamCharge?.qrCodeText || existingPending.qrCodeText || '';
           let qrCodeBase64 = upstreamCharge?.qrCodeBase64 || '';
           if (!qrCodeBase64 && qrCodeText) {
@@ -185,7 +220,7 @@ export default async function handler(req: any, res: any) {
               id: existingPending.providerPaymentId,
               amount: existingPending.amountCents,
               amountFormatted: planConfig.amountFormatted,
-              status: existingPending.status,
+              status: 'PENDING',
               description: existingPending.description,
               customer: { name: customerName, email: userEmail },
               qrCode: qrCodeBase64,
@@ -194,15 +229,42 @@ export default async function handler(req: any, res: any) {
               expiresAt: upstreamCharge?.expirationDate || existingPending.expirationDate || new Date(new Date(existingPending.createdAt).getTime() + 15 * 60 * 1000).toISOString()
             }
           });
+        } else {
+          // Regra 6.4: Cobrança pendente de outro plano não pode ter valor reutilizado nem ser cancelada sem regra segura
+          return sendJson(res, 409, {
+            error: 'Você já possui uma cobrança Pix ativa em aberto para outro plano. Conclua o pagamento anterior ou aguarde sua expiração oficial antes de trocar de plano.',
+            code: 'ACTIVE_PENDING_CHARGE_DIFFERENT_PLAN',
+            existingChargeId: existingPending.providerPaymentId
+          });
         }
       }
     }
 
-    // 6. Chave de Idempotência Estável vinculada ao usuário e tentativa lógica de checkout
-    const clientKey = String(body.idempotencyKey || '').trim();
-    const idempotencyKey = clientKey
-      ? `fatosbr_chk_${userId}_${crypto.createHash('sha256').update(clientKey).digest('hex').slice(0, 24)}`
-      : `fatosbr_chk_${userId}_${planConfig.id}_${Math.floor(Date.now() / (15 * 60 * 1000))}`;
+    // 6. Chave de Idempotência Estável vinculada ao usuário, plano e tentativa lógica
+    let idempotencyKey: string;
+    const rawClientKey = body.idempotencyKey;
+    if (typeof rawClientKey === 'string' && rawClientKey.trim()) {
+      const cleanKey = rawClientKey.trim();
+      if (!/^[a-zA-Z0-9_-]{8,64}$/.test(cleanKey)) {
+        return sendJson(res, 400, {
+          error: 'Chave de idempotência em formato inválido. Deve ter entre 8 e 64 caracteres alfanuméricos com hífens ou underscores.',
+          code: 'INVALID_IDEMPOTENCY_KEY'
+        });
+      }
+      // Vincula criptograficamente ao usuário e plano para impedir reutilização maliciosa
+      const contextHash = crypto.createHash('sha256')
+        .update(`${userId}:${planConfig.id}:${planAmountCents}:${cleanKey}`)
+        .digest('hex')
+        .slice(0, 24);
+      idempotencyKey = `fatosbr_chk_${userId}_${contextHash}`;
+    } else {
+      // Identificador de tentativa persistente derivado pelo servidor
+      const attemptHash = crypto.createHash('sha256')
+        .update(`${userId}:${planConfig.id}:${planAmountCents}`)
+        .digest('hex')
+        .slice(0, 20);
+      idempotencyKey = `fatosbr_chk_${userId}_${attemptHash}`;
+    }
 
     // 7. Criação de cobrança oficial pela API oficial da ZynPay (ZERO PIX FICTÍCIO)
     let gatewayResponse;
@@ -225,7 +287,7 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    // 7. Persistência mandatória no PostgreSQL Supabase
+    // 8. Persistência mandatória no PostgreSQL Supabase
     let storedCharge;
     try {
       storedCharge = await recordOfficialZynPayCharge({
@@ -233,7 +295,8 @@ export default async function handler(req: any, res: any) {
         gatewayCharge: gatewayResponse,
         planId: planConfig.id,
         userEmail,
-        description: planDescription
+        description: planDescription,
+        idempotencyKey
       });
     } catch (dbErr: any) {
       console.error('[Persistence Failure] Erro ao persistir cobrança oficial no PostgreSQL:', dbErr.message);

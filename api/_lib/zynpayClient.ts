@@ -4,20 +4,24 @@
  * 
  * FatosBR — Cliente Oficial da API ZynPay Gateway
  * 
- * Diretrizes de Segurança:
+ * Diretrizes de Segurança e Hardening:
  * 1. ZERO geração de PIX fictício no servidor. Todo QR Code e Pix Copia e Cola deve vir da ZynPay.
- * 2. Se a ZynPay estiver indisponível, falhar com erro controlado (fail-closed seguro).
- * 3. Consultas server-to-server para confirmação confiável de estado e reconciliação.
- * 4. Validação de formato e tipagem nas respostas da API externa.
+ * 2. Validação rigorosa e tipada de todas as respostas externas sem fallbacks silenciosos perigosos.
+ * 3. Mapeamento explícito de status documentados. Status desconhecido resulta em falha controlada.
+ * 4. Timeouts estritos com AbortController em todas as chamadas (criação, consulta e saldo).
+ * 5. Categorização explícita de erros (timeout, auth, rate limit, not found, invalid response, gateway error).
+ * 6. Sanitização de logs: Nenhuma exposição de chaves de API, senhas ou dados pessoais.
  */
 
 import { getServerKeys } from './common';
 
+export type ZynPayStatus = 'PENDING' | 'PAID' | 'FAILED' | 'EXPIRED' | 'CANCELLED';
+
 export interface ZynPayOfficialChargeResponse {
   id: string;
-  amount: number; // Centavos
+  amount: number; // Centavos inteiros positivos
   currency: string;
-  status: 'PENDING' | 'PAID' | 'FAILED' | 'EXPIRED' | 'CANCELLED';
+  status: ZynPayStatus;
   description: string;
   qrCodeText: string;
   qrCodeBase64?: string;
@@ -29,6 +33,165 @@ export interface ZynPayOfficialBalanceResponse {
   available: number;
   pending: number;
   currency: string;
+}
+
+// -----------------------------------------------------------------------------
+// MAPEAMENTO EXPLÍCITO DE STATUS DOCUMENTADOS DA ZYNPAY
+// -----------------------------------------------------------------------------
+const RECOGNIZED_STATUS_MAP: Record<string, ZynPayStatus> = {
+  PENDING: 'PENDING',
+  PROCESSING: 'PENDING',
+  WAITING_PAYMENT: 'PENDING',
+  PAID: 'PAID',
+  CONFIRMED: 'PAID',
+  COMPLETED: 'PAID',
+  SETTLED: 'PAID',
+  EXPIRED: 'EXPIRED',
+  CANCELLED: 'CANCELLED',
+  CANCELED: 'CANCELLED',
+  FAILED: 'FAILED'
+};
+
+export function mapZynPayStatus(rawStatus: any): ZynPayStatus {
+  if (typeof rawStatus !== 'string' || !rawStatus.trim()) {
+    throw new Error('GATEWAY_INVALID_RESPONSE: Status da cobrança ausente na resposta da ZynPay.');
+  }
+  const normalized = rawStatus.trim().toUpperCase();
+  const mapped = RECOGNIZED_STATUS_MAP[normalized];
+  if (!mapped) {
+    throw new Error(`GATEWAY_UNKNOWN_STATUS: Status '${rawStatus}' desconhecido retornado pela ZynPay.`);
+  }
+  return mapped;
+}
+
+export function validateMonetaryAmountCents(val: any, fieldName = 'amountCents'): number {
+  if (val === null || val === undefined) {
+    throw new Error(`GATEWAY_INVALID_RESPONSE: Valor monetário '${fieldName}' ausente na resposta da ZynPay.`);
+  }
+  const num = typeof val === 'number' ? val : Number(val);
+  if (!Number.isFinite(num) || !Number.isInteger(num) || num <= 0) {
+    throw new Error(`GATEWAY_INVALID_RESPONSE: Valor monetário '${fieldName}' inválido (${val}). Deve ser inteiro estritamente positivo em centavos.`);
+  }
+  return num;
+}
+
+export function validateCurrency(val: any): string {
+  if (val !== undefined && val !== null) {
+    const cur = String(val).trim().toUpperCase();
+    if (cur !== 'BRL') {
+      throw new Error(`GATEWAY_INVALID_RESPONSE: Moeda não suportada '${val}'. Somente BRL é aceita pelo sistema.`);
+    }
+    return cur;
+  }
+  return 'BRL';
+}
+
+export function validateZynPayCreationResponse(raw: any, expectedAmountCents: number): ZynPayOfficialChargeResponse {
+  if (!raw || typeof raw !== 'object') {
+    throw new Error('GATEWAY_INVALID_RESPONSE: Resposta da ZynPay não é um objeto JSON válido.');
+  }
+  const data = raw.data || raw;
+
+  const id = String(data.id || '').trim();
+  if (!id) {
+    throw new Error('GATEWAY_INVALID_RESPONSE: Identificador da cobrança (id) ausente na resposta da ZynPay.');
+  }
+
+  // Validação monetária estrita sem fallback silencioso para params ou 0
+  const rawAmount = data.amountCents !== undefined ? data.amountCents : data.amount;
+  const amountCents = validateMonetaryAmountCents(rawAmount, 'amountCents');
+  if (amountCents !== expectedAmountCents) {
+    throw new Error(`GATEWAY_AMOUNT_MISMATCH: Valor retornado (${amountCents}) diverge do valor solicitado (${expectedAmountCents}).`);
+  }
+
+  const currency = validateCurrency(data.currency);
+  const status = mapZynPayStatus(data.status || 'PENDING');
+
+  const qrCodeText = String(
+    data.pixCopyPaste ||
+    data.pixCode ||
+    data.pix?.copyPaste ||
+    data.pix?.code ||
+    data.qrCodeText ||
+    ''
+  ).trim();
+
+  if (!qrCodeText) {
+    throw new Error('GATEWAY_INVALID_RESPONSE: Código Pix Copia e Cola ausente na resposta da ZynPay.');
+  }
+
+  const qrCodeBase64 = String(
+    data.qrCodeBase64 ||
+    data.qrCode ||
+    data.pix?.qrCode ||
+    data.pix?.qrCodeBase64 ||
+    ''
+  ).trim();
+
+  const expirationDate = data.expirationDate || data.expiresAt || data.expiration_date;
+
+  return {
+    id,
+    amount: amountCents,
+    currency,
+    status,
+    description: String(data.description || ''),
+    qrCodeText,
+    qrCodeBase64: qrCodeBase64 || undefined,
+    expirationDate: expirationDate ? new Date(expirationDate).toISOString() : undefined,
+    createdAt: data.createdAt ? new Date(data.createdAt).toISOString() : new Date().toISOString()
+  };
+}
+
+export function validateZynPayConsultationResponse(raw: any, expectedChargeId: string): ZynPayOfficialChargeResponse {
+  if (!raw || typeof raw !== 'object') {
+    throw new Error('GATEWAY_INVALID_RESPONSE: Resposta da ZynPay não é um objeto JSON válido.');
+  }
+  const data = raw.data || raw;
+
+  const id = String(data.id || '').trim();
+  if (!id) {
+    throw new Error('GATEWAY_INVALID_RESPONSE: Identificador da cobrança (id) ausente na resposta da ZynPay.');
+  }
+  if (id !== expectedChargeId) {
+    throw new Error(`GATEWAY_ID_MISMATCH: Identificador retornado (${id}) diverge da cobrança consultada (${expectedChargeId}).`);
+  }
+
+  const rawAmount = data.amountCents !== undefined ? data.amountCents : data.amount;
+  const amountCents = validateMonetaryAmountCents(rawAmount, 'amountCents');
+  const currency = validateCurrency(data.currency);
+  const status = mapZynPayStatus(data.status);
+
+  const qrCodeText = String(
+    data.pixCopyPaste ||
+    data.pixCode ||
+    data.pix?.copyPaste ||
+    data.pix?.code ||
+    data.qrCodeText ||
+    ''
+  ).trim();
+
+  const qrCodeBase64 = String(
+    data.qrCodeBase64 ||
+    data.qrCode ||
+    data.pix?.qrCode ||
+    data.pix?.qrCodeBase64 ||
+    ''
+  ).trim();
+
+  const expirationDate = data.expirationDate || data.expiresAt || data.expiration_date;
+
+  return {
+    id,
+    amount: amountCents,
+    currency,
+    status,
+    description: String(data.description || ''),
+    qrCodeText,
+    qrCodeBase64: qrCodeBase64 || undefined,
+    expirationDate: expirationDate ? new Date(expirationDate).toISOString() : undefined,
+    createdAt: data.createdAt ? new Date(data.createdAt).toISOString() : new Date().toISOString()
+  };
 }
 
 // -----------------------------------------------------------------------------
@@ -108,7 +271,6 @@ export async function createPixChargeOnGateway(params: {
   };
 
   if (params.idempotencyKey) {
-    // Header oficial estrito documentado pela ZynPay
     headers['Idempotency-Key'] = params.idempotencyKey;
   }
 
@@ -123,6 +285,14 @@ export async function createPixChargeOnGateway(params: {
       signal: controller.signal
     });
 
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(`GATEWAY_UNAUTHORIZED: Chave de API da ZynPay inválida ou não autorizada (${res.status}).`);
+    }
+
+    if (res.status === 429) {
+      throw new Error('GATEWAY_RATE_LIMITED: Limite de requisições excedido junto à ZynPay.');
+    }
+
     if (!res.ok) {
       let errMsg = `HTTP ${res.status}`;
       try {
@@ -134,49 +304,7 @@ export async function createPixChargeOnGateway(params: {
     }
 
     const data = await res.json();
-    const chargeData = data.data || data;
-
-    const chargeId = String(chargeData.id || '').trim();
-    // Extrai o Pix Copia e Cola / BR Code dos campos oficiais documentados
-    const qrCodeText = String(
-      chargeData.pixCopyPaste ||
-      chargeData.pixCode ||
-      chargeData.pix?.copyPaste ||
-      chargeData.pix?.code ||
-      chargeData.qrCodeText ||
-      ''
-    ).trim();
-
-    // Extrai o QR Code em imagem se fornecido pelo gateway
-    const qrCodeBase64 = String(
-      chargeData.qrCodeBase64 ||
-      chargeData.qrCode ||
-      chargeData.pix?.qrCode ||
-      chargeData.pix?.qrCodeBase64 ||
-      ''
-    ).trim();
-
-    const rawStatus = String(chargeData.status || 'PENDING').toUpperCase();
-    const status = (rawStatus === 'PAID' || rawStatus === 'CONFIRMED') ? 'PAID' : 'PENDING';
-    const amountCents = Number(chargeData.amountCents ?? chargeData.amount ?? params.amountCents);
-
-    // Validação estrita: resposta incompleta deve ser rejeitada imediatamente sem mock
-    if (!chargeId || !qrCodeText) {
-      console.error('[ZynPay Gateway Error] Resposta do gateway incompleta ou sem dados de Pix válidos:', data);
-      throw new Error('GATEWAY_INVALID_RESPONSE: Gateway oficial ZynPay retornou resposta incompleta (ID ou Copia-e-Cola ausentes).');
-    }
-
-    return {
-      id: chargeId,
-      amount: amountCents,
-      currency: chargeData.currency || 'BRL',
-      status,
-      description: chargeData.description || params.description,
-      qrCodeText,
-      qrCodeBase64: qrCodeBase64 || undefined,
-      expirationDate: chargeData.expirationDate || chargeData.expiresAt,
-      createdAt: chargeData.createdAt || new Date().toISOString()
-    };
+    return validateZynPayCreationResponse(data, params.amountCents);
   } catch (err: any) {
     if (err.name === 'AbortError') {
       console.error('[ZynPay Gateway Timeout] A chamada à API oficial da ZynPay expirou.');
@@ -190,6 +318,7 @@ export async function createPixChargeOnGateway(params: {
 
 /**
  * Consulta cobrança diretamente na API oficial da ZynPay para confirmação de estado.
+ * Endpoint: GET /v1/public/pix/charges/{id}
  */
 export async function fetchChargeFromGateway(chargeId: string): Promise<ZynPayOfficialChargeResponse | null> {
   if (activeTestGateway) {
@@ -218,41 +347,20 @@ export async function fetchChargeFromGateway(chargeId: string): Promise<ZynPayOf
       return null;
     }
 
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(`GATEWAY_UNAUTHORIZED: Chave de API da ZynPay inválida ou não autorizada (${res.status}).`);
+    }
+
+    if (res.status === 429) {
+      throw new Error('GATEWAY_RATE_LIMITED: Limite de taxa da API ZynPay excedido.');
+    }
+
     if (!res.ok) {
       throw new Error(`GATEWAY_ERROR: Consulta na ZynPay retornou status ${res.status}`);
     }
 
     const data = await res.json();
-    const chargeData = data.data || data;
-
-    const rawStatus = String(chargeData.status || '').toUpperCase();
-    let status: 'PENDING' | 'PAID' | 'FAILED' | 'EXPIRED' | 'CANCELLED' = 'PENDING';
-    if (rawStatus === 'PAID' || rawStatus === 'CONFIRMED') status = 'PAID';
-    else if (rawStatus === 'CANCELLED' || rawStatus === 'CANCELED') status = 'CANCELLED';
-    else if (rawStatus === 'EXPIRED') status = 'EXPIRED';
-    else if (rawStatus === 'FAILED') status = 'FAILED';
-
-    const amountCents = Number(chargeData.amountCents ?? chargeData.amount ?? 0);
-    const qrCodeText = String(
-      chargeData.pixCopyPaste ||
-      chargeData.pixCode ||
-      chargeData.pix?.copyPaste ||
-      chargeData.pix?.code ||
-      chargeData.qrCodeText ||
-      ''
-    ).trim();
-
-    return {
-      id: String(chargeData.id || chargeId),
-      amount: amountCents,
-      currency: chargeData.currency || 'BRL',
-      status,
-      description: chargeData.description || '',
-      qrCodeText,
-      qrCodeBase64: chargeData.qrCodeBase64 || chargeData.qrCode || chargeData.pix?.qrCode || '',
-      expirationDate: chargeData.expirationDate || chargeData.expiresAt,
-      createdAt: chargeData.createdAt || new Date().toISOString()
-    };
+    return validateZynPayConsultationResponse(data, chargeId);
   } catch (err: any) {
     if (err.name === 'AbortError') {
       throw new Error('GATEWAY_TIMEOUT: Tempo limite ao consultar cobrança na ZynPay.');
@@ -276,24 +384,51 @@ export async function fetchBalanceFromGateway(): Promise<ZynPayOfficialBalanceRe
     throw new Error('GATEWAY_UNCONFIGURED: Chave de API da ZynPay ausente.');
   }
 
-  const res = await fetch('https://api.zynpay.com.br/v1/public/pix/balance', {
-    method: 'GET',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json'
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 8000);
+
+  try {
+    const res = await fetch('https://api.zynpay.com.br/v1/public/pix/balance', {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      signal: controller.signal
+    });
+
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(`GATEWAY_UNAUTHORIZED: Chave de API da ZynPay inválida ou não autorizada (${res.status}).`);
     }
-  });
 
-  if (!res.ok) {
-    throw new Error(`GATEWAY_ERROR: Erro ao consultar saldo na ZynPay (${res.status})`);
+    if (res.status === 429) {
+      throw new Error('GATEWAY_RATE_LIMITED: Limite de requisições excedido junto à ZynPay.');
+    }
+
+    if (!res.ok) {
+      throw new Error(`GATEWAY_ERROR: Erro ao consultar saldo na ZynPay (${res.status})`);
+    }
+
+    const data = await res.json();
+    const bData = data.data || data;
+
+    const rawAvailable = bData.availableCents !== undefined ? bData.availableCents : bData.available;
+    const rawPending = bData.pendingCents !== undefined ? bData.pendingCents : bData.pending;
+
+    const available = Number(rawAvailable || 0);
+    const pending = Number(rawPending || 0);
+
+    return {
+      available,
+      pending,
+      currency: validateCurrency(bData.currency)
+    };
+  } catch (err: any) {
+    if (err.name === 'AbortError') {
+      throw new Error('GATEWAY_TIMEOUT: Tempo limite ao consultar saldo na ZynPay.');
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
   }
-
-  const data = await res.json();
-  const bData = data.data || data;
-
-  return {
-    available: Number(bData.available ?? bData.availableCents ?? 0),
-    pending: Number(bData.pending ?? bData.pendingCents ?? 0),
-    currency: bData.currency || 'BRL'
-  };
 }

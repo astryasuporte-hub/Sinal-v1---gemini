@@ -29,7 +29,11 @@ import {
 } from '../api/_lib/db';
 import {
   setTestZynPayGatewayAdapter,
-  TestZynPayGatewayAdapter
+  TestZynPayGatewayAdapter,
+  mapZynPayStatus,
+  validateMonetaryAmountCents,
+  validateZynPayCreationResponse,
+  validateZynPayConsultationResponse
 } from '../api/_lib/zynpayClient';
 import {
   setTestRateLimiterStore,
@@ -884,6 +888,49 @@ async function main() {
     assert(out.json?.code === 'SUBSCRIPTION_CHECK_FAILED' || out.json?.code === 'PENDING_CHECK_FAILED', 'Deve falhar com código de checagem');
   });
 
+  await runTest('2.18 Validação de formato da chave de idempotência do cliente (HTTP 400)', async () => {
+    const userId = 'user_bad_idemp';
+    const { res, result } = createMockRes();
+    const req = createMockReq({
+      method: 'POST',
+      url: '/api/zynpay/charges',
+      headers: { authorization: `Bearer ${userId}` },
+      body: { planId: 'pro', idempotencyKey: 'short' } // < 8 caracteres
+    });
+    await chargesHandler(req, res);
+    const out = result();
+    assert(out.statusCode === 400, `Esperado 400 para chave curta, recebido ${out.statusCode}`);
+    assert(out.json?.code === 'INVALID_IDEMPOTENCY_KEY', 'Código deve ser INVALID_IDEMPOTENCY_KEY');
+  });
+
+  await runTest('2.19 Conflito de planos: Usuário com cobrança pendente para plano diferente recebe HTTP 409', async () => {
+    const userId = 'user_plano_conflito';
+    const userEmail = `${userId}@fatosbr.com.br`;
+
+    // Registra cobrança pendente para o plano Pro Mensal (2990 centavos)
+    await recordPendingCharge({
+      providerPaymentId: 'zyn_pendente_pro_01',
+      userId,
+      userEmail,
+      amountCents: 2990,
+      description: 'Plano Pro Mensal'
+    });
+
+    // Tenta solicitar o plano Pro Anual (29900 centavos) enquanto o mensal está pendente e ativo
+    const { res, result } = createMockRes();
+    const req = createMockReq({
+      method: 'POST',
+      url: '/api/zynpay/charges',
+      headers: { authorization: `Bearer ${userId}` },
+      body: { planId: 'pro_annual' }
+    });
+    await chargesHandler(req, res);
+    const out = result();
+
+    assert(out.statusCode === 409, `Esperado 409 para conflito de planos diferentes, recebido ${out.statusCode}`);
+    assert(out.json?.code === 'ACTIVE_PENDING_CHARGE_DIFFERENT_PLAN', 'Código deve ser ACTIVE_PENDING_CHARGE_DIFFERENT_PLAN');
+  });
+
   // ---------------------------------------------------------------------------
   // CATEGORIA 3: AUDITORIA REAL ZYNPAY & WEBHOOK
   // ---------------------------------------------------------------------------
@@ -1059,6 +1106,47 @@ async function main() {
     const out = result();
     assert(out.statusCode === 200, `Esperado 200 para admin autorizado, recebido ${out.statusCode}`);
     assert(out.json?.success === true, 'Deve retornar success: true');
+  });
+
+  await runTest('4.4 Validação estrita de resposta: Rejeita resposta sem amountCents válido ou com valor negativo', async () => {
+    let capturedErr = '';
+    try {
+      validateMonetaryAmountCents(-100, 'amountCents');
+    } catch (e: any) {
+      capturedErr = e.message;
+    }
+    assert(capturedErr.includes('GATEWAY_INVALID_RESPONSE'), 'Deve lançar GATEWAY_INVALID_RESPONSE para valor negativo');
+
+    let capturedMissing = '';
+    try {
+      validateZynPayCreationResponse({ data: { id: 'zyn_123', qrCodeText: 'pix123' } }, 2990);
+    } catch (e: any) {
+      capturedMissing = e.message;
+    }
+    assert(capturedMissing.includes('GATEWAY_INVALID_RESPONSE'), 'Deve rejeitar criação sem amountCents');
+  });
+
+  await runTest('4.5 Validação estrita de status: Rejeita status desconhecido com GATEWAY_UNKNOWN_STATUS', async () => {
+    let capturedErr = '';
+    try {
+      mapZynPayStatus('STATUS_INVENTADO_FAKE');
+    } catch (e: any) {
+      capturedErr = e.message;
+    }
+    assert(capturedErr.includes('GATEWAY_UNKNOWN_STATUS'), 'Deve lançar GATEWAY_UNKNOWN_STATUS');
+  });
+
+  await runTest('4.6 Validação estrita de consulta: Rejeita resposta com divergência de identificador', async () => {
+    let capturedErr = '';
+    try {
+      validateZynPayConsultationResponse(
+        { data: { id: 'zyn_esperado_diferente', amountCents: 2990, status: 'PAID', qrCodeText: 'pix' } },
+        'zyn_consultado_original'
+      );
+    } catch (e: any) {
+      capturedErr = e.message;
+    }
+    assert(capturedErr.includes('GATEWAY_ID_MISMATCH'), 'Deve lançar GATEWAY_ID_MISMATCH');
   });
 
   // ---------------------------------------------------------------------------
