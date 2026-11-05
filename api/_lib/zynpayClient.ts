@@ -57,7 +57,10 @@ function getZynPayApiKey(): string {
 }
 
 /**
- * Cria uma cobrança Pix real na API oficial da ZynPay.
+ * Cria uma cobrança Pix real na API oficial da ZynPay conforme a documentação oficial:
+ * Endpoint: POST /v1/public/pix/charges
+ * Headers: Authorization: Bearer <API_KEY>, Idempotency-Key: <key>
+ * Payload: { amountCents: number, description?: string, customer?: { name, email, taxId } }
  * NUNCA gera identificadores fictícios ou payloads EMV locais.
  */
 export async function createPixChargeOnGateway(params: {
@@ -66,6 +69,7 @@ export async function createPixChargeOnGateway(params: {
   customer: {
     name: string;
     email: string;
+    taxId?: string;
   };
   idempotencyKey?: string;
 }): Promise<ZynPayOfficialChargeResponse> {
@@ -79,14 +83,23 @@ export async function createPixChargeOnGateway(params: {
     throw new Error('GATEWAY_UNCONFIGURED: Chave de API oficial da ZynPay não está configurada no ambiente do servidor.');
   }
 
-  const payload = {
-    amount: params.amountCents,
+  // Contrato oficial da documentação ZynPay (POST /v1/public/pix/charges)
+  const payload: {
+    amountCents: number;
+    description: string;
+    customer: {
+      name: string;
+      email: string;
+      taxId?: string;
+    };
+  } = {
+    amountCents: params.amountCents,
     description: params.description,
     customer: {
       name: params.customer.name,
-      email: params.customer.email
-    },
-    paymentMethod: 'PIX'
+      email: params.customer.email,
+      ...(params.customer.taxId ? { taxId: params.customer.taxId } : {})
+    }
   };
 
   const headers: Record<string, string> = {
@@ -95,15 +108,15 @@ export async function createPixChargeOnGateway(params: {
   };
 
   if (params.idempotencyKey) {
+    // Header oficial estrito documentado pela ZynPay
     headers['Idempotency-Key'] = params.idempotencyKey;
-    headers['X-Idempotency-Key'] = params.idempotencyKey;
   }
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 12000); // 12s timeout estrito
 
   try {
-    const res = await fetch('https://api.zynpay.com.br/v1/public/charges', {
+    const res = await fetch('https://api.zynpay.com.br/v1/public/pix/charges', {
       method: 'POST',
       headers,
       body: JSON.stringify(payload),
@@ -114,7 +127,7 @@ export async function createPixChargeOnGateway(params: {
       let errMsg = `HTTP ${res.status}`;
       try {
         const errJson = await res.json();
-        errMsg = errJson.message || errJson.error || errMsg;
+        errMsg = errJson.message || errJson.error || errJson.details || errMsg;
       } catch {}
       console.error(`[ZynPay Gateway Error] Falha na criação da cobrança: ${errMsg}`);
       throw new Error(`GATEWAY_ERROR: ZynPay retornou status ${res.status} (${errMsg})`);
@@ -124,24 +137,44 @@ export async function createPixChargeOnGateway(params: {
     const chargeData = data.data || data;
 
     const chargeId = String(chargeData.id || '').trim();
-    const qrCodeText = String(chargeData.qrCodeText || chargeData.pix?.copyPaste || chargeData.pixCopyPaste || '').trim();
-    const qrCodeBase64 = chargeData.qrCode || chargeData.pix?.qrCode || chargeData.qrCodeBase64 || '';
-    const status = (String(chargeData.status || 'PENDING').toUpperCase()) as any;
+    // Extrai o Pix Copia e Cola / BR Code dos campos oficiais documentados
+    const qrCodeText = String(
+      chargeData.pixCopyPaste ||
+      chargeData.pixCode ||
+      chargeData.pix?.copyPaste ||
+      chargeData.pix?.code ||
+      chargeData.qrCodeText ||
+      ''
+    ).trim();
 
+    // Extrai o QR Code em imagem se fornecido pelo gateway
+    const qrCodeBase64 = String(
+      chargeData.qrCodeBase64 ||
+      chargeData.qrCode ||
+      chargeData.pix?.qrCode ||
+      chargeData.pix?.qrCodeBase64 ||
+      ''
+    ).trim();
+
+    const rawStatus = String(chargeData.status || 'PENDING').toUpperCase();
+    const status = (rawStatus === 'PAID' || rawStatus === 'CONFIRMED') ? 'PAID' : 'PENDING';
+    const amountCents = Number(chargeData.amountCents ?? chargeData.amount ?? params.amountCents);
+
+    // Validação estrita: resposta incompleta deve ser rejeitada imediatamente sem mock
     if (!chargeId || !qrCodeText) {
       console.error('[ZynPay Gateway Error] Resposta do gateway incompleta ou sem dados de Pix válidos:', data);
-      throw new Error('GATEWAY_INVALID_RESPONSE: Gateway oficial ZynPay não retornou dados de Pix completos (ID ou Copia-e-Cola ausentes).');
+      throw new Error('GATEWAY_INVALID_RESPONSE: Gateway oficial ZynPay retornou resposta incompleta (ID ou Copia-e-Cola ausentes).');
     }
 
     return {
       id: chargeId,
-      amount: Number(chargeData.amount || params.amountCents),
+      amount: amountCents,
       currency: chargeData.currency || 'BRL',
-      status: status === 'PAID' ? 'PAID' : 'PENDING',
+      status,
       description: chargeData.description || params.description,
       qrCodeText,
       qrCodeBase64: qrCodeBase64 || undefined,
-      expirationDate: chargeData.expiresAt || chargeData.expirationDate,
+      expirationDate: chargeData.expirationDate || chargeData.expiresAt,
       createdAt: chargeData.createdAt || new Date().toISOString()
     };
   } catch (err: any) {
@@ -172,7 +205,7 @@ export async function fetchChargeFromGateway(chargeId: string): Promise<ZynPayOf
   const timeoutId = setTimeout(() => controller.abort(), 8000);
 
   try {
-    const res = await fetch(`https://api.zynpay.com.br/v1/public/charges/${encodeURIComponent(chargeId)}`, {
+    const res = await fetch(`https://api.zynpay.com.br/v1/public/pix/charges/${encodeURIComponent(chargeId)}`, {
       method: 'GET',
       headers: {
         Authorization: `Bearer ${apiKey}`,
@@ -199,15 +232,25 @@ export async function fetchChargeFromGateway(chargeId: string): Promise<ZynPayOf
     else if (rawStatus === 'EXPIRED') status = 'EXPIRED';
     else if (rawStatus === 'FAILED') status = 'FAILED';
 
+    const amountCents = Number(chargeData.amountCents ?? chargeData.amount ?? 0);
+    const qrCodeText = String(
+      chargeData.pixCopyPaste ||
+      chargeData.pixCode ||
+      chargeData.pix?.copyPaste ||
+      chargeData.pix?.code ||
+      chargeData.qrCodeText ||
+      ''
+    ).trim();
+
     return {
       id: String(chargeData.id || chargeId),
-      amount: Number(chargeData.amount || 0),
+      amount: amountCents,
       currency: chargeData.currency || 'BRL',
       status,
       description: chargeData.description || '',
-      qrCodeText: chargeData.qrCodeText || chargeData.pix?.copyPaste || '',
-      qrCodeBase64: chargeData.qrCode || chargeData.pix?.qrCode || '',
-      expirationDate: chargeData.expiresAt || chargeData.expirationDate,
+      qrCodeText,
+      qrCodeBase64: chargeData.qrCodeBase64 || chargeData.qrCode || chargeData.pix?.qrCode || '',
+      expirationDate: chargeData.expirationDate || chargeData.expiresAt,
       createdAt: chargeData.createdAt || new Date().toISOString()
     };
   } catch (err: any) {
@@ -221,7 +264,7 @@ export async function fetchChargeFromGateway(chargeId: string): Promise<ZynPayOf
 }
 
 /**
- * Consulta saldo oficial na ZynPay para painel administrativo.
+ * Consulta saldo oficial na ZynPay para painel administrativo via GET /v1/public/pix/balance.
  */
 export async function fetchBalanceFromGateway(): Promise<ZynPayOfficialBalanceResponse> {
   if (activeTestGateway) {
@@ -233,7 +276,7 @@ export async function fetchBalanceFromGateway(): Promise<ZynPayOfficialBalanceRe
     throw new Error('GATEWAY_UNCONFIGURED: Chave de API da ZynPay ausente.');
   }
 
-  const res = await fetch('https://api.zynpay.com.br/v1/public/balance', {
+  const res = await fetch('https://api.zynpay.com.br/v1/public/pix/balance', {
     method: 'GET',
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -249,8 +292,8 @@ export async function fetchBalanceFromGateway(): Promise<ZynPayOfficialBalanceRe
   const bData = data.data || data;
 
   return {
-    available: Number(bData.available || 0),
-    pending: Number(bData.pending || 0),
+    available: Number(bData.available ?? bData.availableCents ?? 0),
+    pending: Number(bData.pending ?? bData.pendingCents ?? 0),
     currency: bData.currency || 'BRL'
   };
 }

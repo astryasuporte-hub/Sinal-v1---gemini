@@ -206,16 +206,20 @@ class MockDatabaseHarness implements TestDatabaseAdapter {
 
   async checkAndLockWebhookEvent(eventId: string, provider: string): Promise<{ isDuplicate: boolean }> {
     if (this.forceError) throw new Error(this.forceError);
-    if (this.webhookEvents.has(eventId)) {
+    const existing = this.webhookEvents.get(eventId);
+    if (existing && existing.processed) {
       return { isDuplicate: true };
     }
-    this.webhookEvents.set(eventId, {
-      id: 'b0eebc99-9c0b-4ef8-bb6d-6bb9bd380b22',
-      provider_event_id: eventId,
-      provider,
-      processed: true,
-      created_at: new Date().toISOString()
-    });
+    // Trava de idempotência inicial com processed = false (marca true apenas ao concluir)
+    if (!existing) {
+      this.webhookEvents.set(eventId, {
+        id: 'b0eebc99-9c0b-4ef8-bb6d-6bb9bd380b22',
+        provider_event_id: eventId,
+        provider,
+        processed: false,
+        created_at: new Date().toISOString()
+      });
+    }
     return { isDuplicate: false };
   }
 
@@ -392,13 +396,26 @@ async function main() {
       };
     },
     getCharge: async (chargeId: string) => {
+      const dbCharge = dbHarness.charges.get(chargeId);
+      // Para fluxos de webhook (onde o webhook notifica que o Pix foi pago no gateway):
+      if (chargeId.includes('wh_ok') || chargeId.includes('atomic') || dbCharge?.status === 'PAID') {
+        return {
+          id: chargeId,
+          amount: dbCharge?.amount || 2990,
+          currency: 'BRL',
+          status: 'PAID',
+          description: 'FatosBR Pro',
+          qrCodeText: dbCharge?.qr_code_text || 'pix_code',
+          createdAt: new Date().toISOString()
+        };
+      }
       return {
         id: chargeId,
-        amount: 2990,
+        amount: dbCharge?.amount || 2990,
         currency: 'BRL',
-        status: 'PAID',
+        status: dbCharge ? dbCharge.status : 'PENDING',
         description: 'FatosBR Pro',
-        qrCodeText: 'pix_code',
+        qrCodeText: dbCharge?.qr_code_text || 'pix_code',
         createdAt: new Date().toISOString()
       };
     },
@@ -817,6 +834,56 @@ async function main() {
     assert(!out.raw.includes('00020126580014br.gov.bcb.pix0136zyn_'), 'NUNCA deve gerar payload PIX fictício de fallback');
   });
 
+  await runTest('2.16 Idempotência Estável: Retries com a mesma chave não geram cobranças duplicadas', async () => {
+    const userId = 'user_idempotente_fixo';
+    const clientKey = 'intent_sess_abc123';
+
+    const { res: res1, result: result1 } = createMockRes();
+    const req1 = createMockReq({
+      method: 'POST',
+      url: '/api/zynpay/charges',
+      headers: { authorization: `Bearer ${userId}` },
+      body: { planId: 'pro', idempotencyKey: clientKey }
+    });
+    await chargesHandler(req1, res1);
+    const out1 = result1();
+    assert(out1.statusCode === 200, 'Primeira requisição deve ser 200');
+
+    // Segunda chamada simulando retry com o mesmo token de idempotência
+    const { res: res2, result: result2 } = createMockRes();
+    const req2 = createMockReq({
+      method: 'POST',
+      url: '/api/zynpay/charges',
+      headers: { authorization: `Bearer ${userId}` },
+      body: { planId: 'pro', idempotencyKey: clientKey }
+    });
+    await chargesHandler(req2, res2);
+    const out2 = result2();
+
+    assert(out2.statusCode === 200, 'Segunda requisição de retry deve ser 200');
+    assert(out2.json?.reused === true, 'Retry deve reutilizar a cobrança existente');
+    assert(out1.json?.charge?.id === out2.json?.charge?.id, 'Mesmo identificador retornado');
+  });
+
+  await runTest('2.17 Fail-Closed: Falha em consulta crítica de cobrança pendente interrompe com HTTP 503', async () => {
+    dbHarness.forceError = 'DATABASE_CONNECTION_REFUSED';
+    const userId = 'user_fail_closed_db';
+
+    const { res, result } = createMockRes();
+    const req = createMockReq({
+      method: 'POST',
+      url: '/api/zynpay/charges',
+      headers: { authorization: `Bearer ${userId}` },
+      body: { planId: 'pro' }
+    });
+    await chargesHandler(req, res);
+    const out = result();
+    dbHarness.forceError = null;
+
+    assert(out.statusCode === 503, `Esperado fail-closed HTTP 503, recebido ${out.statusCode}`);
+    assert(out.json?.code === 'SUBSCRIPTION_CHECK_FAILED' || out.json?.code === 'PENDING_CHECK_FAILED', 'Deve falhar com código de checagem');
+  });
+
   // ---------------------------------------------------------------------------
   // CATEGORIA 3: AUDITORIA REAL ZYNPAY & WEBHOOK
   // ---------------------------------------------------------------------------
@@ -844,13 +911,13 @@ async function main() {
     assert(out.json?.code === 'MISSING_SIGNATURE', 'Código deve ser MISSING_SIGNATURE');
   });
 
-  await runTest('3.3 Rejeição de webhook com assinatura HMAC violada (HTTP 403)', async () => {
+  await runTest('3.3 Rejeição de webhook com assinatura HMAC violada no header oficial x-zinpay-signature (HTTP 403)', async () => {
     const rawBody = JSON.stringify({ id: 'evt_bad_sig', chargeId: 'zyn_1' });
     const { res, result } = createMockRes();
     const req = createMockReq({
       method: 'POST',
       url: '/api/zynpay/webhook',
-      headers: { 'x-zynpay-signature': 'assinatura_adulterada_invalida' },
+      headers: { 'x-zinpay-signature': 'assinatura_adulterada_invalida' },
       rawBody
     });
     await webhookHandler(req, res);
@@ -866,13 +933,95 @@ async function main() {
     const req = createMockReq({
       method: 'POST',
       url: '/api/zynpay/webhook',
-      headers: { 'x-zynpay-signature': sig },
+      headers: { 'x-zinpay-signature': sig },
       rawBody
     });
     await webhookHandler(req, res);
     const out = result();
     assert(out.statusCode === 400, `Esperado 400, recebido ${out.statusCode}`);
     assert(out.json?.code === 'MALFORMED_PAYLOAD', 'Código deve ser MALFORMED_PAYLOAD');
+  });
+
+  await runTest('3.5 Processamento com sucesso via x-zinpay-signature e evento pix.charge.paid', async () => {
+    const chargeId = 'zyn_wh_ok_01';
+    const eventId = 'evt_wh_ok_01';
+    const userEmail = 'webhook.ok@fatosbr.com.br';
+
+    await recordPendingCharge({
+      id: chargeId,
+      userEmail,
+      amountCents: 2990,
+      description: 'Plano Pro'
+    });
+
+    const payloadObj = {
+      id: eventId,
+      event: 'pix.charge.paid',
+      data: {
+        charge_id: chargeId,
+        amount: 2990,
+        status: 'PAID'
+      }
+    };
+    const rawBody = JSON.stringify(payloadObj);
+    const sig = crypto.createHmac('sha256', testSecret).update(rawBody).digest('hex');
+
+    const { res, result } = createMockRes();
+    const req = createMockReq({
+      method: 'POST',
+      url: '/api/zynpay/webhook',
+      headers: { 'x-zinpay-signature': sig },
+      rawBody
+    });
+    await webhookHandler(req, res);
+    const out = result();
+
+    assert(out.statusCode === 200, `Esperado 200, recebido ${out.statusCode}: ${JSON.stringify(out.json)}`);
+    assert(out.json?.success === true, 'Operação deve retornar success: true');
+    assert(out.json?.status === 'PAID', 'Status deve ser PAID');
+  });
+
+  await runTest('3.6 Evento não relacionado a liquidação (pix.charge.expired) é ignorado sem ativar Pro', async () => {
+    const payloadObj = {
+      id: 'evt_expired_99',
+      event: 'pix.charge.expired',
+      data: {
+        charge_id: 'zyn_exp_99'
+      }
+    };
+    const rawBody = JSON.stringify(payloadObj);
+    const sig = crypto.createHmac('sha256', testSecret).update(rawBody).digest('hex');
+
+    const { res, result } = createMockRes();
+    const req = createMockReq({
+      method: 'POST',
+      url: '/api/zynpay/webhook',
+      headers: { 'x-zinpay-signature': sig },
+      rawBody
+    });
+    await webhookHandler(req, res);
+    const out = result();
+
+    assert(out.statusCode === 200, 'Deve responder 200 OK informando recebimento');
+    assert(out.json?.ignored === true, 'Deve ter flag ignored: true');
+  });
+
+  await runTest('3.7 Rejeição de headers genéricos alternativos como x-hub-signature ou signature', async () => {
+    const rawBody = JSON.stringify({ id: 'evt_alt', chargeId: 'zyn_1' });
+    const sig = crypto.createHmac('sha256', testSecret).update(rawBody).digest('hex');
+
+    const { res, result } = createMockRes();
+    const req = createMockReq({
+      method: 'POST',
+      url: '/api/zynpay/webhook',
+      headers: { 'x-hub-signature': sig },
+      rawBody
+    });
+    await webhookHandler(req, res);
+    const out = result();
+
+    assert(out.statusCode === 401, `Esperado 401 para header genérico, recebido ${out.statusCode}`);
+    assert(out.json?.code === 'MISSING_SIGNATURE', 'Código deve ser MISSING_SIGNATURE');
   });
 
   // ---------------------------------------------------------------------------

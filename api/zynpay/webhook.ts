@@ -51,18 +51,17 @@ export default async function handler(req: any, res: any) {
   const { rawBody, body } = await readRawAndJsonBody(req);
   const payload = body || {};
 
-  // 4. Extração e validação da assinatura criptográfica HMAC
+  // 4. Extração e validação da assinatura criptográfica HMAC oficial da ZynPay
+  // Documentação oficial: header 'x-zinpay-signature' (ou 'x-zynpay-signature')
   const providedSignature =
+    req.headers['x-zinpay-signature'] ||
     req.headers['x-zynpay-signature'] ||
-    req.headers['x-signature'] ||
-    req.headers['x-hub-signature'] ||
-    req.headers['signature'] ||
     null;
 
   if (!providedSignature) {
     console.warn(`[Security Incident] Webhook recebido sem assinatura criptográfica de ${getClientIp(req)}`);
     return sendJson(res, 401, {
-      error: 'Assinatura criptográfica obrigatória ausente no cabeçalho do webhook.',
+      error: 'Assinatura criptográfica obrigatória ausente no cabeçalho do webhook (x-zinpay-signature).',
       code: 'MISSING_SIGNATURE'
     });
   }
@@ -84,15 +83,25 @@ export default async function handler(req: any, res: any) {
     });
   }
 
-  // 5. Validação estrutural do payload
-  const eventId = String(payload.id || payload.eventId || '').trim();
-  const chargeId = String(payload.chargeId || payload.data?.id || payload.charge?.id || '').trim();
-  const eventType = String(payload.type || payload.event || '').trim().toLowerCase();
+  // 5. Validação estrutural do payload conforme contrato oficial da ZynPay
+  const eventType = String(payload.event || payload.type || '').trim().toLowerCase();
+  const eventId = String(payload.id || payload.eventId || payload.data?.event_id || payload.data?.id || '').trim();
+  const chargeId = String(payload.data?.charge_id || payload.data?.id || payload.chargeId || payload.id || '').trim();
 
   if (!eventId || !chargeId) {
     return sendJson(res, 400, {
-      error: 'Payload incompleto. Identificadores de evento (id) e cobrança (chargeId) são obrigatórios.',
+      error: 'Payload incompleto. Identificadores de evento e cobrança são obrigatórios.',
       code: 'MALFORMED_PAYLOAD'
+    });
+  }
+
+  // Filtra eventos que não representam liquidação de Pix
+  if (eventType && eventType !== 'pix.charge.paid' && eventType !== 'charge.paid') {
+    return sendJson(res, 200, {
+      success: true,
+      received: true,
+      ignored: true,
+      message: `Evento '${eventType}' recebido e ignorado (não representa liquidação Pix).`
     });
   }
 

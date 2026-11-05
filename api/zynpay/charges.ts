@@ -14,6 +14,7 @@
  * 7. Rate limiting distribuído no perfil 'payments'.
  */
 
+import crypto from 'crypto';
 import QRCode from 'qrcode';
 import { sendJson, setCorsHeaders, readJsonBody } from '../_lib/common';
 import {
@@ -116,27 +117,64 @@ export default async function handler(req: any, res: any) {
       }
     } catch (subErr: any) {
       console.error('[Subscription Check Error]', subErr.message);
-      if (subErr.message?.includes('POSTGRES_UNAVAILABLE')) {
-        return sendJson(res, 503, {
-          error: 'Serviço financeiro temporariamente indisponível. Conexão segura com banco de dados não configurada.',
-          code: 'POSTGRES_UNAVAILABLE'
-        });
-      }
+      return sendJson(res, 503, {
+        error: 'Serviço financeiro temporariamente indisponível. Falha crítica ao verificar status da assinatura.',
+        code: subErr.message?.includes('POSTGRES_UNAVAILABLE') ? 'POSTGRES_UNAVAILABLE' : 'SUBSCRIPTION_CHECK_FAILED',
+        details: subErr.message
+      });
     }
 
-    // 5. Respeito ao índice parcial 'billing_one_pending'
+    // 5. Respeito ao índice parcial 'billing_one_pending' com verificação de estado no gateway
+    let existingPending = null;
     try {
-      const existingPending = await getActivePendingChargeForUser(userId, userEmail);
-      if (existingPending) {
-        const ageMs = Date.now() - new Date(existingPending.createdAt).getTime();
-        const fifteenMinutesMs = 15 * 60 * 1000;
+      existingPending = await getActivePendingChargeForUser(userId, userEmail);
+    } catch (pendingErr: any) {
+      console.error('[Pending Charge Check Error]', pendingErr.message);
+      return sendJson(res, 503, {
+        error: 'Falha crítica ao consultar cobranças pendentes no banco de dados.',
+        code: pendingErr.message?.includes('POSTGRES_UNAVAILABLE') ? 'POSTGRES_UNAVAILABLE' : 'PENDING_CHECK_FAILED',
+        details: pendingErr.message
+      });
+    }
 
-        // Se ainda está dentro do período de validade do Pix (15 min) e tem o mesmo valor, reutiliza
-        if (ageMs < fifteenMinutesMs && existingPending.amountCents === planAmountCents) {
-          let qrCodeBase64 = '';
-          if (existingPending.qrCodeText) {
+    if (existingPending) {
+      // Consulta estado real no gateway oficial ZynPay antes de qualquer alteração de status
+      let upstreamCharge = null;
+      try {
+        upstreamCharge = await fetchChargeFromGateway(existingPending.providerPaymentId);
+      } catch (gwErr: any) {
+        console.warn(`[Gateway Check Notice] Não foi possível consultar cobrança ${existingPending.providerPaymentId} na ZynPay: ${gwErr.message}`);
+      }
+
+      const upstreamStatus = upstreamCharge?.status || existingPending.status;
+
+      // Se no gateway já foi confirmada como paga, impede criação duplicada
+      if (upstreamStatus === 'PAID') {
+        return sendJson(res, 409, {
+          error: 'Esta cobrança já foi confirmada como paga. Sua assinatura Pro está sendo ativada.',
+          code: 'CHARGE_ALREADY_PAID'
+        });
+      }
+
+      // Se no gateway foi cancelada ou expirada oficialmente, atualiza o status no banco local
+      if (upstreamStatus === 'CANCELLED' || upstreamStatus === 'EXPIRED') {
+        await cancelOrExpirePendingCharge(existingPending.id, upstreamStatus);
+      } else {
+        // Cobrança ainda pendente: verifica a expiração oficial do gateway
+        const expiresAtTime = upstreamCharge?.expirationDate 
+          ? new Date(upstreamCharge.expirationDate).getTime()
+          : (existingPending.expirationDate ? new Date(existingPending.expirationDate).getTime() : 0);
+        const isOfficialExpired = expiresAtTime > 0 && Date.now() > expiresAtTime;
+
+        if (isOfficialExpired) {
+          await cancelOrExpirePendingCharge(existingPending.id, 'EXPIRED');
+        } else if (existingPending.amountCents === planAmountCents) {
+          // Reutiliza a cobrança pendente existente de forma confiável
+          const qrCodeText = upstreamCharge?.qrCodeText || existingPending.qrCodeText || '';
+          let qrCodeBase64 = upstreamCharge?.qrCodeBase64 || '';
+          if (!qrCodeBase64 && qrCodeText) {
             try {
-              qrCodeBase64 = await QRCode.toDataURL(existingPending.qrCodeText, { width: 320, margin: 2 });
+              qrCodeBase64 = await QRCode.toDataURL(qrCodeText, { width: 320, margin: 2 });
             } catch {}
           }
 
@@ -151,21 +189,22 @@ export default async function handler(req: any, res: any) {
               description: existingPending.description,
               customer: { name: customerName, email: userEmail },
               qrCode: qrCodeBase64,
-              qrCodeText: existingPending.qrCodeText,
+              qrCodeText,
               createdAt: existingPending.createdAt,
-              expiresAt: new Date(new Date(existingPending.createdAt).getTime() + fifteenMinutesMs).toISOString()
+              expiresAt: upstreamCharge?.expirationDate || existingPending.expirationDate || new Date(new Date(existingPending.createdAt).getTime() + 15 * 60 * 1000).toISOString()
             }
           });
         }
-
-        // Se expirou ou o valor diverge, cancela a cobrança anterior no banco para liberar o índice
-        await cancelOrExpirePendingCharge(existingPending.id, 'EXPIRED');
       }
-    } catch (pendingErr: any) {
-      console.error('[Pending Charge Check Error]', pendingErr.message);
     }
 
-    // 6. Criação de cobrança oficial pela API oficial da ZynPay (ZERO PIX FICTÍCIO)
+    // 6. Chave de Idempotência Estável vinculada ao usuário e tentativa lógica de checkout
+    const clientKey = String(body.idempotencyKey || '').trim();
+    const idempotencyKey = clientKey
+      ? `fatosbr_chk_${userId}_${crypto.createHash('sha256').update(clientKey).digest('hex').slice(0, 24)}`
+      : `fatosbr_chk_${userId}_${planConfig.id}_${Math.floor(Date.now() / (15 * 60 * 1000))}`;
+
+    // 7. Criação de cobrança oficial pela API oficial da ZynPay (ZERO PIX FICTÍCIO)
     let gatewayResponse;
     try {
       gatewayResponse = await createPixChargeOnGateway({
@@ -175,7 +214,7 @@ export default async function handler(req: any, res: any) {
           name: customerName,
           email: userEmail
         },
-        idempotencyKey: `fatosbr_checkout_${userId}_${Date.now()}`
+        idempotencyKey
       });
     } catch (gatewayErr: any) {
       console.error('[ZynPay Gateway Failure] Não foi possível criar cobrança oficial:', gatewayErr.message);

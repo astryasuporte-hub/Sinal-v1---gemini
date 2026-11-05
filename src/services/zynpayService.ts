@@ -162,6 +162,7 @@ class ZynPayService {
     planId?: string;
     description: string;
     customer?: ZynPayCustomer;
+    idempotencyKey?: string;
   }): Promise<{ success: boolean; charge?: ZynPayCharge; error?: string; isSandbox?: boolean; reused?: boolean }> {
     try {
       const { data: { session } } = await supabase.auth.getSession();
@@ -176,7 +177,8 @@ class ZynPayService {
         body: JSON.stringify({
           planId: params.planId || 'pro',
           description: params.description,
-          customer: params.customer
+          customer: params.customer,
+          idempotencyKey: params.idempotencyKey
         })
       });
 
