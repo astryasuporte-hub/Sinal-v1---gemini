@@ -201,15 +201,21 @@ DECLARE
   v_allowed BOOLEAN;
   v_retry_after INTEGER := 0;
 BEGIN
+  -- CONTROLE DE ACESSO: Valida privilégio de banco e role de serviço
+  IF current_user NOT IN ('service_role', 'postgres', 'supabase_admin') AND COALESCE(auth.role(), '') <> 'service_role' THEN
+    RAISE EXCEPTION 'Acesso negado: operação restrita ao papel autorizado (service_role).'
+      USING ERRCODE = '42501';
+  END IF;
+
   -- Validação estrita de parâmetros de entrada
   IF p_key IS NULL OR length(trim(p_key)) = 0 THEN
-    RAISE EXCEPTION 'Parâmetro p_key não pode ser vazio.';
+    RAISE EXCEPTION 'Parâmetro p_key não pode ser vazio.' USING ERRCODE = '22023';
   END IF;
   IF p_max_requests <= 0 THEN
-    RAISE EXCEPTION 'Parâmetro p_max_requests deve ser maior que zero.';
+    RAISE EXCEPTION 'Parâmetro p_max_requests deve ser maior que zero.' USING ERRCODE = '22023';
   END IF;
   IF p_window_ms <= 0 THEN
-    RAISE EXCEPTION 'Parâmetro p_window_ms deve ser maior que zero.';
+    RAISE EXCEPTION 'Parâmetro p_window_ms deve ser maior que zero.' USING ERRCODE = '22023';
   END IF;
 
   INSERT INTO internal.rate_limit_counters (key, tokens, window_start, updated_at)
@@ -250,8 +256,10 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = internal, public, pg_temp;
 
-REVOKE EXECUTE ON FUNCTION public.check_and_increment_rate_limit FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.check_and_increment_rate_limit TO service_role;
+REVOKE ALL ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) FROM anon;
+REVOKE ALL ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) FROM authenticated;
+GRANT EXECUTE ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) TO service_role;
 
 -- 10. RPC Transacional Atômica de Confirmação Financeira (Exclusiva de service_role)
 CREATE OR REPLACE FUNCTION public.confirm_payment_and_activate_subscription_atomic(
@@ -268,9 +276,10 @@ DECLARE
   v_sub_updated_rows INTEGER;
   v_now TIMESTAMPTZ := clock_timestamp();
 BEGIN
-  -- 1. CONTROLE DE ACESSO MANDATÓRIO: Apenas o backend (service_role) pode invocar
-  IF auth.role() <> 'service_role' THEN
-    RAISE EXCEPTION 'Acesso negado: execução permitida exclusivamente pelo backend autorizado (service_role).';
+  -- 1. CONTROLE DE ACESSO MANDATÓRIO — Bloqueio de execução direta pelo frontend
+  IF current_user NOT IN ('service_role', 'postgres', 'supabase_admin') AND COALESCE(auth.role(), '') <> 'service_role' THEN
+    RAISE EXCEPTION 'Acesso negado: execução permitida exclusivamente pelo backend autorizado (service_role).'
+      USING ERRCODE = '42501';
   END IF;
 
   -- 2. Validação rigorosa dos parâmetros
