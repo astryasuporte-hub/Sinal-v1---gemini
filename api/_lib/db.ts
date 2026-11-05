@@ -6,10 +6,15 @@
  * 
  * Diretrizes de Segurança:
  * 1. ZERO fallback em memória em produção: Todas as transações financeiras devem ser persistidas.
- * 2. Uso estrito de SUPABASE_SERVICE_ROLE_KEY no backend para contornar RLS de forma autenticada.
+ * 2. Suporte nativo ao schema "internal" existente no Supabase:
+ *    - internal.billing_payments
+ *    - internal.billing_events
+ *    - internal.billing_subscriptions
+ *    Com fallback transparente para public.payments/public.webhook_events caso aplicável.
+ * 3. Uso estrito de SUPABASE_SERVICE_ROLE_KEY no backend para contornar RLS de forma autenticada.
  *    NUNCA utilizar a chave pública anon como substituta silenciosa de operações privilegiadas.
- * 3. Atomicidade obrigatória: Confirmação de pagamento e ativação de plano ocorrem via RPC transacional no Postgres.
- * 4. Isolamento estrito de testes: Mocks só podem ser injetados se FATOSBR_TEST_MODE='true' ou NODE_ENV='test'.
+ * 4. Atomicidade obrigatória: Confirmação de pagamento e ativação de plano ocorrem via RPC transacional no Postgres.
+ * 5. Isolamento estrito de testes: Mocks só podem ser injetados se FATOSBR_TEST_MODE='true' ou NODE_ENV='test'.
  */
 
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
@@ -81,6 +86,7 @@ export interface StoredCharge {
 
 /**
  * Cria ou registra uma cobrança Pix pendente no Supabase PostgreSQL.
+ * Insere primariamente em internal.billing_payments (ou public.payments como fallback).
  * Falhas no banco de dados lançam exceção e impedem retorno de falso-positivo.
  */
 export async function recordPendingCharge(charge: {
@@ -97,8 +103,7 @@ export async function recordPendingCharge(charge: {
 
   const supabase = getServerSupabase();
   const now = new Date().toISOString();
-
-  const { error } = await supabase.from('payments').insert({
+  const payload = {
     id: charge.id,
     user_id: charge.userId || null,
     user_email: charge.userEmail.toLowerCase().trim(),
@@ -110,7 +115,18 @@ export async function recordPendingCharge(charge: {
     qr_code_text: charge.qrCodeText || null,
     created_at: now,
     updated_at: now
-  });
+  };
+
+  // 1. Tenta inserir em internal.billing_payments
+  try {
+    const { error: internalErr } = await supabase.schema('internal').from('billing_payments').insert(payload);
+    if (!internalErr) {
+      return true;
+    }
+  } catch {}
+
+  // 2. Fallback para public.payments
+  const { error } = await supabase.from('payments').insert(payload);
 
   if (error) {
     console.error(`[DB Error] Falha crítica ao persistir cobrança ${charge.id}:`, error.message);
@@ -129,6 +145,34 @@ export async function getChargeById(chargeId: string): Promise<StoredCharge | nu
   }
 
   const supabase = getServerSupabase();
+
+  // 1. Tenta consultar internal.billing_payments
+  try {
+    const { data: internalData, error: internalErr } = await supabase
+      .schema('internal')
+      .from('billing_payments')
+      .select('*')
+      .eq('id', chargeId)
+      .maybeSingle();
+
+    if (!internalErr && internalData) {
+      return {
+        id: internalData.id,
+        userId: internalData.user_id,
+        userEmail: internalData.user_email,
+        amountCents: internalData.amount_cents,
+        currency: internalData.currency || 'BRL',
+        status: internalData.status,
+        description: internalData.description || 'Assinatura FatosBR Pro',
+        qrCodeText: internalData.qr_code_text,
+        createdAt: internalData.created_at,
+        updatedAt: internalData.updated_at,
+        paidAt: internalData.paid_at
+      };
+    }
+  } catch {}
+
+  // 2. Fallback para public.payments
   const { data, error } = await supabase
     .from('payments')
     .select('*')
@@ -158,7 +202,7 @@ export async function getChargeById(chargeId: string): Promise<StoredCharge | nu
 }
 
 /**
- * Valida idempotência de evento de webhook inserindo registro inicial na tabela webhook_events.
+ * Valida idempotência de evento de webhook inserindo registro inicial na tabela webhook_events / billing_events.
  */
 export async function checkAndLockWebhookEvent(eventId: string, provider = 'zynpay'): Promise<{ isDuplicate: boolean }> {
   if (activeTestAdapter) {
@@ -167,20 +211,32 @@ export async function checkAndLockWebhookEvent(eventId: string, provider = 'zynp
 
   const supabase = getServerSupabase();
   const now = new Date().toISOString();
-
-  // Tenta inserir o evento. Se já existir chave primária (id), viola constraint 23505
-  const { error } = await supabase.from('webhook_events').insert({
+  const eventPayload = {
     id: eventId,
     provider,
     event_type: 'charge.paid',
     status: 'PROCESSING',
     created_at: now,
     processed_at: now
-  });
+  };
+
+  // 1. Tenta inserir em internal.billing_events
+  try {
+    const { error: internalErr } = await supabase.schema('internal').from('billing_events').insert(eventPayload);
+    if (!internalErr) {
+      return { isDuplicate: false };
+    }
+    if (internalErr.code === '23505' || internalErr.message?.toLowerCase().includes('duplicate')) {
+      return { isDuplicate: true };
+    }
+  } catch {}
+
+  // 2. Fallback para public.webhook_events
+  const { error } = await supabase.from('webhook_events').insert(eventPayload);
 
   if (error) {
     // 23505 = unique_violation no PostgreSQL
-    if (error.code === '23505' || error.message.toLowerCase().includes('duplicate') || error.message.toLowerCase().includes('unique')) {
+    if (error.code === '23505' || error.message?.toLowerCase().includes('duplicate') || error.message?.toLowerCase().includes('unique')) {
       return { isDuplicate: true };
     }
     console.error(`[DB Error] Falha de idempotência no evento ${eventId}:`, error.message);
@@ -192,7 +248,7 @@ export async function checkAndLockWebhookEvent(eventId: string, provider = 'zynp
 
 /**
  * Confirma pagamento e ativa assinatura Pro de forma ATÔMICA via RPC PostgreSQL
- * Executa as 7 validações de negócio em uma única transação garantida pelo banco.
+ * Executa as 12 validações de negócio em uma única transação garantida pelo banco.
  */
 export async function confirmPaymentAndActivateSubscriptionAtomic(params: {
   chargeId: string;

@@ -480,6 +480,47 @@ async function main() {
     assert(threw, 'Deve lançar exceção controlada em vez de simular sucesso em memória');
   });
 
+  await runTest('2.6 Anti-Tampering: Reversão atômica em caso de divergência de moeda', async () => {
+    const chargeId = 'zyn_test_currency_err';
+    await recordPendingCharge({
+      id: chargeId,
+      userEmail: 'moeda@fatosbr.com.br',
+      amountCents: 2990,
+      description: 'Teste moeda'
+    });
+
+    const res = await confirmPaymentAndActivateSubscriptionAtomic({
+      chargeId,
+      eventId: 'evt_currency_err',
+      expectedAmountCents: 2990,
+      expectedCurrency: 'USD' // Tentativa de pagamento em moeda divergente
+    });
+
+    assert(res.success === false, 'Transação com moeda divergente deve ser recusada');
+    assert(res.errorCode === 'CURRENCY_MISMATCH', 'Erro deve ser CURRENCY_MISMATCH');
+  });
+
+  await runTest('2.7 Rejeição de confirmação para cobrança em status não pendente', async () => {
+    const chargeId = 'zyn_test_cancelled';
+    await recordPendingCharge({
+      id: chargeId,
+      userEmail: 'cancelado@fatosbr.com.br',
+      amountCents: 2990,
+      description: 'Cobrança cancelada'
+    });
+    // Força status CANCELLED no harness
+    dbHarness.charges.get(chargeId).status = 'CANCELLED';
+
+    const res = await confirmPaymentAndActivateSubscriptionAtomic({
+      chargeId,
+      eventId: 'evt_cancel_01',
+      expectedAmountCents: 2990
+    });
+
+    assert(res.success === false, 'Cobrança cancelada não pode ser liquidada');
+    assert(res.errorCode === 'INVALID_PREVIOUS_STATUS', 'Erro deve ser INVALID_PREVIOUS_STATUS');
+  });
+
   // ---------------------------------------------------------------------------
   // CATEGORIA 3: AUDITORIA REAL ZYNPAY & WEBHOOK
   // ---------------------------------------------------------------------------
@@ -559,6 +600,20 @@ async function main() {
     const out = result();
     assert(out.statusCode === 401, `Esperado 401, recebido ${out.statusCode}`);
     assert(out.json?.code === 'UNAUTHORIZED_ADMIN', 'Código deve ser UNAUTHORIZED_ADMIN');
+  });
+
+  await runTest('4.3 Acesso com Bearer token válido do ADMIN_SECRET é autorizado com sucesso', async () => {
+    process.env.ADMIN_SECRET = 'secret_admin_token_fatosbr_2026';
+    const { res, result } = createMockRes();
+    const req = createMockReq({
+      method: 'GET',
+      url: '/api/zynpay/config',
+      headers: { authorization: 'Bearer secret_admin_token_fatosbr_2026' }
+    });
+    await configHandler(req, res);
+    const out = result();
+    assert(out.statusCode === 200, `Esperado 200 para admin autorizado, recebido ${out.statusCode}`);
+    assert(out.json?.success === true, 'Deve retornar success: true');
   });
 
   // ---------------------------------------------------------------------------

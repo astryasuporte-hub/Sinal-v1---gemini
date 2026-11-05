@@ -3,51 +3,70 @@
  * SPDX-License-Identifier: Apache-2.0
  * 
  * Server-Side Admin Authentication Guard
+ * 
+ * Autorização baseada em RBAC real:
+ * 1. Bearer Token verificado contra ADMIN_SECRET do servidor em tempo constante.
+ * 2. Sessão do Supabase Auth com verificação de claims de app_metadata (gerenciadas pelo servidor).
+ * 3. Consulta de privilégios na tabela public.user_roles no Supabase.
+ * ZERO dependência de listas de e-mails hardcoded ou flags editáveis pelo cliente.
  */
 
 import { safeCompare } from './crypto';
-import { getServerSupabase } from './db';
-
-const ADMIN_EMAILS = [
-  'yleaopvpy01@gmail.com',
-  'admin@fatosbr.com.br'
-];
+import { getServerSupabase, isDatabaseConfigured } from './db';
 
 export async function verifyAdminRequest(req: any): Promise<boolean> {
   const authHeader = req.headers?.authorization || '';
-  const adminSecret = process.env.ADMIN_SECRET || process.env.ZYNPAY_WEBHOOK_SECRET || '';
+  const adminSecret = process.env.ADMIN_SECRET || '';
+
+  if (!authHeader.startsWith('Bearer ')) {
+    return false;
+  }
+
+  const token = authHeader.slice(7).trim();
+  if (!token) return false;
 
   // 1. Verificação via Bearer Token contra ADMIN_SECRET
-  if (authHeader.startsWith('Bearer ')) {
-    const token = authHeader.slice(7).trim();
-    if (adminSecret && safeCompare(token, adminSecret)) {
-      return true;
-    }
+  if (adminSecret && safeCompare(token, adminSecret)) {
+    return true;
+  }
 
-    // 2. Verificação via sessão do Supabase Auth
-    const supabase = getServerSupabase();
-    if (supabase) {
-      try {
-        const { data: { user }, error } = await supabase.auth.getUser(token);
-        if (!error && user && user.email) {
-          if (ADMIN_EMAILS.includes(user.email.toLowerCase())) {
-            return true;
-          }
-          // Checa se tem role de admin no perfil
-          const { data: profile } = await supabase
-            .from('profiles')
-            .select('is_admin, role')
-            .eq('id', user.id)
-            .maybeSingle();
+  // 2. Verificação via Supabase Auth & RBAC
+  if (isDatabaseConfigured()) {
+    try {
+      const supabase = getServerSupabase();
+      const { data: { user }, error } = await supabase.auth.getUser(token);
 
-          if (profile && (profile.is_admin === true || profile.role === 'admin')) {
-            return true;
-          }
+      if (!error && user) {
+        // 2.1 Verifica app_metadata (protegido pelo servidor auth.users, imutável pelo cliente)
+        const appMeta = user.app_metadata || {};
+        if (appMeta.is_admin === true || appMeta.role === 'admin' || appMeta.role === 'super_admin') {
+          return true;
         }
-      } catch {}
+
+        // 2.2 Consulta tabela de papéis de usuário (public.user_roles)
+        const { data: roleRow } = await supabase
+          .from('user_roles')
+          .select('role')
+          .eq('user_id', user.id)
+          .in('role', ['admin', 'super_admin'])
+          .maybeSingle();
+
+        if (roleRow) {
+          return true;
+        }
+
+        // 2.3 RPC is_admin() no banco
+        try {
+          const { data: rpcIsAdmin } = await supabase.rpc('is_admin');
+          if (rpcIsAdmin === true) {
+            return true;
+          }
+        } catch {}
+      }
+    } catch (err: any) {
+      console.warn('[Admin Auth Verification Warning]', err.message);
     }
   }
 
-  // Se não houver token ou se a validação falhar:
   return false;
 }
