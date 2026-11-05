@@ -345,6 +345,7 @@ BEGIN
   UPDATE internal.billing_payments
   SET 
     status = 'PAID',
+    request_state = 'SUCCESS',
     approved_at = v_now,
     last_synced_at = v_now,
     updated_at = v_now
@@ -357,7 +358,7 @@ BEGIN
       plan = 'pro',
       status = 'active',
       current_period_start = v_now,
-      current_period_end = v_now + INTERVAL '30 days',
+      current_period_end = GREATEST(COALESCE(current_period_end, v_now), v_now) + INTERVAL '30 days',
       cancel_at_period_end = FALSE,
       provider = p_provider,
       provider_subscription_id = COALESCE(v_charge.provider_payment_id, p_provider_payment_id),

@@ -19,6 +19,7 @@
 
 import { executeSql, isPostgresConfigured } from './postgres';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import type { ZynPayOfficialChargeResponse } from './zynpayClient';
 
 const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '';
 const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
@@ -43,11 +44,24 @@ export function isDatabaseConfigured(): boolean {
   return isPostgresConfigured();
 }
 
+let activeTestSupabaseClient: any = null;
+
+export function setTestSupabaseClient(client: any): void {
+  const isTestEnv = process.env.NODE_ENV === 'test' || process.env.FATOSBR_TEST_MODE === 'true';
+  if (!isTestEnv && client !== null) {
+    throw new Error('SECURITY_VIOLATION: Mock do cliente Supabase não pode ser ativado em produção.');
+  }
+  activeTestSupabaseClient = client;
+}
+
 /**
  * Retorna o cliente Supabase para uso exclusivo em Auth ou consultas públicas legítimas.
  * NUNCA utilizado como fallback para o schema privado internal.
  */
 export function getServerSupabase(): SupabaseClient {
+  if (activeTestSupabaseClient) {
+    return activeTestSupabaseClient;
+  }
   if (!serverSupabaseClient) {
     throw new Error('SUPABASE_UNAVAILABLE: SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY ausente.');
   }
@@ -97,6 +111,7 @@ export interface StoredCharge {
   status: 'PENDING' | 'PROCESSING' | 'PAID' | 'FAILED' | 'EXPIRED' | 'CANCELLED';
   description: string;
   qrCodeText?: string;
+  expirationDate?: string | null;
   createdAt: string;
   updatedAt: string;
   approvedAt?: string | null;
@@ -122,7 +137,11 @@ export async function checkUserActiveSubscription(userId: string | null, userEma
   try {
     if (userId) {
       const res = await executeSql(
-        `SELECT id FROM public.subscriptions WHERE user_id = $1 AND status = 'active' LIMIT 1`,
+        `SELECT id FROM public.subscriptions 
+         WHERE user_id = $1 
+           AND status = 'active'
+           AND (current_period_end IS NULL OR current_period_end > NOW())
+         LIMIT 1`,
         [userId]
       );
       if (res.rows.length > 0) return true;
@@ -132,7 +151,9 @@ export async function checkUserActiveSubscription(userId: string | null, userEma
       const resEmail = await executeSql(
         `SELECT s.id FROM public.subscriptions s
          JOIN auth.users u ON u.id = s.user_id
-         WHERE LOWER(TRIM(u.email)) = LOWER(TRIM($1)) AND s.status = 'active'
+         WHERE LOWER(TRIM(u.email)) = LOWER(TRIM($1)) 
+           AND s.status = 'active'
+           AND (s.current_period_end IS NULL OR s.current_period_end > NOW())
          LIMIT 1`,
         [userEmail]
       );
@@ -168,6 +189,7 @@ export async function getActivePendingChargeForUser(userId: string | null, userE
         currency,
         status,
         checkout_data,
+        expiration_date,
         created_at,
         updated_at
       FROM internal.billing_payments
@@ -205,6 +227,7 @@ export async function getActivePendingChargeForUser(userId: string | null, userE
       status: row.status,
       description: row.checkout_data?.description || 'Assinatura FatosBR Pro',
       qrCodeText: row.checkout_data?.qr_code_text,
+      expirationDate: row.expiration_date,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };
@@ -248,13 +271,131 @@ export async function cancelOrExpirePendingCharge(chargeId: string, reason = 'EX
 }
 
 /**
- * Cria ou Reutiliza uma Cobrança Pix com respeito integral ao índice parcial billing_one_pending:
- * 1. Checa se o usuário já é assinante ativo Pro (retorna alreadySubscribed: true).
- * 2. Checa se existe cobrança pendente ativa:
- *    - Se válida (< 15 minutos e mesmo valor): reutiliza a existente (evita colisão de índice e Pix duplicado).
- *    - Se expirada (> 15 minutos): marca como EXPIRED / FAILED antes de criar a nova.
- * 3. Cria a nova cobrança atômica com UUID primário.
- * 4. Trata tentativas simultâneas (concorrência) sem estourar erro 500 no cliente.
+ * Grava a cobrança oficial gerada pelo gateway ZynPay na tabela canônica internal.billing_payments.
+ * Utiliza o provider_payment_id retornado pelo gateway oficial da ZynPay.
+ */
+export async function recordOfficialZynPayCharge(params: {
+  userId: string;
+  gatewayCharge: ZynPayOfficialChargeResponse;
+  planId: string;
+  userEmail: string;
+  description: string;
+}): Promise<StoredCharge> {
+  if (activeTestAdapter) {
+    await activeTestAdapter.recordPendingCharge({
+      providerPaymentId: params.gatewayCharge.id,
+      userId: params.userId,
+      userEmail: params.userEmail,
+      amountCents: params.gatewayCharge.amount,
+      description: params.description,
+      qrCodeText: params.gatewayCharge.qrCodeText
+    });
+    return {
+      id: `uuid_${Date.now()}`,
+      providerPaymentId: params.gatewayCharge.id,
+      userId: params.userId,
+      userEmail: params.userEmail,
+      amount: params.gatewayCharge.amount,
+      amountCents: params.gatewayCharge.amount,
+      currency: params.gatewayCharge.currency || 'BRL',
+      status: params.gatewayCharge.status || 'PENDING',
+      description: params.description,
+      qrCodeText: params.gatewayCharge.qrCodeText,
+      expirationDate: params.gatewayCharge.expirationDate,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+  }
+
+  if (!isPostgresConfigured()) {
+    throw new Error('POSTGRES_UNAVAILABLE: Gravação da cobrança exige conexão PostgreSQL server-side configurada.');
+  }
+
+  const checkoutData = JSON.stringify({
+    plan_id: params.planId,
+    user_email: params.userEmail,
+    description: params.description,
+    qr_code_text: params.gatewayCharge.qrCodeText
+  });
+
+  try {
+    const insertSql = `
+      INSERT INTO internal.billing_payments (
+        id,
+        user_id,
+        provider,
+        provider_payment_id,
+        amount,
+        currency,
+        status,
+        type,
+        request_state,
+        expiration_date,
+        checkout_data,
+        last_synced_at,
+        created_at,
+        updated_at
+      ) VALUES (
+        gen_random_uuid(),
+        $1,
+        'zynpay',
+        $2,
+        $3,
+        $4,
+        $5,
+        'PIX',
+        'PENDING',
+        $6,
+        $7::jsonb,
+        NOW(),
+        NOW(),
+        NOW()
+      )
+      RETURNING id, provider_payment_id, user_id, amount, currency, status, checkout_data, expiration_date, created_at, updated_at
+    `;
+
+    const res = await executeSql(insertSql, [
+      params.userId,
+      params.gatewayCharge.id,
+      params.gatewayCharge.amount,
+      params.gatewayCharge.currency || 'BRL',
+      params.gatewayCharge.status || 'PENDING',
+      params.gatewayCharge.expirationDate || null,
+      checkoutData
+    ]);
+
+    const row = res.rows[0];
+    return {
+      id: row.id,
+      providerPaymentId: row.provider_payment_id,
+      userId: row.user_id,
+      userEmail: row.checkout_data?.user_email || params.userEmail,
+      amount: Number(row.amount || 0),
+      amountCents: Number(row.amount || 0),
+      currency: row.currency || 'BRL',
+      status: row.status,
+      description: row.checkout_data?.description || params.description,
+      qrCodeText: row.checkout_data?.qr_code_text || params.gatewayCharge.qrCodeText,
+      expirationDate: row.expiration_date,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  } catch (err: any) {
+    if (err.code === '23505' || err.message?.includes('billing_one_pending') || err.message?.includes('provider_payment_id')) {
+      console.warn('[Concurrency Handled] Conflito concorrente detectado, recuperando cobrança pendente existente.');
+      const concurrent = await getActivePendingChargeForUser(params.userId, params.userEmail);
+      if (concurrent) {
+        return concurrent;
+      }
+    }
+    console.error(`[Postgres Error] Falha ao gravar cobrança oficial ${params.gatewayCharge.id}:`, err.message);
+    throw new Error(`DATABASE_PERSISTENCE_FAILED: Falha na gravação do pagamento via PostgreSQL (${err.message})`);
+  }
+}
+
+/**
+ * Cria ou Reutiliza uma Cobrança Pix com respeito integral ao índice parcial billing_one_pending
+ * (Compatibilidade para rotinas internas e testes).
  */
 export async function createOrReusePixCharge(params: {
   providerPaymentId?: string;
@@ -433,7 +574,6 @@ export async function createOrReusePixCharge(params: {
 
     return { charge: newCharge, reused: false };
   } catch (err: any) {
-    // 4. Tratamento de concorrência: se outro processo inseriu cobrança pendente simultaneamente
     if (
       err.code === '23505' ||
       err.message?.includes('billing_one_pending') ||
@@ -504,6 +644,7 @@ export async function getChargeById(chargeId: string): Promise<StoredCharge | nu
         currency,
         status,
         checkout_data,
+        expiration_date,
         approved_at,
         created_at,
         updated_at
@@ -530,6 +671,7 @@ export async function getChargeById(chargeId: string): Promise<StoredCharge | nu
       status: data.status,
       description: data.checkout_data?.description || 'Assinatura FatosBR Pro',
       qrCodeText: data.checkout_data?.qr_code_text,
+      expirationDate: data.expiration_date,
       createdAt: data.created_at,
       updatedAt: data.updated_at,
       approvedAt: data.approved_at,

@@ -2,18 +2,30 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  * 
- * Vercel Serverless Function: ZynPay Charges (Pix Generation & Status)
+ * Vercel Serverless Function: ZynPay Official Charges & Pix Generation
  * 
- * Arquitetura de Segurança:
- * 1. Rate limiting distribuído no perfil 'payments' (máximo 15 requisições/min).
- * 2. Validação estrita de valores monetários (proibição de <= 0, mínimo R$ 5,00, arredondamento para centavos).
- * 3. Persistência mandatória no PostgreSQL Supabase: Se o banco falhar, NÃO finge sucesso.
- * 4. Suporte a consulta por query param (?id=...) ou sub-rota (/api/zynpay/charges/{id}).
+ * Arquitetura de Segurança e Conformidade:
+ * 1. Autenticação obrigatória do pagador via Supabase Auth (Bearer Token).
+ * 2. Preço controlado exclusivamente pelo servidor (api/_lib/plans.ts) — anti-tampering.
+ * 3. ZERO geração de PIX fictício no servidor. Todo QR Code e código Copia-e-Cola provêm da ZynPay.
+ * 4. Verificação de assinatura ativa prévia (prevenção de cobrança duplicada Pro).
+ * 5. Respeito ao índice parcial 'billing_one_pending' com reutilização transparente de cobrança pendente.
+ * 6. Persistência atômica e exclusiva via PostgreSQL server-side no schema real internal.billing_payments.
+ * 7. Rate limiting distribuído no perfil 'payments'.
  */
 
 import QRCode from 'qrcode';
-import { getServerKeys, sendJson, setCorsHeaders, readJsonBody } from '../_lib/common';
-import { createOrReusePixCharge, getChargeById, getServerSupabase, isDatabaseConfigured } from '../_lib/db';
+import { sendJson, setCorsHeaders, readJsonBody } from '../_lib/common';
+import {
+  getServerSupabase,
+  checkUserActiveSubscription,
+  getActivePendingChargeForUser,
+  cancelOrExpirePendingCharge,
+  recordOfficialZynPayCharge,
+  getChargeById
+} from '../_lib/db';
+import { resolvePlanPrice } from '../_lib/plans';
+import { createPixChargeOnGateway, fetchChargeFromGateway } from '../_lib/zynpayClient';
 import { enforceRateLimit } from '../_lib/rateLimiter';
 
 export default async function handler(req: any, res: any) {
@@ -25,155 +37,231 @@ export default async function handler(req: any, res: any) {
     return;
   }
 
-  // Rate Limiting distribuído
+  // 1. Rate Limiting distribuído
   const rateLimitAllowed = await enforceRateLimit(req, res, 'payments');
   if (!rateLimitAllowed) {
     return;
   }
 
-  const keys = getServerKeys();
-  const apiKey = keys.ZYNPAY;
-
-  // POST /api/zynpay/charges (Criação de Cobrança Pix)
+  // ===========================================================================
+  // POST /api/zynpay/charges (Criação de Cobrança Pix Oficial)
+  // ===========================================================================
   if (req.method === 'POST') {
-    const body = await readJsonBody(req);
-    
-    // Suporte tanto para amount em reais quanto amountCents
-    let amount = Number(body.amount);
-    if (isNaN(amount) || amount <= 0) {
-      if (body.amountCents && Number(body.amountCents) > 0) {
-        amount = Number(body.amountCents) / 100;
-      } else {
-        amount = 29.90; // Default seguro para plano mensal Pro
-      }
-    }
-
-    // Regra anti-adulteração: valor mínimo de R$ 5,00 e máximo de R$ 5.000,00
-    if (amount < 5.0 || amount > 5000.0) {
-      return sendJson(res, 400, {
-        error: 'Valor de cobrança inválido. O valor deve ser positivo e condizente com os planos ativos.',
-        code: 'INVALID_AMOUNT'
-      });
-    }
-
-    // Normaliza casas decimais e centavos
-    amount = Math.round(amount * 100) / 100;
-    const amountCents = Math.round(amount * 100);
-
-    const description = String(body.description || 'Assinatura FatosBR Pro').slice(0, 100);
-    const customer = {
-      name: String(body.customer?.name || 'Leitor FatosBR').slice(0, 100),
-      email: String(body.customer?.email || 'leitor@fatosbr.com.br').toLowerCase().trim().slice(0, 100)
-    };
-
-    // Resolver userId se autenticado via Bearer Token do Supabase Auth
-    let resolvedUserId: string | null = body.userId || null;
+    // 2. Autenticação obrigatória do pagador via Supabase Auth
     const authHeader = req.headers?.authorization || '';
-    if (!resolvedUserId && authHeader.startsWith('Bearer ')) {
-      const token = authHeader.slice(7).trim();
-      try {
-        const supabase = getServerSupabase();
-        const { data: { user } } = await supabase.auth.getUser(token);
-        if (user) {
-          resolvedUserId = user.id;
-        }
-      } catch {}
+    if (!authHeader.startsWith('Bearer ')) {
+      return sendJson(res, 401, {
+        error: 'Autenticação obrigatória para acessar o checkout de assinaturas.',
+        code: 'UNAUTHORIZED_CHECKOUT'
+      });
     }
 
-    const initialChargeId = `zyn_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
-    const initialPixCopyPaste = `00020126580014br.gov.bcb.pix0136${initialChargeId}520400005303986540${amount.toFixed(2)}5802BR5916FATOSBR NOTICIAS6009SAO PAULO62070503***6304`;
-
-    // 1. Persistência atômica e verificação de constraints no PostgreSQL
-    let chargePersistenceResult;
-    try {
-      chargePersistenceResult = await createOrReusePixCharge({
-        providerPaymentId: initialChargeId,
-        userId: resolvedUserId,
-        userEmail: customer.email,
-        amountCents,
-        description,
-        qrCodeText: initialPixCopyPaste
+    const token = authHeader.slice(7).trim();
+    if (!token) {
+      return sendJson(res, 401, {
+        error: 'Token de autenticação ausente.',
+        code: 'MISSING_AUTH_TOKEN'
       });
-    } catch (dbErr: any) {
-      console.error('[Persistence Failure] Falha ao persistir cobrança:', dbErr.message);
-      if (dbErr.message?.includes('POSTGRES_UNAVAILABLE')) {
+    }
+
+    let authenticatedUser: any = null;
+    try {
+      const supabase = getServerSupabase();
+      const { data: { user }, error: authErr } = await supabase.auth.getUser(token);
+      if (authErr || !user) {
+        return sendJson(res, 403, {
+          error: 'Sessão inválida ou expirada. Faça login novamente para prosseguir com o pagamento.',
+          code: 'INVALID_SESSION'
+        });
+      }
+      authenticatedUser = user;
+    } catch (authException: any) {
+      console.error('[Auth Error] Falha ao validar token do pagador:', authException.message);
+      return sendJson(res, 403, {
+        error: 'Não foi possível validar a identidade do pagador. Tente novamente após autenticar-se.',
+        code: 'AUTH_VALIDATION_FAILED'
+      });
+    }
+
+    const userId = authenticatedUser.id;
+    const userEmail = (authenticatedUser.email || '').toLowerCase().trim();
+    const customerName = authenticatedUser.user_metadata?.full_name ||
+                         authenticatedUser.user_metadata?.name ||
+                         'Leitor FatosBR';
+
+    const body = await readJsonBody(req);
+
+    // 3. Resolução segura de preço no servidor (ignora body.amount / body.amountCents)
+    let planConfig;
+    try {
+      planConfig = resolvePlanPrice(body.planId || 'pro');
+    } catch (planErr: any) {
+      return sendJson(res, 400, {
+        error: planErr.message || 'Plano solicitado inválido ou inativo.',
+        code: 'INVALID_PLAN'
+      });
+    }
+
+    const planAmountCents = planConfig.amountCents;
+    const planDescription = planConfig.description;
+
+    // 4. Verificação de assinatura Pro ativa (Anti-duplicação de assinaturas)
+    try {
+      const isAlreadySubscribed = await checkUserActiveSubscription(userId, userEmail);
+      if (isAlreadySubscribed) {
+        return sendJson(res, 409, {
+          error: 'Você já possui uma assinatura FatosBR Pro ativa vinculada a esta conta.',
+          code: 'USER_ALREADY_SUBSCRIBED'
+        });
+      }
+    } catch (subErr: any) {
+      console.error('[Subscription Check Error]', subErr.message);
+      if (subErr.message?.includes('POSTGRES_UNAVAILABLE')) {
         return sendJson(res, 503, {
-          error: 'Serviço financeiro temporariamente indisponível. Operações suspensas até restabelecimento da conexão segura com o banco.',
+          error: 'Serviço financeiro temporariamente indisponível. Conexão segura com banco de dados não configurada.',
           code: 'POSTGRES_UNAVAILABLE'
         });
       }
+    }
+
+    // 5. Respeito ao índice parcial 'billing_one_pending'
+    try {
+      const existingPending = await getActivePendingChargeForUser(userId, userEmail);
+      if (existingPending) {
+        const ageMs = Date.now() - new Date(existingPending.createdAt).getTime();
+        const fifteenMinutesMs = 15 * 60 * 1000;
+
+        // Se ainda está dentro do período de validade do Pix (15 min) e tem o mesmo valor, reutiliza
+        if (ageMs < fifteenMinutesMs && existingPending.amountCents === planAmountCents) {
+          let qrCodeBase64 = '';
+          if (existingPending.qrCodeText) {
+            try {
+              qrCodeBase64 = await QRCode.toDataURL(existingPending.qrCodeText, { width: 320, margin: 2 });
+            } catch {}
+          }
+
+          return sendJson(res, 200, {
+            success: true,
+            reused: true,
+            charge: {
+              id: existingPending.providerPaymentId,
+              amount: existingPending.amountCents,
+              amountFormatted: planConfig.amountFormatted,
+              status: existingPending.status,
+              description: existingPending.description,
+              customer: { name: customerName, email: userEmail },
+              qrCode: qrCodeBase64,
+              qrCodeText: existingPending.qrCodeText,
+              createdAt: existingPending.createdAt,
+              expiresAt: new Date(new Date(existingPending.createdAt).getTime() + fifteenMinutesMs).toISOString()
+            }
+          });
+        }
+
+        // Se expirou ou o valor diverge, cancela a cobrança anterior no banco para liberar o índice
+        await cancelOrExpirePendingCharge(existingPending.id, 'EXPIRED');
+      }
+    } catch (pendingErr: any) {
+      console.error('[Pending Charge Check Error]', pendingErr.message);
+    }
+
+    // 6. Criação de cobrança oficial pela API oficial da ZynPay (ZERO PIX FICTÍCIO)
+    let gatewayResponse;
+    try {
+      gatewayResponse = await createPixChargeOnGateway({
+        amountCents: planAmountCents,
+        description: planDescription,
+        customer: {
+          name: customerName,
+          email: userEmail
+        },
+        idempotencyKey: `fatosbr_checkout_${userId}_${Date.now()}`
+      });
+    } catch (gatewayErr: any) {
+      console.error('[ZynPay Gateway Failure] Não foi possível criar cobrança oficial:', gatewayErr.message);
       return sendJson(res, 503, {
-        error: 'Falha na persistência da cobrança. Operação abortada com segurança.',
+        error: 'Serviço de pagamento temporariamente indisponível. A emissão de cobranças oficiais Pix foi suspensa. Tente novamente em instantes.',
+        code: 'GATEWAY_UNAVAILABLE',
+        details: gatewayErr.message
+      });
+    }
+
+    // 7. Persistência mandatória no PostgreSQL Supabase
+    let storedCharge;
+    try {
+      storedCharge = await recordOfficialZynPayCharge({
+        userId,
+        gatewayCharge: gatewayResponse,
+        planId: planConfig.id,
+        userEmail,
+        description: planDescription
+      });
+    } catch (dbErr: any) {
+      console.error('[Persistence Failure] Erro ao persistir cobrança oficial no PostgreSQL:', dbErr.message);
+      // Tratamento de concorrência com o índice parcial billing_one_pending:
+      if (dbErr.code === '23505' || dbErr.message?.includes('billing_one_pending')) {
+        try {
+          const concurrentPending = await getActivePendingChargeForUser(userId, userEmail);
+          if (concurrentPending) {
+            let qrCodeBase64 = '';
+            if (concurrentPending.qrCodeText) {
+              try {
+                qrCodeBase64 = await QRCode.toDataURL(concurrentPending.qrCodeText, { width: 320, margin: 2 });
+              } catch {}
+            }
+            return sendJson(res, 200, {
+              success: true,
+              reused: true,
+              charge: {
+                id: concurrentPending.providerPaymentId,
+                amount: concurrentPending.amountCents,
+                amountFormatted: planConfig.amountFormatted,
+                status: concurrentPending.status,
+                description: concurrentPending.description,
+                customer: { name: customerName, email: userEmail },
+                qrCode: qrCodeBase64,
+                qrCodeText: concurrentPending.qrCodeText,
+                createdAt: concurrentPending.createdAt,
+                expiresAt: new Date(new Date(concurrentPending.createdAt).getTime() + 15 * 60 * 1000).toISOString()
+              }
+            });
+          }
+        } catch {}
+      }
+      return sendJson(res, 503, {
+        error: 'Falha na persistência da cobrança no banco de dados. Operação abortada para segurança do usuário.',
         code: 'DATABASE_PERSISTENCE_FAILED'
       });
     }
 
-    // Se o usuário já for assinante Pro ativo, bloqueia cobrança duplicada
-    if (chargePersistenceResult.alreadySubscribed) {
-      return sendJson(res, 409, {
-        error: 'Você já possui uma assinatura FatosBR Pro ativa vinculada a esta conta.',
-        code: 'USER_ALREADY_SUBSCRIBED'
-      });
-    }
-
-    const effectiveCharge = chargePersistenceResult.charge;
-    const effectiveChargeId = effectiveCharge.providerPaymentId || effectiveCharge.id;
-    const pixCopyPaste = effectiveCharge.qrCodeText || initialPixCopyPaste;
-
-    let qrCodeBase64 = '';
-    try {
-      qrCodeBase64 = await QRCode.toDataURL(pixCopyPaste, { width: 320, margin: 2 });
-    } catch {}
-
-    const chargeRecord = {
-      id: effectiveChargeId,
-      amount: effectiveCharge.amountCents,
-      amountFormatted: `R$ ${(effectiveCharge.amountCents / 100).toFixed(2).replace('.', ',')}`,
-      status: effectiveCharge.status,
-      description: effectiveCharge.description,
-      customer,
-      qrCode: qrCodeBase64,
-      qrCodeText: pixCopyPaste,
-      createdAt: effectiveCharge.createdAt,
-      expiresAt: new Date(new Date(effectiveCharge.createdAt).getTime() + 15 * 60 * 1000).toISOString(),
-      reused: Boolean(chargePersistenceResult.reused)
-    };
-
-    // 2. Se for nova cobrança e houver chave ativa da ZynPay, cria no gateway oficial
-    if (!chargePersistenceResult.reused && apiKey) {
+    let qrCodeBase64 = gatewayResponse.qrCodeBase64 || '';
+    if (!qrCodeBase64 && gatewayResponse.qrCodeText) {
       try {
-        const upRes = await fetch('https://api.zynpay.com.br/v1/public/charges', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${apiKey}`
-          },
-          body: JSON.stringify({
-            amount: amountCents,
-            description,
-            customer,
-            paymentMethod: 'PIX'
-          })
-        });
-
-        if (upRes.ok) {
-          const upData = await upRes.json();
-          if (upData.qrCode) chargeRecord.qrCode = upData.qrCode;
-          if (upData.qrCodeText) chargeRecord.qrCodeText = upData.qrCodeText;
-        }
-      } catch (upErr: any) {
-        console.warn('[ZynPay Gateway Notice] Não foi possível sincronizar upstream de imediato:', upErr.message);
-      }
+        qrCodeBase64 = await QRCode.toDataURL(gatewayResponse.qrCodeText, { width: 320, margin: 2 });
+      } catch {}
     }
 
     return sendJson(res, 200, {
       success: true,
-      reused: Boolean(chargePersistenceResult.reused),
-      charge: chargeRecord
+      reused: false,
+      charge: {
+        id: storedCharge.providerPaymentId,
+        amount: storedCharge.amountCents,
+        amountFormatted: planConfig.amountFormatted,
+        status: storedCharge.status,
+        description: storedCharge.description,
+        customer: { name: customerName, email: userEmail },
+        qrCode: qrCodeBase64,
+        qrCodeText: storedCharge.qrCodeText,
+        createdAt: storedCharge.createdAt,
+        expiresAt: storedCharge.expirationDate || new Date(Date.now() + 15 * 60 * 1000).toISOString()
+      }
     });
   }
 
-  // GET /api/zynpay/charges?id=... ou /api/zynpay/charges/{id}
+  // ===========================================================================
+  // GET /api/zynpay/charges?id=... ou /api/zynpay/charges/{id} (Consulta e Reconciliação)
+  // ===========================================================================
   if (req.method === 'GET') {
     const urlObj = new URL(req.url, 'http://localhost');
     let chargeId = urlObj.searchParams.get('id') || urlObj.searchParams.get('chargeId');
@@ -192,16 +280,36 @@ export default async function handler(req: any, res: any) {
     try {
       const stored = await getChargeById(chargeId);
       if (stored) {
+        // Se a cobrança local ainda estiver PENDING, tenta reconciliar ativamente com a ZynPay
+        if (stored.status === 'PENDING') {
+          try {
+            const upCharge = await fetchChargeFromGateway(stored.providerPaymentId);
+            if (upCharge && upCharge.status !== 'PENDING') {
+              stored.status = upCharge.status;
+            }
+          } catch {}
+        }
+
+        let qrCodeBase64 = '';
+        if (stored.qrCodeText) {
+          try {
+            qrCodeBase64 = await QRCode.toDataURL(stored.qrCodeText, { width: 320, margin: 2 });
+          } catch {}
+        }
+
         return sendJson(res, 200, {
           success: true,
           charge: {
-            id: stored.id,
+            id: stored.providerPaymentId,
             status: stored.status,
             amount: stored.amountCents,
             amountFormatted: `R$ ${(stored.amountCents / 100).toFixed(2).replace('.', ',')}`,
             description: stored.description,
+            qrCode: qrCodeBase64,
+            qrCodeText: stored.qrCodeText,
             createdAt: stored.createdAt,
-            paidAt: stored.paidAt
+            paidAt: stored.paidAt,
+            expiresAt: stored.expirationDate || new Date(new Date(stored.createdAt).getTime() + 15 * 60 * 1000).toISOString()
           }
         });
       }

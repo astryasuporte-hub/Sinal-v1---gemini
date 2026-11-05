@@ -5,8 +5,9 @@
  * Vercel Serverless Function: ZynPay Balance Endpoint (Admin Protected)
  */
 
-import { getServerKeys, sendJson, setCorsHeaders } from '../_lib/common';
+import { sendJson, setCorsHeaders } from '../_lib/common';
 import { verifyAdminRequest } from '../_lib/adminAuth';
+import { fetchBalanceFromGateway } from '../_lib/zynpayClient';
 import { enforceRateLimit } from '../_lib/rateLimiter';
 
 export default async function handler(req: any, res: any) {
@@ -33,61 +34,33 @@ export default async function handler(req: any, res: any) {
     });
   }
 
-  const keys = getServerKeys();
-  const apiKey = keys.ZYNPAY;
-
-  if (!apiKey) {
+  try {
+    const balance = await fetchBalanceFromGateway();
     return sendJson(res, 200, {
       success: true,
       balance: {
-        available: 0,
-        pending: 0,
-        currency: 'BRL',
-        accountStatus: 'PENDING_CONFIG',
+        available: balance.available,
+        pending: balance.pending,
+        currency: balance.currency,
+        accountStatus: 'VERIFIED',
         updatedAt: new Date().toISOString()
-      },
-      warning: 'ZYNPAY_API_KEY não configurada no ambiente.'
-    });
-  }
-
-  try {
-    const upRes = await fetch('https://api.zynpay.com.br/v1/public/balance', {
-      headers: {
-        Authorization: `Bearer ${apiKey}`
       }
     });
-
-    if (upRes.ok) {
-      const upData = await upRes.json();
+  } catch (err: any) {
+    if (err.message?.includes('GATEWAY_UNCONFIGURED')) {
       return sendJson(res, 200, {
         success: true,
         balance: {
-          available: Number(upData.available ?? upData.balance ?? 0),
-          pending: Number(upData.pending ?? 0),
+          available: 0,
+          pending: 0,
           currency: 'BRL',
-          accountStatus: 'VERIFIED',
+          accountStatus: 'PENDING_CONFIG',
           updatedAt: new Date().toISOString()
-        }
+        },
+        warning: 'ZYNPAY_API_KEY não configurada no ambiente.'
       });
     }
 
-    const errText = await upRes.text();
-    const isVerificationPending = upRes.status === 403 || errText.includes('ACCOUNT_NOT_VERIFIED');
-
-    return sendJson(res, 200, {
-      success: true,
-      balance: {
-        available: 0,
-        pending: 0,
-        currency: 'BRL',
-        accountStatus: isVerificationPending ? 'PENDING_VERIFICATION' : 'UNVERIFIED',
-        updatedAt: new Date().toISOString()
-      },
-      warning: isVerificationPending
-        ? 'Conta ZynPay em análise cadastral. Modo seguro ativo.'
-        : `ZynPay upstream status: ${upRes.status}`
-    });
-  } catch (err: any) {
     return sendJson(res, 200, {
       success: true,
       balance: {

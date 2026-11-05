@@ -20,12 +20,17 @@ import balanceHandler from '../api/zynpay/balance';
 import { isAllowedDomain } from '../api/_lib/common';
 import {
   setTestDatabaseAdapter,
+  setTestSupabaseClient,
   TestDatabaseAdapter,
   recordPendingCharge,
   getChargeById,
   checkAndLockWebhookEvent,
   confirmPaymentAndActivateSubscriptionAtomic
 } from '../api/_lib/db';
+import {
+  setTestZynPayGatewayAdapter,
+  TestZynPayGatewayAdapter
+} from '../api/_lib/zynpayClient';
 import {
   setTestRateLimiterStore,
   TestRateLimiterStore,
@@ -348,6 +353,63 @@ async function main() {
   const dbHarness = new MockDatabaseHarness();
   setTestDatabaseAdapter(dbHarness);
 
+  const mockSupabase = {
+    auth: {
+      getUser: async (token: string) => {
+        if (!token || token === 'invalid_token') {
+          return { data: { user: null }, error: new Error('Invalid token') };
+        }
+        const clean = token.trim();
+        const userId = clean.startsWith('user_') ? clean : '11111111-1111-1111-1111-111111111111';
+        const userEmail = clean.includes('@') ? clean : `${userId}@fatosbr.com.br`;
+        return {
+          data: {
+            user: {
+              id: userId,
+              email: userEmail,
+              user_metadata: { full_name: 'Usuario Autenticado' }
+            }
+          },
+          error: null
+        };
+      }
+    }
+  };
+  setTestSupabaseClient(mockSupabase);
+
+  let mockGwCounter = 1;
+  const mockGateway: TestZynPayGatewayAdapter = {
+    createCharge: async (params: any) => {
+      const chargeId = `zyn_gw_${Date.now()}_${mockGwCounter++}`;
+      return {
+        id: chargeId,
+        amount: params.amountCents,
+        currency: 'BRL',
+        status: 'PENDING',
+        description: params.description,
+        qrCodeText: `00020126580014br.gov.bcb.pix0136zynpay-${chargeId}5204000053039865405${(params.amountCents / 100).toFixed(2)}5802BR5915FATOSBR MIDIA6009SAO PAULO62070503***6304ABCD`,
+        createdAt: new Date().toISOString()
+      };
+    },
+    getCharge: async (chargeId: string) => {
+      return {
+        id: chargeId,
+        amount: 2990,
+        currency: 'BRL',
+        status: 'PAID',
+        description: 'FatosBR Pro',
+        qrCodeText: 'pix_code',
+        createdAt: new Date().toISOString()
+      };
+    },
+    getBalance: async () => ({
+      available: 1542000,
+      pending: 35000,
+      currency: 'BRL'
+    })
+  };
+  setTestZynPayGatewayAdapter(mockGateway);
+
   const rateStore = new MockRateLimitStore();
   setTestRateLimiterStore(rateStore);
 
@@ -583,16 +645,20 @@ async function main() {
   });
 
   await runTest('2.8 Respeito a billing_one_pending: Reutilização de cobrança pendente existente para o mesmo usuário', async () => {
-    const userEmail = 'mesmo.usuario@fatosbr.com.br';
+    const userId = 'user_mesmo_usuario';
+    const userEmail = `${userId}@fatosbr.com.br`;
+    const authHeader = `Bearer ${userId}`;
+
     const { res: res1, result: result1 } = createMockRes();
     const req1 = createMockReq({
       method: 'POST',
       url: '/api/zynpay/charges',
-      body: { amount: 29.90, customer: { email: userEmail, name: 'Assinante' } }
+      headers: { authorization: authHeader },
+      body: { planId: 'pro', customer: { email: userEmail, name: 'Assinante' } }
     });
     await chargesHandler(req1, res1);
     const out1 = result1();
-    assert(out1.statusCode === 200, 'Primeira cobrança deve ter sido criada com sucesso');
+    assert(out1.statusCode === 200, `Primeira cobrança deve ter sido criada com sucesso: ${JSON.stringify(out1.json)}`);
     const firstChargeId = out1.json.charge.id;
 
     // Segunda chamada para o mesmo usuário com cobrança pendente ativa
@@ -600,7 +666,8 @@ async function main() {
     const req2 = createMockReq({
       method: 'POST',
       url: '/api/zynpay/charges',
-      body: { amount: 29.90, customer: { email: userEmail, name: 'Assinante' } }
+      headers: { authorization: authHeader },
+      body: { planId: 'pro', customer: { email: userEmail, name: 'Assinante' } }
     });
     await chargesHandler(req2, res2);
     const out2 = result2();
@@ -611,15 +678,18 @@ async function main() {
   });
 
   await runTest('2.9 Bloqueio de criação de cobrança quando usuário já possui assinatura Pro ativa (USER_ALREADY_SUBSCRIBED)', async () => {
-    const userEmail = 'ja.assinante@fatosbr.com.br';
+    const userId = 'user_ja_assinante';
+    const userEmail = `${userId}@fatosbr.com.br`;
     // Ativa assinatura previamente
+    dbHarness.userSubscriptions.set(userId, 'active');
     dbHarness.userSubscriptions.set(userEmail, 'active');
 
     const { res, result } = createMockRes();
     const req = createMockReq({
       method: 'POST',
       url: '/api/zynpay/charges',
-      body: { amount: 29.90, customer: { email: userEmail, name: 'Assinante Pro' } }
+      headers: { authorization: `Bearer ${userId}` },
+      body: { planId: 'pro', customer: { email: userEmail, name: 'Assinante Pro' } }
     });
     await chargesHandler(req, res);
     const out = result();
@@ -652,20 +722,99 @@ async function main() {
   });
 
   await runTest('2.11 Concorrência: Duas requisições simultâneas de cobrança para o mesmo usuário tratadas de forma idempotente', async () => {
-    const userEmail = 'concorrente@fatosbr.com.br';
+    const userId = 'user_concorrente_ok';
+    const userEmail = `${userId}@fatosbr.com.br`;
     const reqFactory = () => {
       const { res, result } = createMockRes();
       const req = createMockReq({
         method: 'POST',
         url: '/api/zynpay/charges',
-        body: { amount: 29.90, customer: { email: userEmail, name: 'Concorrente' } }
+        headers: { authorization: `Bearer ${userId}` },
+        body: { planId: 'pro', customer: { email: userEmail, name: 'Concorrente' } }
       });
       return chargesHandler(req, res).then(() => result());
     };
 
     const [outA, outB] = await Promise.all([reqFactory(), reqFactory()]);
-    assert(outA.statusCode === 200 && outB.statusCode === 200, 'Ambas as requisições concorrentes devem concluir com sucesso');
+    assert(outA.statusCode === 200 && outB.statusCode === 200, `Ambas as requisições concorrentes devem concluir com sucesso (A:${outA.statusCode}, B:${outB.statusCode})`);
     assert(outA.json.charge.id === outB.json.charge.id, 'Ambas as requisições concorrentes devem compartilhar a mesma cobrança única');
+  });
+
+  await runTest('2.12 Autenticação obrigatória: Checkout sem cabeçalho Authorization é rejeitado com HTTP 401', async () => {
+    const { res, result } = createMockRes();
+    const req = createMockReq({
+      method: 'POST',
+      url: '/api/zynpay/charges',
+      headers: {},
+      body: { planId: 'pro' }
+    });
+    await chargesHandler(req, res);
+    const out = result();
+
+    assert(out.statusCode === 401, `Esperado HTTP 401, recebido ${out.statusCode}`);
+    assert(out.json?.code === 'UNAUTHORIZED_CHECKOUT', 'Código deve ser UNAUTHORIZED_CHECKOUT');
+  });
+
+  await runTest('2.13 Sessão inválida: Checkout com Bearer token forjado/expirado é rejeitado com HTTP 403', async () => {
+    const { res, result } = createMockRes();
+    const req = createMockReq({
+      method: 'POST',
+      url: '/api/zynpay/charges',
+      headers: { authorization: 'Bearer invalid_token' },
+      body: { planId: 'pro' }
+    });
+    await chargesHandler(req, res);
+    const out = result();
+
+    assert(out.statusCode === 403, `Esperado HTTP 403, recebido ${out.statusCode}`);
+    assert(out.json?.code === 'INVALID_SESSION', 'Código deve ser INVALID_SESSION');
+  });
+
+  await runTest('2.14 Preço controlado pelo servidor: Ignora qualquer valor fornecido pelo cliente (anti-tampering)', async () => {
+    const userId = 'user_preco_servidor';
+    const { res, result } = createMockRes();
+    const req = createMockReq({
+      method: 'POST',
+      url: '/api/zynpay/charges',
+      headers: { authorization: `Bearer ${userId}` },
+      // Tentativa maliciosa de comprar por R$ 0,01
+      body: { planId: 'pro', amount: 0.01, amountCents: 1 }
+    });
+    await chargesHandler(req, res);
+    const out = result();
+
+    assert(out.statusCode === 200, `Esperado HTTP 200, recebido ${out.statusCode}`);
+    assert(out.json?.charge?.amount === 2990, `Valor da cobrança deve ser 2990 centavos, recebido ${out.json?.charge?.amount}`);
+  });
+
+  await runTest('2.15 Proibição estrita de PIX fictício: Gateway offline retorna HTTP 503 GATEWAY_UNAVAILABLE', async () => {
+    // Configura adaptador do gateway para lançar falha de conexão/indisponibilidade
+    const failingGateway: TestZynPayGatewayAdapter = {
+      createCharge: async () => {
+        throw new Error('GATEWAY_TIMEOUT: Conexão com a ZynPay excedeu o tempo limite');
+      },
+      getCharge: async () => null,
+      getBalance: async () => ({ available: 0, pending: 0, currency: 'BRL' })
+    };
+    setTestZynPayGatewayAdapter(failingGateway);
+
+    const userId = 'user_gw_offline';
+    const { res, result } = createMockRes();
+    const req = createMockReq({
+      method: 'POST',
+      url: '/api/zynpay/charges',
+      headers: { authorization: `Bearer ${userId}` },
+      body: { planId: 'pro' }
+    });
+    await chargesHandler(req, res);
+    const out = result();
+
+    // Restaura o gateway normal
+    setTestZynPayGatewayAdapter(mockGateway);
+
+    assert(out.statusCode === 503, `Esperado HTTP 503, recebido ${out.statusCode}`);
+    assert(out.json?.code === 'GATEWAY_UNAVAILABLE', 'Código deve ser GATEWAY_UNAVAILABLE');
+    assert(!out.raw.includes('00020126580014br.gov.bcb.pix0136zyn_'), 'NUNCA deve gerar payload PIX fictício de fallback');
   });
 
   // ---------------------------------------------------------------------------

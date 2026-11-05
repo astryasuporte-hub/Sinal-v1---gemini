@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { supabase } from '../lib/supabase';
+
 export interface ZynPayCustomer {
   name?: string;
   email?: string;
@@ -153,19 +155,26 @@ class ZynPayService {
   }
 
   /**
-   * Cria uma nova cobrança Pix na ZynPay via proxy backend
+   * Cria uma nova cobrança Pix oficial na ZynPay via proxy backend autenticado
    */
   public async createPixCharge(params: {
-    amountCents: number;
+    amountCents?: number;
+    planId?: string;
     description: string;
     customer?: ZynPayCustomer;
-  }): Promise<{ success: boolean; charge?: ZynPayCharge; error?: string; isSandbox?: boolean }> {
+  }): Promise<{ success: boolean; charge?: ZynPayCharge; error?: string; isSandbox?: boolean; reused?: boolean }> {
     try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (session?.access_token) {
+        headers['Authorization'] = `Bearer ${session.access_token}`;
+      }
+
       const response = await fetch('/api/zynpay/charges', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
-          amount: params.amountCents,
+          planId: params.planId || 'pro',
           description: params.description,
           customer: params.customer
         })

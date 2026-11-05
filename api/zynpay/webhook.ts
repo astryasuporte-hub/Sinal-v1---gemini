@@ -17,6 +17,7 @@
 import { sendJson, setCorsHeaders, readRawAndJsonBody, getServerKeys, getClientIp } from '../_lib/common';
 import { verifyWebhookSignature } from '../_lib/crypto';
 import { checkAndLockWebhookEvent, getChargeById, confirmPaymentAndActivateSubscriptionAtomic } from '../_lib/db';
+import { fetchChargeFromGateway } from '../_lib/zynpayClient';
 import { broadcastBillingEvent } from '../_lib/eventsHub';
 import { enforceRateLimit } from '../_lib/rateLimiter';
 
@@ -145,59 +146,45 @@ export default async function handler(req: any, res: any) {
   // Regra de segurança: Se a validação não puder ser concluída, manter confirmação automática desabilitada
   let verifiedAmountCents = storedCharge.amountCents;
 
-  if (keys.ZYNPAY) {
-    try {
-      const verifyRes = await fetch(`https://api.zynpay.com.br/v1/public/charges/${encodeURIComponent(chargeId)}`, {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${keys.ZYNPAY}`,
-          'Content-Type': 'application/json'
-        }
-      });
-
-      if (!verifyRes.ok) {
-        console.error(`[Security Alert] Reconciliação upstream com ZynPay retornou status HTTP ${verifyRes.status}`);
-        return sendJson(res, 502, {
-          error: 'Falha ao validar a cobrança diretamente com o provedor ZynPay.',
-          code: 'UPSTREAM_VERIFICATION_FAILED'
-        });
-      }
-
-      const upCharge = await verifyRes.json();
-      const upstreamStatus = String(upCharge.status || upCharge.data?.status || '').toUpperCase();
-      const upstreamAmountCents = Number(upCharge.amount || upCharge.amountCents || 0);
-
-      if (upstreamStatus !== 'PAID' && upstreamStatus !== 'CONFIRMED') {
-        console.warn(`[Security Alert] Status upstream não confirmado (${upstreamStatus}) para cobrança ${chargeId}`);
-        return sendJson(res, 422, {
-          error: 'Status da cobrança não confirmado como pago no provedor oficial.',
-          code: 'PAYMENT_NOT_CONFIRMED'
-        });
-      }
-
-      if (upstreamAmountCents > 0 && upstreamAmountCents !== storedCharge.amountCents) {
-        console.error(`[Security Tampering] Valor divergente: esperado ${storedCharge.amountCents}, upstream ${upstreamAmountCents}`);
-        return sendJson(res, 422, {
-          error: 'Valor pago diverge do valor registrado na cobrança.',
-          code: 'AMOUNT_MISMATCH'
-        });
-      }
-
-      verifiedAmountCents = upstreamAmountCents || storedCharge.amountCents;
-    } catch (err: any) {
-      console.error(`[Network Error] Falha de comunicação com API ZynPay: ${err.message}`);
-      return sendJson(res, 503, {
-        error: 'Erro de comunicação ao validar pagamento com o provedor.',
-        code: 'COMMUNICATION_ERROR'
+  try {
+    const upCharge = await fetchChargeFromGateway(chargeId);
+    if (!upCharge) {
+      console.warn(`[Security Alert] Cobrança não encontrada na ZynPay oficial: ${chargeId}`);
+      return sendJson(res, 404, {
+        error: 'Cobrança não localizada no provedor oficial ZynPay.',
+        code: 'UPSTREAM_CHARGE_NOT_FOUND'
       });
     }
-  } else {
-    // Caso ZYNPAY_API_KEY não esteja configurada no ambiente:
-    // Conforme especificação: "Se a validação não puder ser concluída, manter a confirmação automática desabilitada."
-    console.warn('[Security Notice] ZYNPAY_API_KEY ausente. Confirmação automática mantida desabilitada.');
-    return sendJson(res, 422, {
-      error: 'Validação upstream desabilitada. Cobrança registrada para conciliação manual.',
-      code: 'AUTOMATIC_CONFIRMATION_DISABLED'
+
+    if (upCharge.status !== 'PAID') {
+      console.warn(`[Security Alert] Status upstream não confirmado (${upCharge.status}) para cobrança ${chargeId}`);
+      return sendJson(res, 422, {
+        error: 'Status da cobrança não confirmado como pago no provedor oficial.',
+        code: 'PAYMENT_NOT_CONFIRMED'
+      });
+    }
+
+    if (upCharge.amount > 0 && upCharge.amount !== storedCharge.amountCents) {
+      console.error(`[Security Tampering] Valor divergente: esperado ${storedCharge.amountCents}, upstream ${upCharge.amount}`);
+      return sendJson(res, 422, {
+        error: 'Valor pago diverge do valor registrado na cobrança.',
+        code: 'AMOUNT_MISMATCH'
+      });
+    }
+
+    verifiedAmountCents = upCharge.amount || storedCharge.amountCents;
+  } catch (err: any) {
+    if (err.message?.includes('GATEWAY_UNCONFIGURED')) {
+      console.warn('[Security Notice] ZYNPAY_API_KEY ausente. Confirmação automática mantida desabilitada.');
+      return sendJson(res, 422, {
+        error: 'Validação upstream desabilitada. Cobrança registrada para conciliação manual.',
+        code: 'AUTOMATIC_CONFIRMATION_DISABLED'
+      });
+    }
+    console.error(`[Network Error] Falha de comunicação com API ZynPay: ${err.message}`);
+    return sendJson(res, 503, {
+      error: 'Erro de comunicação ao validar pagamento com o provedor.',
+      code: 'COMMUNICATION_ERROR'
     });
   }
 
