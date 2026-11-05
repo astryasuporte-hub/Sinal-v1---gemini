@@ -114,12 +114,16 @@ class MockDatabaseHarness implements TestDatabaseAdapter {
 
   async recordPendingCharge(charge: any): Promise<boolean> {
     if (this.forceError) throw new Error(this.forceError);
-    this.charges.set(charge.id, {
-      id: charge.id,
+    const amount = charge.amount ?? charge.amountCents ?? 2990;
+    const paymentId = charge.providerPaymentId || charge.id;
+    this.charges.set(paymentId, {
+      id: 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', // UUID interno
+      provider_payment_id: paymentId,
       user_email: charge.userEmail,
-      user_id: charge.userId || null,
-      amount_cents: charge.amountCents,
-      currency: 'BRL',
+      user_id: charge.userId || '11111111-1111-1111-1111-111111111111',
+      amount,
+      amount_cents: amount,
+      currency: charge.currency || 'BRL',
       status: 'PENDING',
       provider: 'zynpay',
       description: charge.description,
@@ -134,15 +138,18 @@ class MockDatabaseHarness implements TestDatabaseAdapter {
     if (!c) return null;
     return {
       id: c.id,
+      providerPaymentId: c.provider_payment_id || c.id,
       userId: c.user_id,
       userEmail: c.user_email,
-      amountCents: c.amount_cents,
+      amount: c.amount,
+      amountCents: c.amount,
       currency: c.currency,
       status: c.status,
       description: c.description,
       createdAt: c.created_at,
       updatedAt: c.created_at,
-      paidAt: c.paid_at
+      approvedAt: c.approved_at,
+      paidAt: c.approved_at
     };
   }
 
@@ -152,9 +159,10 @@ class MockDatabaseHarness implements TestDatabaseAdapter {
       return { isDuplicate: true };
     }
     this.webhookEvents.set(eventId, {
-      id: eventId,
+      id: 'b0eebc99-9c0b-4ef8-bb6d-6bb9bd380b22',
+      provider_event_id: eventId,
       provider,
-      status: 'PROCESSING',
+      processed: true,
       created_at: new Date().toISOString()
     });
     return { isDuplicate: false };
@@ -168,14 +176,16 @@ class MockDatabaseHarness implements TestDatabaseAdapter {
   }> {
     if (this.forceError) throw new Error(this.forceError);
 
-    // 1. Idempotência
+    const paymentId = params.providerPaymentId || params.chargeId;
+
+    // 1. Idempotência em internal.billing_events
     const existingEvt = this.webhookEvents.get(params.eventId);
-    if (existingEvt && existingEvt.status === 'COMPLETED') {
+    if (existingEvt && existingEvt.processed) {
       return { success: true, duplicate: true };
     }
 
-    // 2. Trava e verificação da cobrança
-    const charge = this.charges.get(params.chargeId);
+    // 2. Trava e verificação da cobrança em internal.billing_payments
+    const charge = this.charges.get(paymentId);
     if (!charge) {
       return { success: false, error: 'Cobrança não encontrada', error_code: 'CHARGE_NOT_FOUND' };
     }
@@ -188,25 +198,30 @@ class MockDatabaseHarness implements TestDatabaseAdapter {
       return { success: false, error: 'Status anterior inválido', error_code: 'INVALID_PREVIOUS_STATUS' };
     }
 
-    // 4. Validação de valor e moeda
-    if (charge.amount_cents !== params.expectedAmountCents) {
+    // 4. Validação de valor e moeda (coluna amount)
+    const expectedAmount = params.expectedAmount ?? params.expectedAmountCents;
+    if (charge.amount !== expectedAmount) {
       return { success: false, error: 'Valor divergente', error_code: 'AMOUNT_MISMATCH' };
     }
     if ((charge.currency || 'BRL') !== (params.expectedCurrency || 'BRL')) {
       return { success: false, error: 'Moeda divergente', error_code: 'CURRENCY_MISMATCH' };
     }
 
-    // 5. Atualização atômica
+    // 5. Atualização atômica em internal.billing_payments
     charge.status = 'PAID';
-    charge.paid_at = new Date().toISOString();
+    charge.approved_at = new Date().toISOString();
     this.webhookEvents.set(params.eventId, {
-      id: params.eventId,
-      status: 'COMPLETED',
-      charge_id: params.chargeId
+      id: 'c0eebc99-9c0b-4ef8-bb6d-6bb9bd380c33',
+      provider_event_id: params.eventId,
+      processed: true,
+      context_id: charge.id
     });
 
-    // 6. Ativação da assinatura do usuário
-    this.userSubscriptions.set(charge.user_email.toLowerCase(), 'ACTIVE');
+    // 6. Ativação da assinatura do usuário na tabela canônica public.subscriptions
+    this.userSubscriptions.set(charge.user_id, 'active');
+    if (charge.user_email) {
+      this.userSubscriptions.set(charge.user_email.toLowerCase(), 'ACTIVE');
+    }
 
     return { success: true, duplicate: false };
   }

@@ -1,70 +1,23 @@
 -- ==============================================================================
--- FATOSBR — MIGRAÇÃO VERSIONADA 20261104000001 (VERSÃO CORRIGIDA)
--- SEGURANÇA FINANCEIRA, TRANSAÇÕES ATÔMICAS, RATE LIMITING E RBAC
+-- FATOSBR — MIGRAÇÃO VERSIONADA 20261104000001 (COMPATIBILIDADE SCHEMA REAL)
+-- INTEGRAÇÃO FINANCEIRA: internal.billing_payments, internal.billing_events E public.subscriptions
 -- ==============================================================================
--- DEPENDÊNCIAS: PostgreSQL 14+, Supabase Auth (auth.users, auth.role, auth.uid).
--- PRÉ-CONDIÇÕES: Schema auth ativo. Extensão pgcrypto ou gen_random_uuid() disponível.
--- TABELA REAL DE ASSINATURAS: internal.billing_subscriptions (NÃO altera public.profiles).
--- AUTORIZAÇÃO: RBAC via public.user_roles e public.is_admin(). Sem e-mails hardcoded.
--- PERMISSÕES RPC: REVOKE de PUBLIC, anon e authenticated. GRANT exclusivo para service_role.
--- SCHEMA EXPOSURE: RPCs em public com search_path = internal, public, pg_temp.
---   Tabelas financeiras isoladas em internal (não expostas pela Data API do PostgREST).
+-- 1. Assegura a compatibilidade estrita com o banco PostgreSQL real do Supabase:
+--    - internal.billing_payments: id UUID, provider_payment_id TEXT, amount INTEGER
+--    - internal.billing_events: id UUID, provider_event_id TEXT, payload JSONB, processed BOOLEAN
+--    - public.subscriptions: id UUID, user_id UUID, plan TEXT, status TEXT (FONTE CANÔNICA PRO)
+-- 2. NÃO cria internal.billing_subscriptions (evita fonte paralela de assinaturas).
+-- 3. NÃO insere colunas artificiais (user_email, amount_cents) em billing_payments.
+-- 4. NÃO altera public.profiles.
+-- 5. Rate limiting distribuído em internal.rate_limit_counters.
+-- 6. RBAC administrativo em public.user_roles e função public.is_admin().
+-- 7. RPCs privilegiadas com SECURITY DEFINER, search_path seguro e acesso exclusivo service_role.
 -- ==============================================================================
 
--- 1. Garantir existência do schema internal para dados financeiros sensíveis
+-- 1. Garantir existência do schema internal
 CREATE SCHEMA IF NOT EXISTS internal;
 
--- 2. Tabela Canônica de Cobranças Pix (internal.billing_payments)
-CREATE TABLE IF NOT EXISTS internal.billing_payments (
-  id TEXT PRIMARY KEY,
-  user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
-  user_email TEXT NOT NULL,
-  amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
-  currency TEXT NOT NULL DEFAULT 'BRL' CHECK (currency = 'BRL'),
-  status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'PROCESSING', 'PAID', 'FAILED', 'EXPIRED', 'CANCELLED')),
-  provider TEXT NOT NULL DEFAULT 'zynpay',
-  description TEXT,
-  qr_code_text TEXT,
-  metadata JSONB DEFAULT '{}'::jsonb,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  paid_at TIMESTAMPTZ
-);
-
--- 3. Tabela de Idempotência e Auditoria de Webhooks (internal.billing_events)
-CREATE TABLE IF NOT EXISTS internal.billing_events (
-  id TEXT PRIMARY KEY,
-  provider TEXT NOT NULL DEFAULT 'zynpay',
-  event_type TEXT NOT NULL,
-  charge_id TEXT REFERENCES internal.billing_payments(id) ON DELETE SET NULL,
-  amount_cents INTEGER,
-  raw_payload JSONB DEFAULT '{}'::jsonb,
-  status TEXT NOT NULL DEFAULT 'PROCESSING' CHECK (status IN ('PROCESSING', 'COMPLETED', 'FAILED', 'REJECTED')),
-  processed_at TIMESTAMPTZ DEFAULT NOW(),
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
--- 4. Tabela Real de Assinaturas (internal.billing_subscriptions)
--- Fonte de verdade canônica do status Pro da FatosBR
-CREATE TABLE IF NOT EXISTS internal.billing_subscriptions (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
-  user_email TEXT NOT NULL,
-  plan_name TEXT NOT NULL DEFAULT 'FatosBR Pro',
-  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'TRIAL_ACTIVE', 'PAST_DUE', 'CANCELED', 'EXPIRED')),
-  amount_cents INTEGER NOT NULL DEFAULT 2990,
-  currency TEXT NOT NULL DEFAULT 'BRL',
-  current_period_start TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  current_period_end TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '30 days'),
-  cancel_at_period_end BOOLEAN DEFAULT FALSE,
-  payment_method TEXT DEFAULT 'PIX',
-  gateway TEXT DEFAULT 'zynpay',
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE(user_id)
-);
-
--- 5. Tabela de Contadores de Rate Limiting Distribuído (internal.rate_limit_counters)
+-- 2. Tabela de Contadores de Rate Limiting Distribuído
 CREATE TABLE IF NOT EXISTS internal.rate_limit_counters (
   key TEXT PRIMARY KEY,
   tokens INTEGER NOT NULL DEFAULT 1,
@@ -72,28 +25,32 @@ CREATE TABLE IF NOT EXISTS internal.rate_limit_counters (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- 6. Tabela de RBAC Real (public.user_roles) — Elimina e-mails hardcoded
+-- 3. Tabela de RBAC Administrativo (Preserva os papéis do SaaS)
 CREATE TABLE IF NOT EXISTS public.user_roles (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-  role TEXT NOT NULL CHECK (role IN ('super_admin', 'admin', 'editor', 'subscriber')),
+  role TEXT NOT NULL CHECK (role IN ('super_admin', 'admin', 'editor', 'support', 'viewer', 'subscriber')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE(user_id, role)
 );
 
--- 7. Índices de Otimização e Concorrência
-CREATE INDEX IF NOT EXISTS idx_billing_payments_user_id ON internal.billing_payments (user_id);
-CREATE INDEX IF NOT EXISTS idx_billing_payments_user_email ON internal.billing_payments (user_email);
-CREATE INDEX IF NOT EXISTS idx_billing_payments_status ON internal.billing_payments (status);
-CREATE INDEX IF NOT EXISTS idx_billing_payments_created_at ON internal.billing_payments (created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_billing_events_charge_id ON internal.billing_events (charge_id);
-CREATE INDEX IF NOT EXISTS idx_billing_events_created_at ON internal.billing_events (created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_billing_subscriptions_user ON internal.billing_subscriptions (user_id);
-CREATE INDEX IF NOT EXISTS idx_billing_subscriptions_status ON internal.billing_subscriptions (status);
-CREATE INDEX IF NOT EXISTS idx_rate_limit_counters_window ON internal.rate_limit_counters (window_start);
-CREATE INDEX IF NOT EXISTS idx_user_roles_user ON public.user_roles (user_id);
+-- 4. Índices de Performance e Concorrência
+CREATE INDEX IF NOT EXISTS idx_billing_payments_provider_payment_id 
+  ON internal.billing_payments (provider_payment_id);
+CREATE INDEX IF NOT EXISTS idx_billing_payments_user_id 
+  ON internal.billing_payments (user_id);
+CREATE INDEX IF NOT EXISTS idx_billing_payments_status 
+  ON internal.billing_payments (status);
+CREATE INDEX IF NOT EXISTS idx_billing_events_provider_event 
+  ON internal.billing_events (provider, provider_event_id);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_user_status 
+  ON public.subscriptions (user_id, status);
+CREATE INDEX IF NOT EXISTS idx_rate_limit_counters_window 
+  ON internal.rate_limit_counters (window_start);
+CREATE INDEX IF NOT EXISTS idx_user_roles_user 
+  ON public.user_roles (user_id);
 
--- 8. Função de Autorização RBAC (public.is_admin)
+-- 5. Função de Autorização RBAC (public.is_admin)
 CREATE OR REPLACE FUNCTION public.is_admin()
 RETURNS BOOLEAN
 LANGUAGE plpgsql
@@ -101,7 +58,7 @@ SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
 BEGIN
-  -- 1. Chamadas vindas do backend com a service_role key
+  -- 1. Acesso do backend service_role
   IF auth.role() = 'service_role' THEN
     RETURN TRUE;
   END IF;
@@ -112,7 +69,7 @@ BEGIN
     RETURN TRUE;
   END IF;
 
-  -- 3. Consulta estruturada na tabela public.user_roles
+  -- 3. Consulta de privilégios na tabela public.user_roles
   IF auth.uid() IS NOT NULL AND EXISTS (
     SELECT 1 FROM public.user_roles 
     WHERE user_id = auth.uid() 
@@ -128,33 +85,11 @@ $$;
 REVOKE EXECUTE ON FUNCTION public.is_admin() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.is_admin() TO anon, authenticated, service_role;
 
--- 9. View Segura para Consulta de Assinaturas pelo Frontend
--- Permite ao usuário autenticado ler apenas a sua própria assinatura ativa
-CREATE OR REPLACE VIEW public.user_subscriptions
-WITH (security_invoker = true) AS
-SELECT 
-  id,
-  user_id,
-  user_email,
-  plan_name,
-  status,
-  amount_cents,
-  currency,
-  current_period_start,
-  current_period_end,
-  gateway,
-  created_at,
-  updated_at
-FROM internal.billing_subscriptions;
-
--- 10. Habilitar Row Level Security (RLS)
-ALTER TABLE internal.billing_payments ENABLE ROW LEVEL SECURITY;
-ALTER TABLE internal.billing_events ENABLE ROW LEVEL SECURITY;
-ALTER TABLE internal.billing_subscriptions ENABLE ROW LEVEL SECURITY;
+-- 6. Habilitar RLS nas tabelas gerenciadas
 ALTER TABLE internal.rate_limit_counters ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.user_roles ENABLE ROW LEVEL SECURITY;
 
--- 11. Políticas de RLS Sem E-mails Hardcoded
+-- Políticas para public.user_roles
 DROP POLICY IF EXISTS "user_roles_select_own" ON public.user_roles;
 CREATE POLICY "user_roles_select_own" ON public.user_roles
   FOR SELECT USING (auth.uid() = user_id OR public.is_admin() = TRUE);
@@ -164,36 +99,13 @@ CREATE POLICY "user_roles_service_role" ON public.user_roles
   FOR ALL USING (auth.role() = 'service_role')
   WITH CHECK (auth.role() = 'service_role');
 
-DROP POLICY IF EXISTS "billing_payments_select_own" ON internal.billing_payments;
-CREATE POLICY "billing_payments_select_own" ON internal.billing_payments
-  FOR SELECT USING (auth.uid() = user_id OR public.is_admin() = TRUE);
-
-DROP POLICY IF EXISTS "billing_payments_service_role" ON internal.billing_payments;
-CREATE POLICY "billing_payments_service_role" ON internal.billing_payments
-  FOR ALL USING (auth.role() = 'service_role')
-  WITH CHECK (auth.role() = 'service_role');
-
-DROP POLICY IF EXISTS "billing_subscriptions_select_own" ON internal.billing_subscriptions;
-CREATE POLICY "billing_subscriptions_select_own" ON internal.billing_subscriptions
-  FOR SELECT USING (auth.uid() = user_id OR public.is_admin() = TRUE);
-
-DROP POLICY IF EXISTS "billing_subscriptions_service_role" ON internal.billing_subscriptions;
-CREATE POLICY "billing_subscriptions_service_role" ON internal.billing_subscriptions
-  FOR ALL USING (auth.role() = 'service_role')
-  WITH CHECK (auth.role() = 'service_role');
-
-DROP POLICY IF EXISTS "billing_events_service_role" ON internal.billing_events;
-CREATE POLICY "billing_events_service_role" ON internal.billing_events
-  FOR ALL USING (auth.role() = 'service_role')
-  WITH CHECK (auth.role() = 'service_role');
-
+-- Políticas para internal.rate_limit_counters
 DROP POLICY IF EXISTS "rate_limit_service_role" ON internal.rate_limit_counters;
 CREATE POLICY "rate_limit_service_role" ON internal.rate_limit_counters
   FOR ALL USING (auth.role() = 'service_role')
   WITH CHECK (auth.role() = 'service_role');
 
--- 12. RPC: Incremento Atômico de Rate Limiting com Menor Privilégio
--- Reside em public para compatibilidade com PostgREST Data API, com execução restrita a service_role
+-- 7. RPC: Rate Limiting Distribuído com Menor Privilégio
 CREATE OR REPLACE FUNCTION public.check_and_increment_rate_limit(
   p_key TEXT,
   p_max_requests INTEGER,
@@ -268,18 +180,18 @@ BEGIN
 END;
 $$;
 
--- Revogação e concessão explícita de permissões (Problema B resolvido)
+-- Permissões estritas da RPC de rate limiting
 REVOKE ALL ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) FROM anon;
 REVOKE ALL ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) FROM authenticated;
 GRANT EXECUTE ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) TO service_role;
 
--- 13. RPC: Confirmação Atômica de Pagamento & Ativação de Assinatura
--- Executa as 12 etapas de validação transacional e ativação em internal.billing_subscriptions
+-- 8. RPC: Confirmação Financeira Atômica & Ativação de Assinatura (Schema Real)
+-- Integra: internal.billing_payments, internal.billing_events e public.subscriptions
 CREATE OR REPLACE FUNCTION public.confirm_payment_and_activate_subscription_atomic(
-  p_charge_id TEXT,
+  p_provider_payment_id TEXT,
   p_event_id TEXT,
-  p_expected_amount_cents INTEGER,
+  p_expected_amount INTEGER,
   p_expected_currency TEXT DEFAULT 'BRL',
   p_provider TEXT DEFAULT 'zynpay',
   p_raw_payload JSONB DEFAULT '{}'::jsonb
@@ -291,28 +203,34 @@ SET search_path = internal, public, pg_temp
 AS $$
 DECLARE
   v_charge RECORD;
+  v_user_id UUID;
   v_sub_updated_rows INTEGER := 0;
   v_now TIMESTAMPTZ := clock_timestamp();
 BEGIN
-  -- ETAPA 1: CONTROLE DE ACESSO MANDATÓRIO — Bloqueio de execução direta pelo frontend
+  -- ETAPA 1: CONTROLE DE ACESSO MANDATÓRIO — Bloqueio estrito de execução direta pelo cliente
   IF current_user NOT IN ('service_role', 'postgres', 'supabase_admin') AND COALESCE(auth.role(), '') <> 'service_role' THEN
-    RAISE EXCEPTION 'Acesso negado: execução permitida exclusivamente pelo backend autorizado (service_role).'
+    RAISE EXCEPTION 'Acesso negado: operação restrita ao backend service_role'
       USING ERRCODE = '42501';
   END IF;
 
-  -- ETAPA 2: Validação rigorosa dos parâmetros de entrada
-  IF p_charge_id IS NULL OR length(trim(p_charge_id)) = 0 THEN
-    RETURN jsonb_build_object('success', false, 'error_code', 'INVALID_PARAM', 'error', 'ID da cobrança obrigatório.');
+  -- ETAPA 2: Validação rigorosa dos parâmetros
+  IF p_provider_payment_id IS NULL OR length(trim(p_provider_payment_id)) = 0 THEN
+    RETURN jsonb_build_object('success', false, 'error_code', 'INVALID_PARAM', 'error', 'Identificador de pagamento obrigatório.');
   END IF;
   IF p_event_id IS NULL OR length(trim(p_event_id)) = 0 THEN
-    RETURN jsonb_build_object('success', false, 'error_code', 'INVALID_PARAM', 'error', 'ID do evento obrigatório.');
+    RETURN jsonb_build_object('success', false, 'error_code', 'INVALID_PARAM', 'error', 'Identificador de evento obrigatório.');
   END IF;
-  IF p_expected_amount_cents <= 0 THEN
+  IF p_expected_amount <= 0 THEN
     RETURN jsonb_build_object('success', false, 'error_code', 'INVALID_PARAM', 'error', 'Valor esperado deve ser maior que zero.');
   END IF;
 
-  -- ETAPA 3: Idempotência estrita — Se o evento já foi concluído, retorna duplicado
-  IF EXISTS (SELECT 1 FROM internal.billing_events WHERE id = p_event_id AND status = 'COMPLETED') THEN
+  -- ETAPA 3: Idempotência do evento em internal.billing_events
+  IF EXISTS (
+    SELECT 1 FROM internal.billing_events 
+    WHERE provider = p_provider 
+      AND provider_event_id = p_event_id 
+      AND processed = TRUE
+  ) THEN
     RETURN jsonb_build_object(
       'success', true,
       'duplicate', true,
@@ -320,10 +238,13 @@ BEGIN
     );
   END IF;
 
-  -- ETAPA 4: Localiza e bloqueia a linha de cobrança para prevenir race conditions (SELECT ... FOR UPDATE)
+  -- ETAPA 4: Bloqueia o registro do pagamento (SELECT ... FOR UPDATE)
+  -- Suporta busca por provider_payment_id ou por id UUID interno
   SELECT * INTO v_charge
   FROM internal.billing_payments
-  WHERE id = p_charge_id
+  WHERE provider_payment_id = p_provider_payment_id
+     OR (p_provider_payment_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' AND id = p_provider_payment_id::UUID)
+  LIMIT 1
   FOR UPDATE;
 
   IF NOT FOUND THEN
@@ -334,7 +255,24 @@ BEGIN
     );
   END IF;
 
-  -- ETAPA 5: Validação de provedor
+  -- ETAPA 5: Resolver usuário vinculado à cobrança
+  v_user_id := v_charge.user_id;
+  IF v_user_id IS NULL AND v_charge.checkout_data ? 'user_email' THEN
+    SELECT u.id INTO v_user_id
+    FROM auth.users u
+    WHERE LOWER(TRIM(u.email)) = LOWER(TRIM(v_charge.checkout_data ->> 'user_email'))
+    LIMIT 1;
+  END IF;
+
+  IF v_user_id IS NULL THEN
+    RETURN jsonb_build_object(
+      'success', false,
+      'error_code', 'USER_NOT_FOUND',
+      'error', 'Cobrança não está vinculada a um usuário válido do sistema.'
+    );
+  END IF;
+
+  -- ETAPA 6: Validação de provedor
   IF COALESCE(v_charge.provider, 'zynpay') <> COALESCE(p_provider, 'zynpay') THEN
     RETURN jsonb_build_object(
       'success', false,
@@ -343,7 +281,7 @@ BEGIN
     );
   END IF;
 
-  -- ETAPA 6: Validação do status anterior
+  -- ETAPA 7: Validação do status anterior
   IF v_charge.status = 'PAID' THEN
     RETURN jsonb_build_object(
       'success', true,
@@ -360,16 +298,16 @@ BEGIN
     );
   END IF;
 
-  -- ETAPA 7: Validação estrita de valor (Anti-Tampering)
-  IF v_charge.amount_cents <> p_expected_amount_cents THEN
+  -- ETAPA 8: Validação estrita de valor (Anti-Tampering)
+  IF v_charge.amount <> p_expected_amount THEN
     RETURN jsonb_build_object(
       'success', false,
       'error_code', 'AMOUNT_MISMATCH',
-      'error', format('Valor divergente: esperado %s centavos, recebido %s centavos.', v_charge.amount_cents, p_expected_amount_cents)
+      'error', format('Valor divergente: esperado %s centavos, recebido %s centavos.', v_charge.amount, p_expected_amount)
     );
   END IF;
 
-  -- ETAPA 8: Validação estrita de moeda
+  -- ETAPA 9: Validação estrita de moeda
   IF COALESCE(v_charge.currency, 'BRL') <> COALESCE(p_expected_currency, 'BRL') THEN
     RETURN jsonb_build_object(
       'success', false,
@@ -378,138 +316,107 @@ BEGIN
     );
   END IF;
 
-  -- ETAPA 9: Registro do evento de webhook idempotente
+  -- ETAPA 10: Registrar evento financeiro em internal.billing_events
   INSERT INTO internal.billing_events (
     id,
     provider,
+    provider_event_id,
     event_type,
-    charge_id,
-    amount_cents,
-    raw_payload,
-    status,
+    payload,
+    processed,
+    processed_at,
+    context,
+    context_id,
     created_at
   ) VALUES (
-    p_event_id,
+    gen_random_uuid(),
     p_provider,
+    p_event_id,
     'charge.paid',
-    p_charge_id,
-    p_expected_amount_cents,
     p_raw_payload,
-    'COMPLETED',
+    TRUE,
+    v_now,
+    'payment',
+    v_charge.id::TEXT,
     v_now
-  )
-  ON CONFLICT (id) DO UPDATE
-  SET 
-    status = 'COMPLETED',
-    processed_at = v_now,
-    charge_id = p_charge_id,
-    amount_cents = p_expected_amount_cents;
+  );
 
-  -- ETAPA 10: Atualização do status da cobrança para PAID
+  -- ETAPA 11: Atualizar pagamento para status PAID em internal.billing_payments
   UPDATE internal.billing_payments
   SET 
     status = 'PAID',
-    paid_at = v_now,
+    approved_at = v_now,
+    last_synced_at = v_now,
     updated_at = v_now
-  WHERE id = p_charge_id;
+  WHERE id = v_charge.id;
 
-  -- ETAPA 11: Ativação da assinatura Pro em internal.billing_subscriptions (NÃO altera public.profiles)
-  IF v_charge.user_id IS NOT NULL THEN
-    INSERT INTO internal.billing_subscriptions (
-      user_id,
-      user_email,
-      plan_name,
-      status,
-      amount_cents,
-      currency,
-      current_period_start,
-      current_period_end,
-      gateway,
-      updated_at
-    ) VALUES (
-      v_charge.user_id,
-      v_charge.user_email,
-      'FatosBR Pro',
-      'ACTIVE',
-      v_charge.amount_cents,
-      v_charge.currency,
-      v_now,
-      v_now + INTERVAL '30 days',
-      p_provider,
-      v_now
-    )
-    ON CONFLICT (user_id) DO UPDATE
+  -- ETAPA 12: Atualizar ou Inserir Assinatura na Tabela Canônica (public.subscriptions)
+  IF EXISTS (SELECT 1 FROM public.subscriptions WHERE user_id = v_user_id) THEN
+    UPDATE public.subscriptions
     SET 
-      status = 'ACTIVE',
-      plan_name = 'FatosBR Pro',
-      amount_cents = EXCLUDED.amount_cents,
-      currency = EXCLUDED.currency,
+      plan = 'pro',
+      status = 'active',
       current_period_start = v_now,
       current_period_end = v_now + INTERVAL '30 days',
-      gateway = EXCLUDED.gateway,
-      updated_at = v_now;
+      cancel_at_period_end = FALSE,
+      provider = p_provider,
+      provider_subscription_id = COALESCE(v_charge.provider_payment_id, p_provider_payment_id),
+      billing_updated_at = v_now,
+      updated_at = v_now
+    WHERE user_id = v_user_id;
 
     GET DIAGNOSTICS v_sub_updated_rows = ROW_COUNT;
   ELSE
-    -- Se não houver user_id explícito na cobrança, resolve por email via auth.users
-    INSERT INTO internal.billing_subscriptions (
+    INSERT INTO public.subscriptions (
+      id,
       user_id,
-      user_email,
-      plan_name,
+      plan,
       status,
-      amount_cents,
-      currency,
       current_period_start,
       current_period_end,
-      gateway,
+      cancel_at_period_end,
+      provider,
+      provider_subscription_id,
+      billing_updated_at,
+      created_at,
       updated_at
-    )
-    SELECT 
-      u.id,
-      v_charge.user_email,
-      'FatosBR Pro',
-      'ACTIVE',
-      v_charge.amount_cents,
-      v_charge.currency,
+    ) VALUES (
+      gen_random_uuid(),
+      v_user_id,
+      'pro',
+      'active',
       v_now,
       v_now + INTERVAL '30 days',
+      FALSE,
       p_provider,
+      COALESCE(v_charge.provider_payment_id, p_provider_payment_id),
+      v_now,
+      v_now,
       v_now
-    FROM auth.users u
-    WHERE LOWER(TRIM(u.email)) = LOWER(TRIM(v_charge.user_email))
-    LIMIT 1
-    ON CONFLICT (user_id) DO UPDATE
-    SET 
-      status = 'ACTIVE',
-      plan_name = 'FatosBR Pro',
-      amount_cents = EXCLUDED.amount_cents,
-      currency = EXCLUDED.currency,
-      current_period_start = v_now,
-      current_period_end = v_now + INTERVAL '30 days',
-      gateway = EXCLUDED.gateway,
-      updated_at = v_now;
+    );
 
     GET DIAGNOSTICS v_sub_updated_rows = ROW_COUNT;
   END IF;
 
-  -- ETAPA 12: Validação de atomicidade — Se a assinatura não pôde ser ativada, reverte toda a transação
-  IF v_sub_updated_rows = 0 AND v_charge.user_id IS NOT NULL THEN
-    RAISE EXCEPTION 'FALHA_ATOMICIDADE: Não foi possível atualizar a assinatura em internal.billing_subscriptions.'
+  -- ETAPA 13: Validação de atomicidade — Rollback se a assinatura não foi ativada
+  IF v_sub_updated_rows = 0 THEN
+    RAISE EXCEPTION 'FALHA_ATOMICIDADE: Não foi possível atualizar a assinatura do usuário em public.subscriptions.'
       USING ERRCODE = 'P0001';
   END IF;
 
   RETURN jsonb_build_object(
     'success', true,
     'duplicate', false,
-    'charge_id', p_charge_id,
-    'user_email', v_charge.user_email,
-    'amount_cents', p_expected_amount_cents,
-    'paid_at', v_now
+    'charge_id', v_charge.id,
+    'provider_payment_id', COALESCE(v_charge.provider_payment_id, p_provider_payment_id),
+    'user_id', v_user_id,
+    'amount', v_charge.amount,
+    'approved_at', v_now
   );
 END;
 $$;
 
--- Revogação e concessão explícita de permissões (Problema B resolvido)
+-- Permissões estritas da RPC de confirmação financeira
 REVOKE ALL ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) FROM anon;
 REVOKE ALL ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) FROM authenticated;
