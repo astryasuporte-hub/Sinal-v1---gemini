@@ -4,15 +4,17 @@
  * 
  * Server-Side Database & Financial Persistence Layer (FatosBR)
  * 
- * Arquitetura de Segurança:
+ * Arquitetura de Segurança e Conformidade:
  * 1. Conexão PostgreSQL direta e segura via módulo server-side centralizado (api/_lib/postgres.ts).
- * 2. ZERO exposição do schema 'internal' na Supabase Data API do PostgREST.
- * 3. Operações com SQL parametrizado ($1, $2...) e liberação estrita de conexões no pool.
- * 4. Atomicidade transacional no Postgres: Confirmação de pagamento e ativação Pro via RPC server-side autorizada.
- * 5. Tabelas canônicas:
- *    - internal.billing_payments (id UUID, provider_payment_id TEXT, amount INTEGER)
- *    - internal.billing_events (id UUID, provider_event_id TEXT, payload JSONB, processed BOOLEAN)
- *    - public.subscriptions (id UUID, user_id UUID, plan TEXT, status TEXT) — FONTE CANÔNICA PRO
+ * 2. ZERO fallback para a Supabase Data API (PostgREST) em operações financeiras e no schema 'internal'.
+ * 3. Se a conexão PostgreSQL não estiver configurada, rejeita operações financeiras com erro controlado (fail-closed).
+ * 4. Respeito estrito às constraints do schema real:
+ *    - Chave primária UUID (gen_random_uuid())
+ *    - Unicidade de provider_payment_id
+ *    - Índice parcial billing_one_pending em internal.billing_payments:
+ *      (reutilização de cobranças pendentes válidas e expiração controlada das anteriores)
+ * 5. Atomicidade transacional e anti-tampering via RPC em public.confirm_payment_and_activate_subscription_atomic.
+ * 6. Fonte canônica única de planos: public.subscriptions (sem billing_subscriptions).
  */
 
 import { executeSql, isPostgresConfigured } from './postgres';
@@ -33,10 +35,18 @@ if (supabaseUrl && serviceRoleKey) {
   }
 }
 
+/**
+ * Verifica se a conexão com banco de dados está disponível.
+ * Para operações financeiras, isPostgresConfigured() é mandatório.
+ */
 export function isDatabaseConfigured(): boolean {
-  return isPostgresConfigured() || Boolean(serverSupabaseClient && supabaseUrl && serviceRoleKey);
+  return isPostgresConfigured();
 }
 
+/**
+ * Retorna o cliente Supabase para uso exclusivo em Auth ou consultas públicas legítimas.
+ * NUNCA utilizado como fallback para o schema privado internal.
+ */
 export function getServerSupabase(): SupabaseClient {
   if (!serverSupabaseClient) {
     throw new Error('SUPABASE_UNAVAILABLE: SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY ausente.');
@@ -58,6 +68,8 @@ export interface TestDatabaseAdapter {
     error_code?: string;
     chargeId?: string;
   }>;
+  getActivePendingCharge?: (userId: string | null, email?: string) => Promise<any | null>;
+  checkActiveSubscription?: (userId: string | null, email?: string) => Promise<boolean>;
 }
 
 let activeTestAdapter: TestDatabaseAdapter | null = null;
@@ -92,12 +104,355 @@ export interface StoredCharge {
 }
 
 // -----------------------------------------------------------------------------
-// OPERAÇÕES FINANCEIRAS PERSISTENTES VIA POSTGRESQL SERVER-SIDE
+// REGRAS DE CONSTRAINTS & FLUXO PIX IDEMPOTENTE
 // -----------------------------------------------------------------------------
 
 /**
- * Cria ou registra uma cobrança Pix pendente na tabela real internal.billing_payments.
- * Utiliza conexão PostgreSQL direta parametrizada sem expor o schema internal via Data API.
+ * Verifica se o usuário já possui assinatura Pro ativa em public.subscriptions.
+ */
+export async function checkUserActiveSubscription(userId: string | null, userEmail?: string): Promise<boolean> {
+  if (activeTestAdapter?.checkActiveSubscription) {
+    return activeTestAdapter.checkActiveSubscription(userId, userEmail);
+  }
+
+  if (!isPostgresConfigured()) {
+    throw new Error('POSTGRES_UNAVAILABLE: Verificação de assinatura exige conexão PostgreSQL configurada.');
+  }
+
+  try {
+    if (userId) {
+      const res = await executeSql(
+        `SELECT id FROM public.subscriptions WHERE user_id = $1 AND status = 'active' LIMIT 1`,
+        [userId]
+      );
+      if (res.rows.length > 0) return true;
+    }
+
+    if (userEmail) {
+      const resEmail = await executeSql(
+        `SELECT s.id FROM public.subscriptions s
+         JOIN auth.users u ON u.id = s.user_id
+         WHERE LOWER(TRIM(u.email)) = LOWER(TRIM($1)) AND s.status = 'active'
+         LIMIT 1`,
+        [userEmail]
+      );
+      if (resEmail.rows.length > 0) return true;
+    }
+
+    return false;
+  } catch (err: any) {
+    console.error('[Postgres Error] Falha ao checar assinatura ativa:', err.message);
+    throw new Error(`DATABASE_QUERY_FAILED: ${err.message}`);
+  }
+}
+
+/**
+ * Consulta cobrança pendente existente do usuário para respeitar o índice parcial billing_one_pending.
+ */
+export async function getActivePendingChargeForUser(userId: string | null, userEmail?: string): Promise<StoredCharge | null> {
+  if (activeTestAdapter?.getActivePendingCharge) {
+    return activeTestAdapter.getActivePendingCharge(userId, userEmail);
+  }
+
+  if (!isPostgresConfigured()) {
+    throw new Error('POSTGRES_UNAVAILABLE: Operações financeiras exigem conexão PostgreSQL configurada.');
+  }
+
+  try {
+    let queryText = `
+      SELECT 
+        id,
+        provider_payment_id,
+        user_id,
+        amount,
+        currency,
+        status,
+        checkout_data,
+        created_at,
+        updated_at
+      FROM internal.billing_payments
+      WHERE status IN ('PENDING', 'PROCESSING')
+        AND request_state <> 'FAILED'
+    `;
+    const params: any[] = [];
+
+    if (userId) {
+      params.push(userId);
+      queryText += ` AND user_id = $${params.length}`;
+    } else if (userEmail) {
+      params.push(userEmail.toLowerCase().trim());
+      queryText += ` AND LOWER(checkout_data->>'user_email') = $${params.length}`;
+    } else {
+      return null;
+    }
+
+    queryText += ` ORDER BY created_at DESC LIMIT 1`;
+
+    const res = await executeSql(queryText, params);
+    if (res.rows.length === 0) return null;
+
+    const row = res.rows[0];
+    const amount = Number(row.amount || 0);
+
+    return {
+      id: row.id,
+      providerPaymentId: row.provider_payment_id || row.id,
+      userId: row.user_id,
+      userEmail: row.checkout_data?.user_email || '',
+      amount,
+      amountCents: amount,
+      currency: row.currency || 'BRL',
+      status: row.status,
+      description: row.checkout_data?.description || 'Assinatura FatosBR Pro',
+      qrCodeText: row.checkout_data?.qr_code_text,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  } catch (err: any) {
+    console.error('[Postgres Error] Falha ao consultar cobrança pendente do usuário:', err.message);
+    throw new Error(`DATABASE_QUERY_FAILED: ${err.message}`);
+  }
+}
+
+/**
+ * Expira ou cancela uma cobrança pendente existente, liberando a constraint billing_one_pending.
+ */
+export async function cancelOrExpirePendingCharge(chargeId: string, reason = 'EXPIRED'): Promise<boolean> {
+  if (!isPostgresConfigured()) {
+    throw new Error('POSTGRES_UNAVAILABLE: Operação financeira exige conexão PostgreSQL configurada.');
+  }
+
+  try {
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(chargeId);
+    let queryText = `
+      UPDATE internal.billing_payments
+      SET status = $1,
+          request_state = 'FAILED',
+          cancelled_at = NOW(),
+          updated_at = NOW()
+      WHERE 
+    `;
+    if (isUuid) {
+      queryText += ` (id = $2::uuid OR provider_payment_id = $2)`;
+    } else {
+      queryText += ` provider_payment_id = $2`;
+    }
+    queryText += ` AND status IN ('PENDING', 'PROCESSING')`;
+
+    await executeSql(queryText, [reason, chargeId]);
+    return true;
+  } catch (err: any) {
+    console.error(`[Postgres Error] Falha ao expirar cobrança ${chargeId}:`, err.message);
+    return false;
+  }
+}
+
+/**
+ * Cria ou Reutiliza uma Cobrança Pix com respeito integral ao índice parcial billing_one_pending:
+ * 1. Checa se o usuário já é assinante ativo Pro (retorna alreadySubscribed: true).
+ * 2. Checa se existe cobrança pendente ativa:
+ *    - Se válida (< 15 minutos e mesmo valor): reutiliza a existente (evita colisão de índice e Pix duplicado).
+ *    - Se expirada (> 15 minutos): marca como EXPIRED / FAILED antes de criar a nova.
+ * 3. Cria a nova cobrança atômica com UUID primário.
+ * 4. Trata tentativas simultâneas (concorrência) sem estourar erro 500 no cliente.
+ */
+export async function createOrReusePixCharge(params: {
+  providerPaymentId?: string;
+  userId?: string | null;
+  userEmail?: string;
+  amountCents: number;
+  description: string;
+  qrCodeText?: string;
+}): Promise<{
+  charge: StoredCharge;
+  reused: boolean;
+  alreadySubscribed?: boolean;
+}> {
+  if (activeTestAdapter) {
+    if (activeTestAdapter.checkActiveSubscription) {
+      const isSub = await activeTestAdapter.checkActiveSubscription(params.userId || null, params.userEmail);
+      if (isSub) {
+        return {
+          charge: null as any,
+          reused: false,
+          alreadySubscribed: true
+        };
+      }
+    }
+    if (activeTestAdapter.getActivePendingCharge) {
+      const existing = await activeTestAdapter.getActivePendingCharge(params.userId || null, params.userEmail);
+      if (existing) {
+        return {
+          charge: existing,
+          reused: true
+        };
+      }
+    }
+    try {
+      await activeTestAdapter.recordPendingCharge(params);
+    } catch (mockErr: any) {
+      if (
+        mockErr.code === '23505' ||
+        mockErr.message?.includes('billing_one_pending') ||
+        mockErr.message?.includes('provider_payment_id')
+      ) {
+        if (activeTestAdapter.getActivePendingCharge) {
+          const concurrent = await activeTestAdapter.getActivePendingCharge(params.userId || null, params.userEmail);
+          if (concurrent) {
+            return { charge: concurrent, reused: true };
+          }
+        }
+      }
+      throw mockErr;
+    }
+
+    if (activeTestAdapter.getActivePendingCharge) {
+      const saved = await activeTestAdapter.getActivePendingCharge(params.userId || null, params.userEmail);
+      if (saved) {
+        return { charge: saved, reused: false };
+      }
+    }
+
+    const mockCharge: StoredCharge = {
+      id: `uuid_${Date.now()}`,
+      providerPaymentId: params.providerPaymentId || `zyn_${Date.now()}`,
+      userId: params.userId || null,
+      userEmail: params.userEmail || '',
+      amount: params.amountCents,
+      amountCents: params.amountCents,
+      currency: 'BRL',
+      status: 'PENDING',
+      description: params.description,
+      qrCodeText: params.qrCodeText,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    return { charge: mockCharge, reused: false };
+  }
+
+  if (!isPostgresConfigured()) {
+    throw new Error('POSTGRES_UNAVAILABLE: Operações financeiras exigem conexão PostgreSQL server-side configurada.');
+  }
+
+  const userId = params.userId || null;
+  const userEmail = (params.userEmail || '').toLowerCase().trim();
+  const amount = Math.round(params.amountCents);
+
+  // 1. Checa se o usuário já é assinante ativo Pro
+  if (userId || userEmail) {
+    const isAlreadySubscribed = await checkUserActiveSubscription(userId, userEmail);
+    if (isAlreadySubscribed) {
+      return {
+        charge: null as any,
+        reused: false,
+        alreadySubscribed: true
+      };
+    }
+  }
+
+  // 2. Checa cobrança pendente existente (respeito a billing_one_pending)
+  const existingPending = await getActivePendingChargeForUser(userId, userEmail);
+  if (existingPending) {
+    const ageMs = Date.now() - new Date(existingPending.createdAt).getTime();
+    const fifteenMinutesMs = 15 * 60 * 1000;
+
+    // Se ainda está dentro do período de validade do Pix (15 min) e tem o mesmo valor, reutiliza
+    if (ageMs < fifteenMinutesMs && existingPending.amountCents === amount) {
+      return {
+        charge: existingPending,
+        reused: true
+      };
+    }
+
+    // Se expirou ou o valor é diferente, cancela a cobrança anterior no banco para liberar o índice
+    await cancelOrExpirePendingCharge(existingPending.id, 'EXPIRED');
+  }
+
+  // 3. Criação de nova cobrança
+  const providerPaymentId = params.providerPaymentId || `zyn_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+  const checkoutData = JSON.stringify({
+    user_email: userEmail,
+    description: params.description,
+    qr_code_text: params.qrCodeText || null
+  });
+
+  try {
+    const insertQuery = `
+      INSERT INTO internal.billing_payments (
+        id,
+        user_id,
+        provider,
+        provider_payment_id,
+        amount,
+        currency,
+        status,
+        type,
+        request_state,
+        checkout_data,
+        created_at,
+        updated_at
+      ) VALUES (
+        gen_random_uuid(),
+        $1,
+        'zynpay',
+        $2,
+        $3,
+        'BRL',
+        'PENDING',
+        'PIX',
+        'PENDING',
+        $4::jsonb,
+        NOW(),
+        NOW()
+      )
+      RETURNING id, provider_payment_id, user_id, amount, currency, status, checkout_data, created_at, updated_at
+    `;
+
+    const res = await executeSql(insertQuery, [
+      userId,
+      providerPaymentId,
+      amount,
+      checkoutData
+    ]);
+
+    const row = res.rows[0];
+    const newCharge: StoredCharge = {
+      id: row.id,
+      providerPaymentId: row.provider_payment_id,
+      userId: row.user_id,
+      userEmail: row.checkout_data?.user_email || userEmail,
+      amount: Number(row.amount || 0),
+      amountCents: Number(row.amount || 0),
+      currency: row.currency || 'BRL',
+      status: row.status,
+      description: row.checkout_data?.description || params.description,
+      qrCodeText: row.checkout_data?.qr_code_text || params.qrCodeText,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+
+    return { charge: newCharge, reused: false };
+  } catch (err: any) {
+    // 4. Tratamento de concorrência: se outro processo inseriu cobrança pendente simultaneamente
+    if (
+      err.code === '23505' ||
+      err.message?.includes('billing_one_pending') ||
+      err.message?.includes('provider_payment_id')
+    ) {
+      console.warn('[Concurrency Handled] Conflito concorrente detectado, recuperando cobrança pendente existente.');
+      const concurrentCharge = await getActivePendingChargeForUser(userId, userEmail);
+      if (concurrentCharge) {
+        return { charge: concurrentCharge, reused: true };
+      }
+    }
+
+    console.error(`[Postgres Error] Falha ao registrar cobrança ${providerPaymentId}:`, err.message);
+    throw new Error(`DATABASE_PERSISTENCE_FAILED: Falha na gravação do pagamento via PostgreSQL (${err.message})`);
+  }
+}
+
+/**
+ * Função de conveniência retrocompatível para registrar cobrança pendente.
  */
 export async function recordPendingCharge(charge: {
   id?: string;
@@ -114,143 +469,56 @@ export async function recordPendingCharge(charge: {
     return activeTestAdapter.recordPendingCharge(charge);
   }
 
-  const providerPaymentId = charge.providerPaymentId || charge.id || `zyn_${Date.now()}`;
-  const amount = Math.round(charge.amount ?? charge.amountCents ?? 2990);
-  const currency = charge.currency || 'BRL';
-  const checkoutData = JSON.stringify({
-    user_email: (charge.userEmail || '').toLowerCase().trim(),
+  const amountCents = Math.round(charge.amountCents ?? (charge.amount ? charge.amount * 100 : 2990));
+  await createOrReusePixCharge({
+    providerPaymentId: charge.providerPaymentId || charge.id,
+    userId: charge.userId,
+    userEmail: charge.userEmail,
+    amountCents,
     description: charge.description,
-    qr_code_text: charge.qrCodeText || null
+    qrCodeText: charge.qrCodeText
   });
-
-  // 1. Conexão direta PostgreSQL (Recomendada em Produção Vercel)
-  if (isPostgresConfigured()) {
-    try {
-      const queryText = `
-        INSERT INTO internal.billing_payments (
-          user_id,
-          provider,
-          provider_payment_id,
-          amount,
-          currency,
-          status,
-          type,
-          checkout_data,
-          created_at,
-          updated_at
-        ) VALUES ($1, 'zynpay', $2, $3, $4, 'PENDING', 'PIX', $5::jsonb, NOW(), NOW())
-      `;
-      await executeSql(queryText, [
-        charge.userId || null,
-        providerPaymentId,
-        amount,
-        currency,
-        checkoutData
-      ]);
-      return true;
-    } catch (pgErr: any) {
-      console.error(`[Postgres Error] Falha ao registrar cobrança ${providerPaymentId}:`, pgErr.message);
-      throw new Error(`DATABASE_PERSISTENCE_FAILED: Falha na gravação do pagamento via PostgreSQL (${pgErr.message})`);
-    }
-  }
-
-  // 2. Fallback via cliente Supabase se disponível em ambiente de desenvolvimento
-  if (serverSupabaseClient) {
-    const payload: any = {
-      user_id: charge.userId || null,
-      provider: 'zynpay',
-      provider_payment_id: providerPaymentId,
-      amount,
-      currency,
-      status: 'PENDING',
-      type: 'PIX',
-      checkout_data: JSON.parse(checkoutData),
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    };
-    const { error } = await serverSupabaseClient.schema('internal').from('billing_payments').insert(payload);
-    if (error) {
-      console.error(`[DB Error] Falha ao persistir cobrança ${providerPaymentId}:`, error.message);
-      throw new Error(`DATABASE_PERSISTENCE_FAILED: ${error.message}`);
-    }
-    return true;
-  }
-
-  throw new Error('DATABASE_PERSISTENCE_FAILED: Nenhuma conexão PostgreSQL ou Supabase configurada no backend.');
+  return true;
 }
 
 /**
  * Consulta cobrança no banco de dados por ID (UUID interno ou provider_payment_id).
+ * Exclusivamente via PostgreSQL server-side sem fallback silencioso para schema privado.
  */
 export async function getChargeById(chargeId: string): Promise<StoredCharge | null> {
   if (activeTestAdapter) {
     return activeTestAdapter.getChargeById(chargeId);
   }
 
-  // 1. Consulta direta via PostgreSQL
-  if (isPostgresConfigured()) {
-    try {
-      const queryText = `
-        SELECT 
-          id,
-          provider_payment_id,
-          user_id,
-          amount,
-          currency,
-          status,
-          checkout_data,
-          approved_at,
-          created_at,
-          updated_at
-        FROM internal.billing_payments
-        WHERE provider_payment_id = $1
-           OR (CASE WHEN $1 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN id = $1::uuid ELSE false END)
-        LIMIT 1
-      `;
-      const res = await executeSql(queryText, [chargeId]);
-      if (res.rows.length === 0) {
-        return null;
-      }
-      const data = res.rows[0];
-      const amount = Number(data.amount || 0);
-
-      return {
-        id: data.id,
-        providerPaymentId: data.provider_payment_id || data.id,
-        userId: data.user_id,
-        userEmail: data.checkout_data?.user_email || '',
-        amount,
-        amountCents: amount,
-        currency: data.currency || 'BRL',
-        status: data.status,
-        description: data.checkout_data?.description || 'Assinatura FatosBR Pro',
-        qrCodeText: data.checkout_data?.qr_code_text,
-        createdAt: data.created_at,
-        updatedAt: data.updated_at,
-        approvedAt: data.approved_at,
-        paidAt: data.approved_at
-      };
-    } catch (err: any) {
-      console.error(`[Postgres Error] Falha ao consultar cobrança ${chargeId}:`, err.message);
-      throw new Error(`DATABASE_QUERY_FAILED: ${err.message}`);
-    }
+  if (!isPostgresConfigured()) {
+    throw new Error('POSTGRES_UNAVAILABLE: Operações financeiras exigem conexão PostgreSQL configurada.');
   }
 
-  // 2. Fallback via cliente Supabase
-  if (serverSupabaseClient) {
-    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(chargeId);
-    let query = serverSupabaseClient.schema('internal').from('billing_payments').select('*');
-    if (isUuid) {
-      query = query.or(`id.eq.${chargeId},provider_payment_id.eq.${chargeId}`);
-    } else {
-      query = query.eq('provider_payment_id', chargeId);
+  try {
+    const queryText = `
+      SELECT 
+        id,
+        provider_payment_id,
+        user_id,
+        amount,
+        currency,
+        status,
+        checkout_data,
+        approved_at,
+        created_at,
+        updated_at
+      FROM internal.billing_payments
+      WHERE provider_payment_id = $1
+         OR (CASE WHEN $1 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN id = $1::uuid ELSE false END)
+      LIMIT 1
+    `;
+    const res = await executeSql(queryText, [chargeId]);
+    if (res.rows.length === 0) {
+      return null;
     }
-    const { data, error } = await query.maybeSingle();
-    if (error) {
-      throw new Error(`DATABASE_QUERY_FAILED: ${error.message}`);
-    }
-    if (!data) return null;
+    const data = res.rows[0];
     const amount = Number(data.amount || 0);
+
     return {
       id: data.id,
       providerPaymentId: data.provider_payment_id || data.id,
@@ -267,89 +535,57 @@ export async function getChargeById(chargeId: string): Promise<StoredCharge | nu
       approvedAt: data.approved_at,
       paidAt: data.approved_at
     };
+  } catch (err: any) {
+    console.error(`[Postgres Error] Falha ao consultar cobrança ${chargeId}:`, err.message);
+    throw new Error(`DATABASE_QUERY_FAILED: ${err.message}`);
   }
-
-  throw new Error('DATABASE_QUERY_FAILED: Banco de dados indisponível.');
 }
 
 /**
  * Valida idempotência de evento de webhook inserindo registro inicial na tabela real internal.billing_events.
+ * Exclusivamente via PostgreSQL server-side.
  */
 export async function checkAndLockWebhookEvent(eventId: string, provider = 'zynpay'): Promise<{ isDuplicate: boolean }> {
   if (activeTestAdapter) {
     return activeTestAdapter.checkAndLockWebhookEvent(eventId, provider);
   }
 
-  if (isPostgresConfigured()) {
-    try {
-      // 1. Verifica se já existe e foi processado
-      const checkRes = await executeSql(
-        `SELECT processed FROM internal.billing_events WHERE provider = $1 AND provider_event_id = $2 LIMIT 1`,
-        [provider, eventId]
-      );
-      if (checkRes.rows.length > 0 && checkRes.rows[0].processed) {
-        return { isDuplicate: true };
-      }
-
-      // 2. Insere registro de trava de evento
-      await executeSql(
-        `INSERT INTO internal.billing_events (
-           provider, provider_event_id, event_type, payload, processed, created_at
-         ) VALUES ($1, $2, 'charge.paid', '{"registered":true}'::jsonb, false, NOW())
-         ON CONFLICT (provider, provider_event_id) DO NOTHING`,
-        [provider, eventId]
-      );
-      return { isDuplicate: false };
-    } catch (err: any) {
-      if (err.code === '23505' || err.message?.toLowerCase().includes('duplicate') || err.message?.toLowerCase().includes('unique')) {
-        return { isDuplicate: true };
-      }
-      console.error(`[Postgres Error] Falha de idempotência no evento ${eventId}:`, err.message);
-      throw new Error(`DATABASE_LOCK_FAILED: ${err.message}`);
-    }
+  if (!isPostgresConfigured()) {
+    throw new Error('POSTGRES_UNAVAILABLE: Operações financeiras exigem conexão PostgreSQL configurada.');
   }
 
-  // Fallback via Supabase
-  if (serverSupabaseClient) {
-    const { data: existing } = await serverSupabaseClient
-      .schema('internal')
-      .from('billing_events')
-      .select('id, processed')
-      .eq('provider', provider)
-      .eq('provider_event_id', eventId)
-      .maybeSingle();
-
-    if (existing && existing.processed) {
+  try {
+    // 1. Verifica se já existe e foi processado
+    const checkRes = await executeSql(
+      `SELECT processed FROM internal.billing_events WHERE provider = $1 AND provider_event_id = $2 LIMIT 1`,
+      [provider, eventId]
+    );
+    if (checkRes.rows.length > 0 && checkRes.rows[0].processed) {
       return { isDuplicate: true };
     }
 
-    const { error } = await serverSupabaseClient
-      .schema('internal')
-      .from('billing_events')
-      .insert({
-        provider,
-        provider_event_id: eventId,
-        event_type: 'charge.paid',
-        payload: { registered_at: new Date().toISOString() },
-        processed: false,
-        created_at: new Date().toISOString()
-      });
-
-    if (error) {
-      if (error.code === '23505' || error.message?.toLowerCase().includes('duplicate') || error.message?.toLowerCase().includes('unique')) {
-        return { isDuplicate: true };
-      }
-      throw new Error(`DATABASE_LOCK_FAILED: ${error.message}`);
-    }
+    // 2. Insere registro de trava de evento
+    await executeSql(
+      `INSERT INTO internal.billing_events (
+         id, provider, provider_event_id, event_type, payload, processed, created_at
+       ) VALUES (gen_random_uuid(), $1, $2, 'charge.paid', '{"registered":true}'::jsonb, false, NOW())
+       ON CONFLICT (provider, provider_event_id) DO NOTHING`,
+      [provider, eventId]
+    );
     return { isDuplicate: false };
+  } catch (err: any) {
+    if (err.code === '23505' || err.message?.toLowerCase().includes('duplicate') || err.message?.toLowerCase().includes('unique')) {
+      return { isDuplicate: true };
+    }
+    console.error(`[Postgres Error] Falha de idempotência no evento ${eventId}:`, err.message);
+    throw new Error(`DATABASE_LOCK_FAILED: ${err.message}`);
   }
-
-  throw new Error('DATABASE_LOCK_FAILED: Banco de dados indisponível.');
 }
 
 /**
  * Confirma pagamento e ativa assinatura Pro de forma ATÔMICA via RPC PostgreSQL no schema real.
  * Invoca public.confirm_payment_and_activate_subscription_atomic por conexão server-side autorizada.
+ * ZERO fallback para Data API.
  */
 export async function confirmPaymentAndActivateSubscriptionAtomic(params: {
   chargeId: string;
@@ -379,59 +615,27 @@ export async function confirmPaymentAndActivateSubscriptionAtomic(params: {
     };
   }
 
+  if (!isPostgresConfigured()) {
+    throw new Error('POSTGRES_UNAVAILABLE: Confirmação financeira exige conexão PostgreSQL server-side configurada.');
+  }
+
   const paymentId = params.providerPaymentId || params.chargeId;
   const amount = Math.round(params.expectedAmount ?? params.expectedAmountCents ?? 2990);
   const currency = params.expectedCurrency || 'BRL';
   const provider = params.provider || 'zynpay';
   const rawPayload = JSON.stringify(params.rawPayload || {});
 
-  // 1. Execução via conexão direta PostgreSQL (Recomendada server-side)
-  if (isPostgresConfigured()) {
-    try {
-      const queryText = `
-        SELECT public.confirm_payment_and_activate_subscription_atomic(
-          $1, $2, $3, $4, $5, $6::jsonb
-        ) AS outcome
-      `;
-      const res = await executeSql(queryText, [paymentId, params.eventId, amount, currency, provider, rawPayload]);
-      const data = res.rows[0]?.outcome;
-
-      if (!data || typeof data !== 'object') {
-        throw new Error('ATOMIC_TRANSACTION_INVALID_RESPONSE: Resposta da RPC vazia ou malformada.');
-      }
-
-      return {
-        success: Boolean(data.success),
-        duplicate: Boolean(data.duplicate),
-        error: data.error,
-        errorCode: data.error_code,
-        chargeId: data.charge_id || paymentId,
-        userEmail: data.user_email
-      };
-    } catch (err: any) {
-      console.error('[Postgres Error] Falha na execução da transação atômica RPC:', err.message);
-      throw new Error(`ATOMIC_TRANSACTION_FAILED: ${err.message}`);
-    }
-  }
-
-  // 2. Fallback via RPC Supabase
-  if (serverSupabaseClient) {
-    const { data, error } = await serverSupabaseClient.rpc('confirm_payment_and_activate_subscription_atomic', {
-      p_provider_payment_id: paymentId,
-      p_event_id: params.eventId,
-      p_expected_amount: amount,
-      p_expected_currency: currency,
-      p_provider: provider,
-      p_raw_payload: params.rawPayload || {}
-    });
-
-    if (error) {
-      console.error('[Supabase RPC Error] Falha na transação atômica:', error.message);
-      throw new Error(`ATOMIC_TRANSACTION_FAILED: ${error.message}`);
-    }
+  try {
+    const queryText = `
+      SELECT public.confirm_payment_and_activate_subscription_atomic(
+        $1, $2, $3, $4, $5, $6::jsonb
+      ) AS outcome
+    `;
+    const res = await executeSql(queryText, [paymentId, params.eventId, amount, currency, provider, rawPayload]);
+    const data = res.rows[0]?.outcome;
 
     if (!data || typeof data !== 'object') {
-      throw new Error('ATOMIC_TRANSACTION_INVALID_RESPONSE: Resposta da RPC vazia.');
+      throw new Error('ATOMIC_TRANSACTION_INVALID_RESPONSE: Resposta da RPC vazia ou malformada.');
     }
 
     return {
@@ -442,7 +646,8 @@ export async function confirmPaymentAndActivateSubscriptionAtomic(params: {
       chargeId: data.charge_id || paymentId,
       userEmail: data.user_email
     };
+  } catch (err: any) {
+    console.error('[Postgres Error] Falha na execução da transação atômica RPC:', err.message);
+    throw new Error(`ATOMIC_TRANSACTION_FAILED: ${err.message}`);
   }
-
-  throw new Error('ATOMIC_TRANSACTION_FAILED: Nenhuma conexão com banco de dados disponível.');
 }

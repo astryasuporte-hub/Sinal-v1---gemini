@@ -13,7 +13,7 @@
 
 import QRCode from 'qrcode';
 import { getServerKeys, sendJson, setCorsHeaders, readJsonBody } from '../_lib/common';
-import { recordPendingCharge, getChargeById } from '../_lib/db';
+import { createOrReusePixCharge, getChargeById, getServerSupabase, isDatabaseConfigured } from '../_lib/db';
 import { enforceRateLimit } from '../_lib/rateLimiter';
 
 export default async function handler(req: any, res: any) {
@@ -66,8 +66,59 @@ export default async function handler(req: any, res: any) {
       email: String(body.customer?.email || 'leitor@fatosbr.com.br').toLowerCase().trim().slice(0, 100)
     };
 
-    const chargeId = `zyn_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
-    const pixCopyPaste = `00020126580014br.gov.bcb.pix0136${chargeId}520400005303986540${amount.toFixed(2)}5802BR5916FATOSBR NOTICIAS6009SAO PAULO62070503***6304`;
+    // Resolver userId se autenticado via Bearer Token do Supabase Auth
+    let resolvedUserId: string | null = body.userId || null;
+    const authHeader = req.headers?.authorization || '';
+    if (!resolvedUserId && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.slice(7).trim();
+      try {
+        const supabase = getServerSupabase();
+        const { data: { user } } = await supabase.auth.getUser(token);
+        if (user) {
+          resolvedUserId = user.id;
+        }
+      } catch {}
+    }
+
+    const initialChargeId = `zyn_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+    const initialPixCopyPaste = `00020126580014br.gov.bcb.pix0136${initialChargeId}520400005303986540${amount.toFixed(2)}5802BR5916FATOSBR NOTICIAS6009SAO PAULO62070503***6304`;
+
+    // 1. Persistência atômica e verificação de constraints no PostgreSQL
+    let chargePersistenceResult;
+    try {
+      chargePersistenceResult = await createOrReusePixCharge({
+        providerPaymentId: initialChargeId,
+        userId: resolvedUserId,
+        userEmail: customer.email,
+        amountCents,
+        description,
+        qrCodeText: initialPixCopyPaste
+      });
+    } catch (dbErr: any) {
+      console.error('[Persistence Failure] Falha ao persistir cobrança:', dbErr.message);
+      if (dbErr.message?.includes('POSTGRES_UNAVAILABLE')) {
+        return sendJson(res, 503, {
+          error: 'Serviço financeiro temporariamente indisponível. Operações suspensas até restabelecimento da conexão segura com o banco.',
+          code: 'POSTGRES_UNAVAILABLE'
+        });
+      }
+      return sendJson(res, 503, {
+        error: 'Falha na persistência da cobrança. Operação abortada com segurança.',
+        code: 'DATABASE_PERSISTENCE_FAILED'
+      });
+    }
+
+    // Se o usuário já for assinante Pro ativo, bloqueia cobrança duplicada
+    if (chargePersistenceResult.alreadySubscribed) {
+      return sendJson(res, 409, {
+        error: 'Você já possui uma assinatura FatosBR Pro ativa vinculada a esta conta.',
+        code: 'USER_ALREADY_SUBSCRIBED'
+      });
+    }
+
+    const effectiveCharge = chargePersistenceResult.charge;
+    const effectiveChargeId = effectiveCharge.providerPaymentId || effectiveCharge.id;
+    const pixCopyPaste = effectiveCharge.qrCodeText || initialPixCopyPaste;
 
     let qrCodeBase64 = '';
     try {
@@ -75,37 +126,21 @@ export default async function handler(req: any, res: any) {
     } catch {}
 
     const chargeRecord = {
-      id: chargeId,
-      amount: amountCents, // Retorna em centavos conforme interface ZynPayCharge
-      amountFormatted: `R$ ${amount.toFixed(2).replace('.', ',')}`,
-      status: 'PENDING' as const,
-      description,
+      id: effectiveChargeId,
+      amount: effectiveCharge.amountCents,
+      amountFormatted: `R$ ${(effectiveCharge.amountCents / 100).toFixed(2).replace('.', ',')}`,
+      status: effectiveCharge.status,
+      description: effectiveCharge.description,
       customer,
       qrCode: qrCodeBase64,
       qrCodeText: pixCopyPaste,
-      createdAt: new Date().toISOString(),
-      expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString()
+      createdAt: effectiveCharge.createdAt,
+      expiresAt: new Date(new Date(effectiveCharge.createdAt).getTime() + 15 * 60 * 1000).toISOString(),
+      reused: Boolean(chargePersistenceResult.reused)
     };
 
-    // 1. Persistência mandatória no PostgreSQL Supabase
-    try {
-      await recordPendingCharge({
-        id: chargeId,
-        userEmail: customer.email,
-        amountCents,
-        description,
-        qrCodeText: pixCopyPaste
-      });
-    } catch (dbErr: any) {
-      console.error('[Persistence Failure] Não foi possível salvar cobrança pendente:', dbErr.message);
-      return sendJson(res, 503, {
-        error: 'Falha na persistência da cobrança. Operação abortada com segurança.',
-        code: 'DATABASE_PERSISTENCE_FAILED'
-      });
-    }
-
-    // 2. Se houver chave ativa da ZynPay, cria cobrança upstream
-    if (apiKey) {
+    // 2. Se for nova cobrança e houver chave ativa da ZynPay, cria no gateway oficial
+    if (!chargePersistenceResult.reused && apiKey) {
       try {
         const upRes = await fetch('https://api.zynpay.com.br/v1/public/charges', {
           method: 'POST',
@@ -123,27 +158,17 @@ export default async function handler(req: any, res: any) {
 
         if (upRes.ok) {
           const upData = await upRes.json();
-          if (upData.id) {
-            chargeRecord.id = upData.id;
-            // Salva também o ID upstream retornado
-            try {
-              await recordPendingCharge({
-                id: upData.id,
-                userEmail: customer.email,
-                amountCents,
-                description,
-                qrCodeText: upData.qrCodeText || pixCopyPaste
-              });
-            } catch {}
-          }
           if (upData.qrCode) chargeRecord.qrCode = upData.qrCode;
           if (upData.qrCodeText) chargeRecord.qrCodeText = upData.qrCodeText;
         }
-      } catch {}
+      } catch (upErr: any) {
+        console.warn('[ZynPay Gateway Notice] Não foi possível sincronizar upstream de imediato:', upErr.message);
+      }
     }
 
     return sendJson(res, 200, {
       success: true,
+      reused: Boolean(chargePersistenceResult.reused),
       charge: chargeRecord
     });
   }

@@ -208,8 +208,8 @@ DECLARE
   v_now TIMESTAMPTZ := clock_timestamp();
 BEGIN
   -- ETAPA 1: CONTROLE DE ACESSO MANDATÓRIO — Bloqueio estrito de execução direta pelo cliente
-  IF current_user NOT IN ('service_role', 'postgres', 'supabase_admin') AND COALESCE(auth.role(), '') <> 'service_role' THEN
-    RAISE EXCEPTION 'Acesso negado: operação restrita ao backend service_role'
+  IF current_user NOT IN ('service_role', 'postgres', 'supabase_admin', 'fatosbr_backend') AND COALESCE(auth.role(), '') <> 'service_role' THEN
+    RAISE EXCEPTION 'Acesso negado: operação restrita ao backend financeiro autorizado'
       USING ERRCODE = '42501';
   END IF;
 
@@ -422,23 +422,25 @@ REVOKE ALL ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(T
 REVOKE ALL ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) FROM authenticated;
 GRANT EXECUTE ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) TO service_role, postgres;
 
--- 8. Concessão de privilégios para conexões PostgreSQL server-side (schema internal)
+-- 8. Concessão de menor privilégio para conexões PostgreSQL server-side
 GRANT USAGE ON SCHEMA internal TO service_role, postgres;
-GRANT ALL ON ALL TABLES IN SCHEMA internal TO service_role, postgres;
-GRANT ALL ON ALL SEQUENCES IN SCHEMA internal TO service_role, postgres;
+GRANT SELECT, INSERT, UPDATE ON TABLE internal.billing_payments TO service_role, postgres;
+GRANT SELECT, INSERT, UPDATE ON TABLE internal.billing_events TO service_role, postgres;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE internal.rate_limit_counters TO service_role, postgres;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.subscriptions TO service_role, postgres;
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.user_roles TO service_role, postgres;
+GRANT SELECT ON TABLE public.user_roles TO service_role, postgres;
 
 -- 9. Concessão condicional segura para papel dedicado (caso provisionado pelo DBA)
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'fatosbr_backend') THEN
     GRANT USAGE ON SCHEMA internal TO fatosbr_backend;
-    GRANT ALL ON ALL TABLES IN SCHEMA internal TO fatosbr_backend;
-    GRANT ALL ON ALL SEQUENCES IN SCHEMA internal TO fatosbr_backend;
-    GRANT EXECUTE ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) TO fatosbr_backend;
-    GRANT EXECUTE ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) TO fatosbr_backend;
+    GRANT SELECT, INSERT, UPDATE ON TABLE internal.billing_payments TO fatosbr_backend;
+    GRANT SELECT, INSERT, UPDATE ON TABLE internal.billing_events TO fatosbr_backend;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE internal.rate_limit_counters TO fatosbr_backend;
     GRANT SELECT, INSERT, UPDATE ON TABLE public.subscriptions TO fatosbr_backend;
     GRANT SELECT ON TABLE public.user_roles TO fatosbr_backend;
+    GRANT EXECUTE ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) TO fatosbr_backend;
+    GRANT EXECUTE ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) TO fatosbr_backend;
   END IF;
 END $$;

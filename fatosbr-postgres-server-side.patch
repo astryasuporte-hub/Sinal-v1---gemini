@@ -1,8 +1,8 @@
 From 227c2e46244fd881cde8c1eee89daab8f219d2bf Mon Sep 17 00:00:00 2001
 From: FatosBR Security Engine <yleaopvpy01@gmail.com>
 Date: Thu, 5 Nov 2026 17:55:23 +0000
-Subject: [PATCH] fix(finance): implementar conexao postgres server-side direta
- para schema internal e rpcs
+Subject: [PATCH 1/2] fix(finance): implementar conexao postgres server-side
+ direta para schema internal e rpcs
 
 ---
  api/_lib/adminAuth.ts                         |  27 +-
@@ -891,6 +891,1369 @@ index 2b801e7..6940d4a 100644
      console.log('');
      console.log('📋 STATUS DA SUÍTE DE INTEGRAÇÃO REAL:');
      console.log('   Os testes de integração com PostgreSQL real estão IMPLEMENTADOS e PREPARADOS');
+-- 
+2.34.1
+
+
+From c051843ba2c531d3469487350f706b24b2feb5c8 Mon Sep 17 00:00:00 2001
+From: FatosBR Security Engine <yleaopvpy01@gmail.com>
+Date: Thu, 5 Nov 2026 18:11:41 +0000
+Subject: [PATCH 2/2] fix(finance): eliminar fallbacks inseguros, aplicar menor
+ privilegio e respeitar constraints reais
+
+---
+ api/_lib/db.ts                                | 685 ++++++++++++------
+ api/_lib/rateLimiter.ts                       |  42 +-
+ api/zynpay/charges.ts                         | 107 +--
+ ...1_financial_security_and_rate_limiting.sql |  22 +-
+ ...1104000001_rollback_financial_security.sql |   8 +-
+ ...04000002_fix_supabase_billing_and_rbac.sql |  18 +-
+ .../provision_fatosbr_backend_role.sql        |  53 ++
+ tests/security-validation.ts                  | 132 ++++
+ 8 files changed, 732 insertions(+), 335 deletions(-)
+ create mode 100644 supabase/scripts/provision_fatosbr_backend_role.sql
+
+diff --git a/api/_lib/db.ts b/api/_lib/db.ts
+index 63b6c9e..8ab7022 100644
+--- a/api/_lib/db.ts
++++ b/api/_lib/db.ts
+@@ -4,15 +4,17 @@
+  * 
+  * Server-Side Database & Financial Persistence Layer (FatosBR)
+  * 
+- * Arquitetura de Segurança:
++ * Arquitetura de Segurança e Conformidade:
+  * 1. Conexão PostgreSQL direta e segura via módulo server-side centralizado (api/_lib/postgres.ts).
+- * 2. ZERO exposição do schema 'internal' na Supabase Data API do PostgREST.
+- * 3. Operações com SQL parametrizado ($1, $2...) e liberação estrita de conexões no pool.
+- * 4. Atomicidade transacional no Postgres: Confirmação de pagamento e ativação Pro via RPC server-side autorizada.
+- * 5. Tabelas canônicas:
+- *    - internal.billing_payments (id UUID, provider_payment_id TEXT, amount INTEGER)
+- *    - internal.billing_events (id UUID, provider_event_id TEXT, payload JSONB, processed BOOLEAN)
+- *    - public.subscriptions (id UUID, user_id UUID, plan TEXT, status TEXT) — FONTE CANÔNICA PRO
++ * 2. ZERO fallback para a Supabase Data API (PostgREST) em operações financeiras e no schema 'internal'.
++ * 3. Se a conexão PostgreSQL não estiver configurada, rejeita operações financeiras com erro controlado (fail-closed).
++ * 4. Respeito estrito às constraints do schema real:
++ *    - Chave primária UUID (gen_random_uuid())
++ *    - Unicidade de provider_payment_id
++ *    - Índice parcial billing_one_pending em internal.billing_payments:
++ *      (reutilização de cobranças pendentes válidas e expiração controlada das anteriores)
++ * 5. Atomicidade transacional e anti-tampering via RPC em public.confirm_payment_and_activate_subscription_atomic.
++ * 6. Fonte canônica única de planos: public.subscriptions (sem billing_subscriptions).
+  */
+ 
+ import { executeSql, isPostgresConfigured } from './postgres';
+@@ -33,10 +35,18 @@ if (supabaseUrl && serviceRoleKey) {
+   }
+ }
+ 
++/**
++ * Verifica se a conexão com banco de dados está disponível.
++ * Para operações financeiras, isPostgresConfigured() é mandatório.
++ */
+ export function isDatabaseConfigured(): boolean {
+-  return isPostgresConfigured() || Boolean(serverSupabaseClient && supabaseUrl && serviceRoleKey);
++  return isPostgresConfigured();
+ }
+ 
++/**
++ * Retorna o cliente Supabase para uso exclusivo em Auth ou consultas públicas legítimas.
++ * NUNCA utilizado como fallback para o schema privado internal.
++ */
+ export function getServerSupabase(): SupabaseClient {
+   if (!serverSupabaseClient) {
+     throw new Error('SUPABASE_UNAVAILABLE: SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY ausente.');
+@@ -58,6 +68,8 @@ export interface TestDatabaseAdapter {
+     error_code?: string;
+     chargeId?: string;
+   }>;
++  getActivePendingCharge?: (userId: string | null, email?: string) => Promise<any | null>;
++  checkActiveSubscription?: (userId: string | null, email?: string) => Promise<boolean>;
+ }
+ 
+ let activeTestAdapter: TestDatabaseAdapter | null = null;
+@@ -92,165 +104,421 @@ export interface StoredCharge {
+ }
+ 
+ // -----------------------------------------------------------------------------
+-// OPERAÇÕES FINANCEIRAS PERSISTENTES VIA POSTGRESQL SERVER-SIDE
++// REGRAS DE CONSTRAINTS & FLUXO PIX IDEMPOTENTE
+ // -----------------------------------------------------------------------------
+ 
+ /**
+- * Cria ou registra uma cobrança Pix pendente na tabela real internal.billing_payments.
+- * Utiliza conexão PostgreSQL direta parametrizada sem expor o schema internal via Data API.
++ * Verifica se o usuário já possui assinatura Pro ativa em public.subscriptions.
+  */
+-export async function recordPendingCharge(charge: {
+-  id?: string;
++export async function checkUserActiveSubscription(userId: string | null, userEmail?: string): Promise<boolean> {
++  if (activeTestAdapter?.checkActiveSubscription) {
++    return activeTestAdapter.checkActiveSubscription(userId, userEmail);
++  }
++
++  if (!isPostgresConfigured()) {
++    throw new Error('POSTGRES_UNAVAILABLE: Verificação de assinatura exige conexão PostgreSQL configurada.');
++  }
++
++  try {
++    if (userId) {
++      const res = await executeSql(
++        `SELECT id FROM public.subscriptions WHERE user_id = $1 AND status = 'active' LIMIT 1`,
++        [userId]
++      );
++      if (res.rows.length > 0) return true;
++    }
++
++    if (userEmail) {
++      const resEmail = await executeSql(
++        `SELECT s.id FROM public.subscriptions s
++         JOIN auth.users u ON u.id = s.user_id
++         WHERE LOWER(TRIM(u.email)) = LOWER(TRIM($1)) AND s.status = 'active'
++         LIMIT 1`,
++        [userEmail]
++      );
++      if (resEmail.rows.length > 0) return true;
++    }
++
++    return false;
++  } catch (err: any) {
++    console.error('[Postgres Error] Falha ao checar assinatura ativa:', err.message);
++    throw new Error(`DATABASE_QUERY_FAILED: ${err.message}`);
++  }
++}
++
++/**
++ * Consulta cobrança pendente existente do usuário para respeitar o índice parcial billing_one_pending.
++ */
++export async function getActivePendingChargeForUser(userId: string | null, userEmail?: string): Promise<StoredCharge | null> {
++  if (activeTestAdapter?.getActivePendingCharge) {
++    return activeTestAdapter.getActivePendingCharge(userId, userEmail);
++  }
++
++  if (!isPostgresConfigured()) {
++    throw new Error('POSTGRES_UNAVAILABLE: Operações financeiras exigem conexão PostgreSQL configurada.');
++  }
++
++  try {
++    let queryText = `
++      SELECT 
++        id,
++        provider_payment_id,
++        user_id,
++        amount,
++        currency,
++        status,
++        checkout_data,
++        created_at,
++        updated_at
++      FROM internal.billing_payments
++      WHERE status IN ('PENDING', 'PROCESSING')
++        AND request_state <> 'FAILED'
++    `;
++    const params: any[] = [];
++
++    if (userId) {
++      params.push(userId);
++      queryText += ` AND user_id = $${params.length}`;
++    } else if (userEmail) {
++      params.push(userEmail.toLowerCase().trim());
++      queryText += ` AND LOWER(checkout_data->>'user_email') = $${params.length}`;
++    } else {
++      return null;
++    }
++
++    queryText += ` ORDER BY created_at DESC LIMIT 1`;
++
++    const res = await executeSql(queryText, params);
++    if (res.rows.length === 0) return null;
++
++    const row = res.rows[0];
++    const amount = Number(row.amount || 0);
++
++    return {
++      id: row.id,
++      providerPaymentId: row.provider_payment_id || row.id,
++      userId: row.user_id,
++      userEmail: row.checkout_data?.user_email || '',
++      amount,
++      amountCents: amount,
++      currency: row.currency || 'BRL',
++      status: row.status,
++      description: row.checkout_data?.description || 'Assinatura FatosBR Pro',
++      qrCodeText: row.checkout_data?.qr_code_text,
++      createdAt: row.created_at,
++      updatedAt: row.updated_at
++    };
++  } catch (err: any) {
++    console.error('[Postgres Error] Falha ao consultar cobrança pendente do usuário:', err.message);
++    throw new Error(`DATABASE_QUERY_FAILED: ${err.message}`);
++  }
++}
++
++/**
++ * Expira ou cancela uma cobrança pendente existente, liberando a constraint billing_one_pending.
++ */
++export async function cancelOrExpirePendingCharge(chargeId: string, reason = 'EXPIRED'): Promise<boolean> {
++  if (!isPostgresConfigured()) {
++    throw new Error('POSTGRES_UNAVAILABLE: Operação financeira exige conexão PostgreSQL configurada.');
++  }
++
++  try {
++    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(chargeId);
++    let queryText = `
++      UPDATE internal.billing_payments
++      SET status = $1,
++          request_state = 'FAILED',
++          cancelled_at = NOW(),
++          updated_at = NOW()
++      WHERE 
++    `;
++    if (isUuid) {
++      queryText += ` (id = $2::uuid OR provider_payment_id = $2)`;
++    } else {
++      queryText += ` provider_payment_id = $2`;
++    }
++    queryText += ` AND status IN ('PENDING', 'PROCESSING')`;
++
++    await executeSql(queryText, [reason, chargeId]);
++    return true;
++  } catch (err: any) {
++    console.error(`[Postgres Error] Falha ao expirar cobrança ${chargeId}:`, err.message);
++    return false;
++  }
++}
++
++/**
++ * Cria ou Reutiliza uma Cobrança Pix com respeito integral ao índice parcial billing_one_pending:
++ * 1. Checa se o usuário já é assinante ativo Pro (retorna alreadySubscribed: true).
++ * 2. Checa se existe cobrança pendente ativa:
++ *    - Se válida (< 15 minutos e mesmo valor): reutiliza a existente (evita colisão de índice e Pix duplicado).
++ *    - Se expirada (> 15 minutos): marca como EXPIRED / FAILED antes de criar a nova.
++ * 3. Cria a nova cobrança atômica com UUID primário.
++ * 4. Trata tentativas simultâneas (concorrência) sem estourar erro 500 no cliente.
++ */
++export async function createOrReusePixCharge(params: {
+   providerPaymentId?: string;
+-  userEmail?: string;
+   userId?: string | null;
+-  amount?: number;
+-  amountCents?: number;
+-  currency?: string;
++  userEmail?: string;
++  amountCents: number;
+   description: string;
+   qrCodeText?: string;
+-}): Promise<boolean> {
++}): Promise<{
++  charge: StoredCharge;
++  reused: boolean;
++  alreadySubscribed?: boolean;
++}> {
+   if (activeTestAdapter) {
+-    return activeTestAdapter.recordPendingCharge(charge);
++    if (activeTestAdapter.checkActiveSubscription) {
++      const isSub = await activeTestAdapter.checkActiveSubscription(params.userId || null, params.userEmail);
++      if (isSub) {
++        return {
++          charge: null as any,
++          reused: false,
++          alreadySubscribed: true
++        };
++      }
++    }
++    if (activeTestAdapter.getActivePendingCharge) {
++      const existing = await activeTestAdapter.getActivePendingCharge(params.userId || null, params.userEmail);
++      if (existing) {
++        return {
++          charge: existing,
++          reused: true
++        };
++      }
++    }
++    try {
++      await activeTestAdapter.recordPendingCharge(params);
++    } catch (mockErr: any) {
++      if (
++        mockErr.code === '23505' ||
++        mockErr.message?.includes('billing_one_pending') ||
++        mockErr.message?.includes('provider_payment_id')
++      ) {
++        if (activeTestAdapter.getActivePendingCharge) {
++          const concurrent = await activeTestAdapter.getActivePendingCharge(params.userId || null, params.userEmail);
++          if (concurrent) {
++            return { charge: concurrent, reused: true };
++          }
++        }
++      }
++      throw mockErr;
++    }
++
++    if (activeTestAdapter.getActivePendingCharge) {
++      const saved = await activeTestAdapter.getActivePendingCharge(params.userId || null, params.userEmail);
++      if (saved) {
++        return { charge: saved, reused: false };
++      }
++    }
++
++    const mockCharge: StoredCharge = {
++      id: `uuid_${Date.now()}`,
++      providerPaymentId: params.providerPaymentId || `zyn_${Date.now()}`,
++      userId: params.userId || null,
++      userEmail: params.userEmail || '',
++      amount: params.amountCents,
++      amountCents: params.amountCents,
++      currency: 'BRL',
++      status: 'PENDING',
++      description: params.description,
++      qrCodeText: params.qrCodeText,
++      createdAt: new Date().toISOString(),
++      updatedAt: new Date().toISOString()
++    };
++    return { charge: mockCharge, reused: false };
++  }
++
++  if (!isPostgresConfigured()) {
++    throw new Error('POSTGRES_UNAVAILABLE: Operações financeiras exigem conexão PostgreSQL server-side configurada.');
+   }
+ 
+-  const providerPaymentId = charge.providerPaymentId || charge.id || `zyn_${Date.now()}`;
+-  const amount = Math.round(charge.amount ?? charge.amountCents ?? 2990);
+-  const currency = charge.currency || 'BRL';
++  const userId = params.userId || null;
++  const userEmail = (params.userEmail || '').toLowerCase().trim();
++  const amount = Math.round(params.amountCents);
++
++  // 1. Checa se o usuário já é assinante ativo Pro
++  if (userId || userEmail) {
++    const isAlreadySubscribed = await checkUserActiveSubscription(userId, userEmail);
++    if (isAlreadySubscribed) {
++      return {
++        charge: null as any,
++        reused: false,
++        alreadySubscribed: true
++      };
++    }
++  }
++
++  // 2. Checa cobrança pendente existente (respeito a billing_one_pending)
++  const existingPending = await getActivePendingChargeForUser(userId, userEmail);
++  if (existingPending) {
++    const ageMs = Date.now() - new Date(existingPending.createdAt).getTime();
++    const fifteenMinutesMs = 15 * 60 * 1000;
++
++    // Se ainda está dentro do período de validade do Pix (15 min) e tem o mesmo valor, reutiliza
++    if (ageMs < fifteenMinutesMs && existingPending.amountCents === amount) {
++      return {
++        charge: existingPending,
++        reused: true
++      };
++    }
++
++    // Se expirou ou o valor é diferente, cancela a cobrança anterior no banco para liberar o índice
++    await cancelOrExpirePendingCharge(existingPending.id, 'EXPIRED');
++  }
++
++  // 3. Criação de nova cobrança
++  const providerPaymentId = params.providerPaymentId || `zyn_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+   const checkoutData = JSON.stringify({
+-    user_email: (charge.userEmail || '').toLowerCase().trim(),
+-    description: charge.description,
+-    qr_code_text: charge.qrCodeText || null
++    user_email: userEmail,
++    description: params.description,
++    qr_code_text: params.qrCodeText || null
+   });
+ 
+-  // 1. Conexão direta PostgreSQL (Recomendada em Produção Vercel)
+-  if (isPostgresConfigured()) {
+-    try {
+-      const queryText = `
+-        INSERT INTO internal.billing_payments (
+-          user_id,
+-          provider,
+-          provider_payment_id,
+-          amount,
+-          currency,
+-          status,
+-          type,
+-          checkout_data,
+-          created_at,
+-          updated_at
+-        ) VALUES ($1, 'zynpay', $2, $3, $4, 'PENDING', 'PIX', $5::jsonb, NOW(), NOW())
+-      `;
+-      await executeSql(queryText, [
+-        charge.userId || null,
+-        providerPaymentId,
++  try {
++    const insertQuery = `
++      INSERT INTO internal.billing_payments (
++        id,
++        user_id,
++        provider,
++        provider_payment_id,
+         amount,
+         currency,
+-        checkoutData
+-      ]);
+-      return true;
+-    } catch (pgErr: any) {
+-      console.error(`[Postgres Error] Falha ao registrar cobrança ${providerPaymentId}:`, pgErr.message);
+-      throw new Error(`DATABASE_PERSISTENCE_FAILED: Falha na gravação do pagamento via PostgreSQL (${pgErr.message})`);
+-    }
+-  }
+-
+-  // 2. Fallback via cliente Supabase se disponível em ambiente de desenvolvimento
+-  if (serverSupabaseClient) {
+-    const payload: any = {
+-      user_id: charge.userId || null,
+-      provider: 'zynpay',
+-      provider_payment_id: providerPaymentId,
++        status,
++        type,
++        request_state,
++        checkout_data,
++        created_at,
++        updated_at
++      ) VALUES (
++        gen_random_uuid(),
++        $1,
++        'zynpay',
++        $2,
++        $3,
++        'BRL',
++        'PENDING',
++        'PIX',
++        'PENDING',
++        $4::jsonb,
++        NOW(),
++        NOW()
++      )
++      RETURNING id, provider_payment_id, user_id, amount, currency, status, checkout_data, created_at, updated_at
++    `;
++
++    const res = await executeSql(insertQuery, [
++      userId,
++      providerPaymentId,
+       amount,
+-      currency,
+-      status: 'PENDING',
+-      type: 'PIX',
+-      checkout_data: JSON.parse(checkoutData),
+-      created_at: new Date().toISOString(),
+-      updated_at: new Date().toISOString()
++      checkoutData
++    ]);
++
++    const row = res.rows[0];
++    const newCharge: StoredCharge = {
++      id: row.id,
++      providerPaymentId: row.provider_payment_id,
++      userId: row.user_id,
++      userEmail: row.checkout_data?.user_email || userEmail,
++      amount: Number(row.amount || 0),
++      amountCents: Number(row.amount || 0),
++      currency: row.currency || 'BRL',
++      status: row.status,
++      description: row.checkout_data?.description || params.description,
++      qrCodeText: row.checkout_data?.qr_code_text || params.qrCodeText,
++      createdAt: row.created_at,
++      updatedAt: row.updated_at
+     };
+-    const { error } = await serverSupabaseClient.schema('internal').from('billing_payments').insert(payload);
+-    if (error) {
+-      console.error(`[DB Error] Falha ao persistir cobrança ${providerPaymentId}:`, error.message);
+-      throw new Error(`DATABASE_PERSISTENCE_FAILED: ${error.message}`);
++
++    return { charge: newCharge, reused: false };
++  } catch (err: any) {
++    // 4. Tratamento de concorrência: se outro processo inseriu cobrança pendente simultaneamente
++    if (
++      err.code === '23505' ||
++      err.message?.includes('billing_one_pending') ||
++      err.message?.includes('provider_payment_id')
++    ) {
++      console.warn('[Concurrency Handled] Conflito concorrente detectado, recuperando cobrança pendente existente.');
++      const concurrentCharge = await getActivePendingChargeForUser(userId, userEmail);
++      if (concurrentCharge) {
++        return { charge: concurrentCharge, reused: true };
++      }
+     }
+-    return true;
++
++    console.error(`[Postgres Error] Falha ao registrar cobrança ${providerPaymentId}:`, err.message);
++    throw new Error(`DATABASE_PERSISTENCE_FAILED: Falha na gravação do pagamento via PostgreSQL (${err.message})`);
+   }
++}
+ 
+-  throw new Error('DATABASE_PERSISTENCE_FAILED: Nenhuma conexão PostgreSQL ou Supabase configurada no backend.');
++/**
++ * Função de conveniência retrocompatível para registrar cobrança pendente.
++ */
++export async function recordPendingCharge(charge: {
++  id?: string;
++  providerPaymentId?: string;
++  userEmail?: string;
++  userId?: string | null;
++  amount?: number;
++  amountCents?: number;
++  currency?: string;
++  description: string;
++  qrCodeText?: string;
++}): Promise<boolean> {
++  if (activeTestAdapter) {
++    return activeTestAdapter.recordPendingCharge(charge);
++  }
++
++  const amountCents = Math.round(charge.amountCents ?? (charge.amount ? charge.amount * 100 : 2990));
++  await createOrReusePixCharge({
++    providerPaymentId: charge.providerPaymentId || charge.id,
++    userId: charge.userId,
++    userEmail: charge.userEmail,
++    amountCents,
++    description: charge.description,
++    qrCodeText: charge.qrCodeText
++  });
++  return true;
+ }
+ 
+ /**
+  * Consulta cobrança no banco de dados por ID (UUID interno ou provider_payment_id).
++ * Exclusivamente via PostgreSQL server-side sem fallback silencioso para schema privado.
+  */
+ export async function getChargeById(chargeId: string): Promise<StoredCharge | null> {
+   if (activeTestAdapter) {
+     return activeTestAdapter.getChargeById(chargeId);
+   }
+ 
+-  // 1. Consulta direta via PostgreSQL
+-  if (isPostgresConfigured()) {
+-    try {
+-      const queryText = `
+-        SELECT 
+-          id,
+-          provider_payment_id,
+-          user_id,
+-          amount,
+-          currency,
+-          status,
+-          checkout_data,
+-          approved_at,
+-          created_at,
+-          updated_at
+-        FROM internal.billing_payments
+-        WHERE provider_payment_id = $1
+-           OR (CASE WHEN $1 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN id = $1::uuid ELSE false END)
+-        LIMIT 1
+-      `;
+-      const res = await executeSql(queryText, [chargeId]);
+-      if (res.rows.length === 0) {
+-        return null;
+-      }
+-      const data = res.rows[0];
+-      const amount = Number(data.amount || 0);
+-
+-      return {
+-        id: data.id,
+-        providerPaymentId: data.provider_payment_id || data.id,
+-        userId: data.user_id,
+-        userEmail: data.checkout_data?.user_email || '',
+-        amount,
+-        amountCents: amount,
+-        currency: data.currency || 'BRL',
+-        status: data.status,
+-        description: data.checkout_data?.description || 'Assinatura FatosBR Pro',
+-        qrCodeText: data.checkout_data?.qr_code_text,
+-        createdAt: data.created_at,
+-        updatedAt: data.updated_at,
+-        approvedAt: data.approved_at,
+-        paidAt: data.approved_at
+-      };
+-    } catch (err: any) {
+-      console.error(`[Postgres Error] Falha ao consultar cobrança ${chargeId}:`, err.message);
+-      throw new Error(`DATABASE_QUERY_FAILED: ${err.message}`);
+-    }
++  if (!isPostgresConfigured()) {
++    throw new Error('POSTGRES_UNAVAILABLE: Operações financeiras exigem conexão PostgreSQL configurada.');
+   }
+ 
+-  // 2. Fallback via cliente Supabase
+-  if (serverSupabaseClient) {
+-    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(chargeId);
+-    let query = serverSupabaseClient.schema('internal').from('billing_payments').select('*');
+-    if (isUuid) {
+-      query = query.or(`id.eq.${chargeId},provider_payment_id.eq.${chargeId}`);
+-    } else {
+-      query = query.eq('provider_payment_id', chargeId);
+-    }
+-    const { data, error } = await query.maybeSingle();
+-    if (error) {
+-      throw new Error(`DATABASE_QUERY_FAILED: ${error.message}`);
++  try {
++    const queryText = `
++      SELECT 
++        id,
++        provider_payment_id,
++        user_id,
++        amount,
++        currency,
++        status,
++        checkout_data,
++        approved_at,
++        created_at,
++        updated_at
++      FROM internal.billing_payments
++      WHERE provider_payment_id = $1
++         OR (CASE WHEN $1 ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN id = $1::uuid ELSE false END)
++      LIMIT 1
++    `;
++    const res = await executeSql(queryText, [chargeId]);
++    if (res.rows.length === 0) {
++      return null;
+     }
+-    if (!data) return null;
++    const data = res.rows[0];
+     const amount = Number(data.amount || 0);
++
+     return {
+       id: data.id,
+       providerPaymentId: data.provider_payment_id || data.id,
+@@ -267,89 +535,57 @@ export async function getChargeById(chargeId: string): Promise<StoredCharge | nu
+       approvedAt: data.approved_at,
+       paidAt: data.approved_at
+     };
++  } catch (err: any) {
++    console.error(`[Postgres Error] Falha ao consultar cobrança ${chargeId}:`, err.message);
++    throw new Error(`DATABASE_QUERY_FAILED: ${err.message}`);
+   }
+-
+-  throw new Error('DATABASE_QUERY_FAILED: Banco de dados indisponível.');
+ }
+ 
+ /**
+  * Valida idempotência de evento de webhook inserindo registro inicial na tabela real internal.billing_events.
++ * Exclusivamente via PostgreSQL server-side.
+  */
+ export async function checkAndLockWebhookEvent(eventId: string, provider = 'zynpay'): Promise<{ isDuplicate: boolean }> {
+   if (activeTestAdapter) {
+     return activeTestAdapter.checkAndLockWebhookEvent(eventId, provider);
+   }
+ 
+-  if (isPostgresConfigured()) {
+-    try {
+-      // 1. Verifica se já existe e foi processado
+-      const checkRes = await executeSql(
+-        `SELECT processed FROM internal.billing_events WHERE provider = $1 AND provider_event_id = $2 LIMIT 1`,
+-        [provider, eventId]
+-      );
+-      if (checkRes.rows.length > 0 && checkRes.rows[0].processed) {
+-        return { isDuplicate: true };
+-      }
+-
+-      // 2. Insere registro de trava de evento
+-      await executeSql(
+-        `INSERT INTO internal.billing_events (
+-           provider, provider_event_id, event_type, payload, processed, created_at
+-         ) VALUES ($1, $2, 'charge.paid', '{"registered":true}'::jsonb, false, NOW())
+-         ON CONFLICT (provider, provider_event_id) DO NOTHING`,
+-        [provider, eventId]
+-      );
+-      return { isDuplicate: false };
+-    } catch (err: any) {
+-      if (err.code === '23505' || err.message?.toLowerCase().includes('duplicate') || err.message?.toLowerCase().includes('unique')) {
+-        return { isDuplicate: true };
+-      }
+-      console.error(`[Postgres Error] Falha de idempotência no evento ${eventId}:`, err.message);
+-      throw new Error(`DATABASE_LOCK_FAILED: ${err.message}`);
+-    }
++  if (!isPostgresConfigured()) {
++    throw new Error('POSTGRES_UNAVAILABLE: Operações financeiras exigem conexão PostgreSQL configurada.');
+   }
+ 
+-  // Fallback via Supabase
+-  if (serverSupabaseClient) {
+-    const { data: existing } = await serverSupabaseClient
+-      .schema('internal')
+-      .from('billing_events')
+-      .select('id, processed')
+-      .eq('provider', provider)
+-      .eq('provider_event_id', eventId)
+-      .maybeSingle();
+-
+-    if (existing && existing.processed) {
++  try {
++    // 1. Verifica se já existe e foi processado
++    const checkRes = await executeSql(
++      `SELECT processed FROM internal.billing_events WHERE provider = $1 AND provider_event_id = $2 LIMIT 1`,
++      [provider, eventId]
++    );
++    if (checkRes.rows.length > 0 && checkRes.rows[0].processed) {
+       return { isDuplicate: true };
+     }
+ 
+-    const { error } = await serverSupabaseClient
+-      .schema('internal')
+-      .from('billing_events')
+-      .insert({
+-        provider,
+-        provider_event_id: eventId,
+-        event_type: 'charge.paid',
+-        payload: { registered_at: new Date().toISOString() },
+-        processed: false,
+-        created_at: new Date().toISOString()
+-      });
+-
+-    if (error) {
+-      if (error.code === '23505' || error.message?.toLowerCase().includes('duplicate') || error.message?.toLowerCase().includes('unique')) {
+-        return { isDuplicate: true };
+-      }
+-      throw new Error(`DATABASE_LOCK_FAILED: ${error.message}`);
+-    }
++    // 2. Insere registro de trava de evento
++    await executeSql(
++      `INSERT INTO internal.billing_events (
++         id, provider, provider_event_id, event_type, payload, processed, created_at
++       ) VALUES (gen_random_uuid(), $1, $2, 'charge.paid', '{"registered":true}'::jsonb, false, NOW())
++       ON CONFLICT (provider, provider_event_id) DO NOTHING`,
++      [provider, eventId]
++    );
+     return { isDuplicate: false };
++  } catch (err: any) {
++    if (err.code === '23505' || err.message?.toLowerCase().includes('duplicate') || err.message?.toLowerCase().includes('unique')) {
++      return { isDuplicate: true };
++    }
++    console.error(`[Postgres Error] Falha de idempotência no evento ${eventId}:`, err.message);
++    throw new Error(`DATABASE_LOCK_FAILED: ${err.message}`);
+   }
+-
+-  throw new Error('DATABASE_LOCK_FAILED: Banco de dados indisponível.');
+ }
+ 
+ /**
+  * Confirma pagamento e ativa assinatura Pro de forma ATÔMICA via RPC PostgreSQL no schema real.
+  * Invoca public.confirm_payment_and_activate_subscription_atomic por conexão server-side autorizada.
++ * ZERO fallback para Data API.
+  */
+ export async function confirmPaymentAndActivateSubscriptionAtomic(params: {
+   chargeId: string;
+@@ -379,59 +615,27 @@ export async function confirmPaymentAndActivateSubscriptionAtomic(params: {
+     };
+   }
+ 
++  if (!isPostgresConfigured()) {
++    throw new Error('POSTGRES_UNAVAILABLE: Confirmação financeira exige conexão PostgreSQL server-side configurada.');
++  }
++
+   const paymentId = params.providerPaymentId || params.chargeId;
+   const amount = Math.round(params.expectedAmount ?? params.expectedAmountCents ?? 2990);
+   const currency = params.expectedCurrency || 'BRL';
+   const provider = params.provider || 'zynpay';
+   const rawPayload = JSON.stringify(params.rawPayload || {});
+ 
+-  // 1. Execução via conexão direta PostgreSQL (Recomendada server-side)
+-  if (isPostgresConfigured()) {
+-    try {
+-      const queryText = `
+-        SELECT public.confirm_payment_and_activate_subscription_atomic(
+-          $1, $2, $3, $4, $5, $6::jsonb
+-        ) AS outcome
+-      `;
+-      const res = await executeSql(queryText, [paymentId, params.eventId, amount, currency, provider, rawPayload]);
+-      const data = res.rows[0]?.outcome;
+-
+-      if (!data || typeof data !== 'object') {
+-        throw new Error('ATOMIC_TRANSACTION_INVALID_RESPONSE: Resposta da RPC vazia ou malformada.');
+-      }
+-
+-      return {
+-        success: Boolean(data.success),
+-        duplicate: Boolean(data.duplicate),
+-        error: data.error,
+-        errorCode: data.error_code,
+-        chargeId: data.charge_id || paymentId,
+-        userEmail: data.user_email
+-      };
+-    } catch (err: any) {
+-      console.error('[Postgres Error] Falha na execução da transação atômica RPC:', err.message);
+-      throw new Error(`ATOMIC_TRANSACTION_FAILED: ${err.message}`);
+-    }
+-  }
+-
+-  // 2. Fallback via RPC Supabase
+-  if (serverSupabaseClient) {
+-    const { data, error } = await serverSupabaseClient.rpc('confirm_payment_and_activate_subscription_atomic', {
+-      p_provider_payment_id: paymentId,
+-      p_event_id: params.eventId,
+-      p_expected_amount: amount,
+-      p_expected_currency: currency,
+-      p_provider: provider,
+-      p_raw_payload: params.rawPayload || {}
+-    });
+-
+-    if (error) {
+-      console.error('[Supabase RPC Error] Falha na transação atômica:', error.message);
+-      throw new Error(`ATOMIC_TRANSACTION_FAILED: ${error.message}`);
+-    }
++  try {
++    const queryText = `
++      SELECT public.confirm_payment_and_activate_subscription_atomic(
++        $1, $2, $3, $4, $5, $6::jsonb
++      ) AS outcome
++    `;
++    const res = await executeSql(queryText, [paymentId, params.eventId, amount, currency, provider, rawPayload]);
++    const data = res.rows[0]?.outcome;
+ 
+     if (!data || typeof data !== 'object') {
+-      throw new Error('ATOMIC_TRANSACTION_INVALID_RESPONSE: Resposta da RPC vazia.');
++      throw new Error('ATOMIC_TRANSACTION_INVALID_RESPONSE: Resposta da RPC vazia ou malformada.');
+     }
+ 
+     return {
+@@ -442,7 +646,8 @@ export async function confirmPaymentAndActivateSubscriptionAtomic(params: {
+       chargeId: data.charge_id || paymentId,
+       userEmail: data.user_email
+     };
++  } catch (err: any) {
++    console.error('[Postgres Error] Falha na execução da transação atômica RPC:', err.message);
++    throw new Error(`ATOMIC_TRANSACTION_FAILED: ${err.message}`);
+   }
+-
+-  throw new Error('ATOMIC_TRANSACTION_FAILED: Nenhuma conexão com banco de dados disponível.');
+ }
+diff --git a/api/_lib/rateLimiter.ts b/api/_lib/rateLimiter.ts
+index f98f563..80f13e4 100644
+--- a/api/_lib/rateLimiter.ts
++++ b/api/_lib/rateLimiter.ts
+@@ -93,39 +93,17 @@ export async function enforceRateLimit(
+         };
+       }
+     } else {
+-      // 3. Fallback via cliente Supabase se disponível
+-      if (!isDatabaseConfigured()) {
+-        if (profile.isHighRisk) {
+-          console.error(`[Rate Limit Security] Bloqueio fail-closed ativo para ${key}: Banco de dados indisponível.`);
+-          sendJson(res, 503, {
+-            error: 'Serviço temporariamente indisponível. Medida de segurança ativa para operações sensíveis.',
+-            code: 'RATE_LIMIT_STORE_UNAVAILABLE'
+-          });
+-          return false;
+-        }
+-        return true;
+-      }
+-
+-      const supabase = getServerSupabase();
+-      const { data, error } = await supabase.rpc('check_and_increment_rate_limit', {
+-        p_key: key,
+-        p_max_requests: profile.maxRequests,
+-        p_window_ms: profile.windowMs
+-      });
+-
+-      if (error) {
+-        throw error;
+-      }
+-
+-      if (data) {
+-        result = {
+-          allowed: Boolean(data.allowed),
+-          current: Number(data.current || 1),
+-          limit: Number(data.limit || profile.maxRequests),
+-          retry_after: Number(data.retry_after || 0),
+-          remaining: Number(data.remaining ?? 0)
+-        };
++      // 3. Ausência de conexão PostgreSQL server-side: bloqueio fail-closed para categorias sensíveis
++      if (profile.isHighRisk) {
++        console.error(`[Rate Limit Security] Bloqueio fail-closed ativo para ${key}: Conexão PostgreSQL direta indisponível.`);
++        sendJson(res, 503, {
++          error: 'Serviço temporariamente indisponível. Medida de segurança ativa para operações sensíveis.',
++          code: 'RATE_LIMIT_STORE_UNAVAILABLE'
++        });
++        return false;
+       }
++      // Rotas de leitura pública geral podem operar em modo tolerante
++      return true;
+     }
+   } catch (err: any) {
+     console.error(`[Rate Limit Store Failure] Falha ao verificar taxa para ${key}:`, err.message);
+diff --git a/api/zynpay/charges.ts b/api/zynpay/charges.ts
+index 4390dba..05a1c50 100644
+--- a/api/zynpay/charges.ts
++++ b/api/zynpay/charges.ts
+@@ -13,7 +13,7 @@
+ 
+ import QRCode from 'qrcode';
+ import { getServerKeys, sendJson, setCorsHeaders, readJsonBody } from '../_lib/common';
+-import { recordPendingCharge, getChargeById } from '../_lib/db';
++import { createOrReusePixCharge, getChargeById, getServerSupabase, isDatabaseConfigured } from '../_lib/db';
+ import { enforceRateLimit } from '../_lib/rateLimiter';
+ 
+ export default async function handler(req: any, res: any) {
+@@ -66,46 +66,81 @@ export default async function handler(req: any, res: any) {
+       email: String(body.customer?.email || 'leitor@fatosbr.com.br').toLowerCase().trim().slice(0, 100)
+     };
+ 
+-    const chargeId = `zyn_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+-    const pixCopyPaste = `00020126580014br.gov.bcb.pix0136${chargeId}520400005303986540${amount.toFixed(2)}5802BR5916FATOSBR NOTICIAS6009SAO PAULO62070503***6304`;
++    // Resolver userId se autenticado via Bearer Token do Supabase Auth
++    let resolvedUserId: string | null = body.userId || null;
++    const authHeader = req.headers?.authorization || '';
++    if (!resolvedUserId && authHeader.startsWith('Bearer ')) {
++      const token = authHeader.slice(7).trim();
++      try {
++        const supabase = getServerSupabase();
++        const { data: { user } } = await supabase.auth.getUser(token);
++        if (user) {
++          resolvedUserId = user.id;
++        }
++      } catch {}
++    }
+ 
+-    let qrCodeBase64 = '';
+-    try {
+-      qrCodeBase64 = await QRCode.toDataURL(pixCopyPaste, { width: 320, margin: 2 });
+-    } catch {}
++    const initialChargeId = `zyn_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
++    const initialPixCopyPaste = `00020126580014br.gov.bcb.pix0136${initialChargeId}520400005303986540${amount.toFixed(2)}5802BR5916FATOSBR NOTICIAS6009SAO PAULO62070503***6304`;
+ 
+-    const chargeRecord = {
+-      id: chargeId,
+-      amount: amountCents, // Retorna em centavos conforme interface ZynPayCharge
+-      amountFormatted: `R$ ${amount.toFixed(2).replace('.', ',')}`,
+-      status: 'PENDING' as const,
+-      description,
+-      customer,
+-      qrCode: qrCodeBase64,
+-      qrCodeText: pixCopyPaste,
+-      createdAt: new Date().toISOString(),
+-      expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString()
+-    };
+-
+-    // 1. Persistência mandatória no PostgreSQL Supabase
++    // 1. Persistência atômica e verificação de constraints no PostgreSQL
++    let chargePersistenceResult;
+     try {
+-      await recordPendingCharge({
+-        id: chargeId,
++      chargePersistenceResult = await createOrReusePixCharge({
++        providerPaymentId: initialChargeId,
++        userId: resolvedUserId,
+         userEmail: customer.email,
+         amountCents,
+         description,
+-        qrCodeText: pixCopyPaste
++        qrCodeText: initialPixCopyPaste
+       });
+     } catch (dbErr: any) {
+-      console.error('[Persistence Failure] Não foi possível salvar cobrança pendente:', dbErr.message);
++      console.error('[Persistence Failure] Falha ao persistir cobrança:', dbErr.message);
++      if (dbErr.message?.includes('POSTGRES_UNAVAILABLE')) {
++        return sendJson(res, 503, {
++          error: 'Serviço financeiro temporariamente indisponível. Operações suspensas até restabelecimento da conexão segura com o banco.',
++          code: 'POSTGRES_UNAVAILABLE'
++        });
++      }
+       return sendJson(res, 503, {
+         error: 'Falha na persistência da cobrança. Operação abortada com segurança.',
+         code: 'DATABASE_PERSISTENCE_FAILED'
+       });
+     }
+ 
+-    // 2. Se houver chave ativa da ZynPay, cria cobrança upstream
+-    if (apiKey) {
++    // Se o usuário já for assinante Pro ativo, bloqueia cobrança duplicada
++    if (chargePersistenceResult.alreadySubscribed) {
++      return sendJson(res, 409, {
++        error: 'Você já possui uma assinatura FatosBR Pro ativa vinculada a esta conta.',
++        code: 'USER_ALREADY_SUBSCRIBED'
++      });
++    }
++
++    const effectiveCharge = chargePersistenceResult.charge;
++    const effectiveChargeId = effectiveCharge.providerPaymentId || effectiveCharge.id;
++    const pixCopyPaste = effectiveCharge.qrCodeText || initialPixCopyPaste;
++
++    let qrCodeBase64 = '';
++    try {
++      qrCodeBase64 = await QRCode.toDataURL(pixCopyPaste, { width: 320, margin: 2 });
++    } catch {}
++
++    const chargeRecord = {
++      id: effectiveChargeId,
++      amount: effectiveCharge.amountCents,
++      amountFormatted: `R$ ${(effectiveCharge.amountCents / 100).toFixed(2).replace('.', ',')}`,
++      status: effectiveCharge.status,
++      description: effectiveCharge.description,
++      customer,
++      qrCode: qrCodeBase64,
++      qrCodeText: pixCopyPaste,
++      createdAt: effectiveCharge.createdAt,
++      expiresAt: new Date(new Date(effectiveCharge.createdAt).getTime() + 15 * 60 * 1000).toISOString(),
++      reused: Boolean(chargePersistenceResult.reused)
++    };
++
++    // 2. Se for nova cobrança e houver chave ativa da ZynPay, cria no gateway oficial
++    if (!chargePersistenceResult.reused && apiKey) {
+       try {
+         const upRes = await fetch('https://api.zynpay.com.br/v1/public/charges', {
+           method: 'POST',
+@@ -123,27 +158,17 @@ export default async function handler(req: any, res: any) {
+ 
+         if (upRes.ok) {
+           const upData = await upRes.json();
+-          if (upData.id) {
+-            chargeRecord.id = upData.id;
+-            // Salva também o ID upstream retornado
+-            try {
+-              await recordPendingCharge({
+-                id: upData.id,
+-                userEmail: customer.email,
+-                amountCents,
+-                description,
+-                qrCodeText: upData.qrCodeText || pixCopyPaste
+-              });
+-            } catch {}
+-          }
+           if (upData.qrCode) chargeRecord.qrCode = upData.qrCode;
+           if (upData.qrCodeText) chargeRecord.qrCodeText = upData.qrCodeText;
+         }
+-      } catch {}
++      } catch (upErr: any) {
++        console.warn('[ZynPay Gateway Notice] Não foi possível sincronizar upstream de imediato:', upErr.message);
++      }
+     }
+ 
+     return sendJson(res, 200, {
+       success: true,
++      reused: Boolean(chargePersistenceResult.reused),
+       charge: chargeRecord
+     });
+   }
+diff --git a/supabase/migrations/20261104000001_financial_security_and_rate_limiting.sql b/supabase/migrations/20261104000001_financial_security_and_rate_limiting.sql
+index 0df948e..1e72f46 100644
+--- a/supabase/migrations/20261104000001_financial_security_and_rate_limiting.sql
++++ b/supabase/migrations/20261104000001_financial_security_and_rate_limiting.sql
+@@ -208,8 +208,8 @@ DECLARE
+   v_now TIMESTAMPTZ := clock_timestamp();
+ BEGIN
+   -- ETAPA 1: CONTROLE DE ACESSO MANDATÓRIO — Bloqueio estrito de execução direta pelo cliente
+-  IF current_user NOT IN ('service_role', 'postgres', 'supabase_admin') AND COALESCE(auth.role(), '') <> 'service_role' THEN
+-    RAISE EXCEPTION 'Acesso negado: operação restrita ao backend service_role'
++  IF current_user NOT IN ('service_role', 'postgres', 'supabase_admin', 'fatosbr_backend') AND COALESCE(auth.role(), '') <> 'service_role' THEN
++    RAISE EXCEPTION 'Acesso negado: operação restrita ao backend financeiro autorizado'
+       USING ERRCODE = '42501';
+   END IF;
+ 
+@@ -422,23 +422,25 @@ REVOKE ALL ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(T
+ REVOKE ALL ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) FROM authenticated;
+ GRANT EXECUTE ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) TO service_role, postgres;
+ 
+--- 8. Concessão de privilégios para conexões PostgreSQL server-side (schema internal)
++-- 8. Concessão de menor privilégio para conexões PostgreSQL server-side
+ GRANT USAGE ON SCHEMA internal TO service_role, postgres;
+-GRANT ALL ON ALL TABLES IN SCHEMA internal TO service_role, postgres;
+-GRANT ALL ON ALL SEQUENCES IN SCHEMA internal TO service_role, postgres;
++GRANT SELECT, INSERT, UPDATE ON TABLE internal.billing_payments TO service_role, postgres;
++GRANT SELECT, INSERT, UPDATE ON TABLE internal.billing_events TO service_role, postgres;
++GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE internal.rate_limit_counters TO service_role, postgres;
+ GRANT SELECT, INSERT, UPDATE ON TABLE public.subscriptions TO service_role, postgres;
+-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.user_roles TO service_role, postgres;
++GRANT SELECT ON TABLE public.user_roles TO service_role, postgres;
+ 
+ -- 9. Concessão condicional segura para papel dedicado (caso provisionado pelo DBA)
+ DO $$
+ BEGIN
+   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'fatosbr_backend') THEN
+     GRANT USAGE ON SCHEMA internal TO fatosbr_backend;
+-    GRANT ALL ON ALL TABLES IN SCHEMA internal TO fatosbr_backend;
+-    GRANT ALL ON ALL SEQUENCES IN SCHEMA internal TO fatosbr_backend;
+-    GRANT EXECUTE ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) TO fatosbr_backend;
+-    GRANT EXECUTE ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) TO fatosbr_backend;
++    GRANT SELECT, INSERT, UPDATE ON TABLE internal.billing_payments TO fatosbr_backend;
++    GRANT SELECT, INSERT, UPDATE ON TABLE internal.billing_events TO fatosbr_backend;
++    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE internal.rate_limit_counters TO fatosbr_backend;
+     GRANT SELECT, INSERT, UPDATE ON TABLE public.subscriptions TO fatosbr_backend;
+     GRANT SELECT ON TABLE public.user_roles TO fatosbr_backend;
++    GRANT EXECUTE ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) TO fatosbr_backend;
++    GRANT EXECUTE ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) TO fatosbr_backend;
+   END IF;
+ END $$;
+diff --git a/supabase/migrations/20261104000001_rollback_financial_security.sql b/supabase/migrations/20261104000001_rollback_financial_security.sql
+index 2a79696..153518f 100644
+--- a/supabase/migrations/20261104000001_rollback_financial_security.sql
++++ b/supabase/migrations/20261104000001_rollback_financial_security.sql
+@@ -12,10 +12,10 @@ DROP POLICY IF EXISTS "user_roles_select_own" ON public.user_roles;
+ DROP POLICY IF EXISTS "user_roles_service_role" ON public.user_roles;
+ DROP POLICY IF EXISTS "rate_limit_service_role" ON internal.rate_limit_counters;
+ 
+--- 3. Limpeza de tabelas criadas especificamente por esta migração
+-DROP TABLE IF EXISTS internal.rate_limit_counters CASCADE;
+-DROP TABLE IF EXISTS public.user_roles CASCADE;
++-- 3. Limpeza de tabelas criadas especificamente por esta migração (sem CASCADE)
++DROP TABLE IF EXISTS internal.rate_limit_counters;
++DROP TABLE IF EXISTS public.user_roles;
+ 
+ -- NOTA DE INTEGRIDADE: As tabelas "internal.billing_payments", "internal.billing_events"
+ -- e "public.subscriptions" são pré-existentes no Supabase do cliente e contêm dados
+--- históricos de produção. Elas NÃO sofrem DROP neste script de rollback.
++-- históricos de produção. Elas NUNCA sofrem DROP neste script de rollback.
+diff --git a/supabase/migrations/20261104000002_fix_supabase_billing_and_rbac.sql b/supabase/migrations/20261104000002_fix_supabase_billing_and_rbac.sql
+index fa7de2e..05ef53e 100644
+--- a/supabase/migrations/20261104000002_fix_supabase_billing_and_rbac.sql
++++ b/supabase/migrations/20261104000002_fix_supabase_billing_and_rbac.sql
+@@ -31,23 +31,25 @@ GRANT EXECUTE ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, B
+ REVOKE ALL ON FUNCTION public.is_admin() FROM PUBLIC;
+ GRANT EXECUTE ON FUNCTION public.is_admin() TO anon, authenticated, service_role, postgres;
+ 
+--- 3. Concessão de privilégios para o schema internal e tabelas para acesso PostgreSQL direto
++-- 3. Concessão de menor privilégio para o schema internal e tabelas para acesso PostgreSQL direto
+ GRANT USAGE ON SCHEMA internal TO service_role, postgres;
+-GRANT ALL ON ALL TABLES IN SCHEMA internal TO service_role, postgres;
+-GRANT ALL ON ALL SEQUENCES IN SCHEMA internal TO service_role, postgres;
++GRANT SELECT, INSERT, UPDATE ON TABLE internal.billing_payments TO service_role, postgres;
++GRANT SELECT, INSERT, UPDATE ON TABLE internal.billing_events TO service_role, postgres;
++GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE internal.rate_limit_counters TO service_role, postgres;
+ GRANT SELECT, INSERT, UPDATE ON TABLE public.subscriptions TO service_role, postgres;
+-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.user_roles TO service_role, postgres;
++GRANT SELECT ON TABLE public.user_roles TO service_role, postgres;
+ 
+ -- 4. Concessão condicional segura para papel dedicado (caso provisionado pelo DBA)
+ DO $$
+ BEGIN
+   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'fatosbr_backend') THEN
+     GRANT USAGE ON SCHEMA internal TO fatosbr_backend;
+-    GRANT ALL ON ALL TABLES IN SCHEMA internal TO fatosbr_backend;
+-    GRANT ALL ON ALL SEQUENCES IN SCHEMA internal TO fatosbr_backend;
+-    GRANT EXECUTE ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) TO fatosbr_backend;
+-    GRANT EXECUTE ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) TO fatosbr_backend;
++    GRANT SELECT, INSERT, UPDATE ON TABLE internal.billing_payments TO fatosbr_backend;
++    GRANT SELECT, INSERT, UPDATE ON TABLE internal.billing_events TO fatosbr_backend;
++    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE internal.rate_limit_counters TO fatosbr_backend;
+     GRANT SELECT, INSERT, UPDATE ON TABLE public.subscriptions TO fatosbr_backend;
+     GRANT SELECT ON TABLE public.user_roles TO fatosbr_backend;
++    GRANT EXECUTE ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) TO fatosbr_backend;
++    GRANT EXECUTE ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) TO fatosbr_backend;
+   END IF;
+ END $$;
+diff --git a/supabase/scripts/provision_fatosbr_backend_role.sql b/supabase/scripts/provision_fatosbr_backend_role.sql
+new file mode 100644
+index 0000000..db67f42
+--- /dev/null
++++ b/supabase/scripts/provision_fatosbr_backend_role.sql
+@@ -0,0 +1,53 @@
++-- ==============================================================================
++-- FATOSBR — SCRIPT DE PROVISIONAMENTO DO PAPEL DEDICADO DO BACKEND (DBA)
++-- ==============================================================================
++-- Este script é destinado à revisão e execução pelo DBA no Supabase (zopbitgtexefmqfvwgzj).
++-- Cria o papel de menor privilégio 'fatosbr_backend' para conexão direta da Vercel.
++-- 
++-- Princípio do Menor Privilégio:
++-- - Sem privilégios de superusuário ou DDL destrutivo (sem DROP TABLE, etc.).
++-- - Concede apenas SELECT, INSERT, UPDATE nas tabelas estritamente necessárias.
++-- - Bloqueia acesso a tabelas que não fazem parte do escopo financeiro/auth.
++-- ==============================================================================
++
++-- 1. Criação condicional do papel com LOGIN e sem herança excessiva
++DO $$
++BEGIN
++  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'fatosbr_backend') THEN
++    CREATE ROLE fatosbr_backend WITH 
++      LOGIN 
++      NOSUPERUSER 
++      NOCREATEDB 
++      NOCREATEROLE 
++      NOINHERIT 
++      CONNECTION LIMIT 25;
++    
++    COMMENT ON ROLE fatosbr_backend IS 'Papel dedicado de menor privilégio para as Vercel Functions da FatosBR';
++    
++    -- Definir senha segura conforme gerada pelo DBA / Vault de credenciais:
++    -- ALTER ROLE fatosbr_backend WITH PASSWORD 'DEFINIR_SENHA_FORTE_NO_VAULT';
++  END IF;
++END $$;
++
++-- 2. Permissão de resolução de schema (USO)
++GRANT USAGE ON SCHEMA internal TO fatosbr_backend;
++GRANT USAGE ON SCHEMA public TO fatosbr_backend;
++
++-- 3. Permissões estritas de DML nas tabelas do schema internal
++-- Registro e consulta de cobranças e eventos, manipulação de contadores de rate limit
++GRANT SELECT, INSERT, UPDATE ON TABLE internal.billing_payments TO fatosbr_backend;
++GRANT SELECT, INSERT, UPDATE ON TABLE internal.billing_events TO fatosbr_backend;
++GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE internal.rate_limit_counters TO fatosbr_backend;
++
++-- 4. Permissões estritas no schema public
++-- Consulta e atualização atômica de assinaturas e verificação RBAC
++GRANT SELECT, INSERT, UPDATE ON TABLE public.subscriptions TO fatosbr_backend;
++GRANT SELECT ON TABLE public.user_roles TO fatosbr_backend;
++
++-- 5. Permissão de execução exclusiva nas RPCs autorizadas
++GRANT EXECUTE ON FUNCTION public.confirm_payment_and_activate_subscription_atomic(TEXT, TEXT, INTEGER, TEXT, TEXT, JSONB) TO fatosbr_backend;
++GRANT EXECUTE ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) TO fatosbr_backend;
++GRANT EXECUTE ON FUNCTION public.is_admin() TO fatosbr_backend;
++
++-- 6. Garantir busca segura de schemas por padrão
++ALTER ROLE fatosbr_backend SET search_path = internal, public, pg_temp;
+diff --git a/tests/security-validation.ts b/tests/security-validation.ts
+index 62ef04f..c35ede6 100644
+--- a/tests/security-validation.ts
++++ b/tests/security-validation.ts
+@@ -114,6 +114,19 @@ class MockDatabaseHarness implements TestDatabaseAdapter {
+ 
+   async recordPendingCharge(charge: any): Promise<boolean> {
+     if (this.forceError) throw new Error(this.forceError);
++
++    // Simula a restrição do índice parcial real billing_one_pending do PostgreSQL:
++    const userEmail = (charge.userEmail || '').toLowerCase().trim();
++    const userId = charge.userId;
++    for (const existing of this.charges.values()) {
++      const match = (userId && existing.user_id === userId) || (userEmail && existing.user_email?.toLowerCase() === userEmail);
++      if (match && (existing.status === 'PENDING' || existing.status === 'PROCESSING')) {
++        const err: any = new Error('duplicate key value violates unique constraint "billing_one_pending"');
++        err.code = '23505';
++        throw err;
++      }
++    }
++
+     const amount = charge.amount ?? charge.amountCents ?? 2990;
+     const paymentId = charge.providerPaymentId || charge.id;
+     this.charges.set(paymentId, {
+@@ -127,11 +140,44 @@ class MockDatabaseHarness implements TestDatabaseAdapter {
+       status: 'PENDING',
+       provider: 'zynpay',
+       description: charge.description,
++      qr_code_text: charge.qrCodeText,
+       created_at: new Date().toISOString()
+     });
+     return true;
+   }
+ 
++  async getActivePendingCharge(userId: string | null, email?: string): Promise<any | null> {
++    if (this.forceError) throw new Error(this.forceError);
++    for (const c of this.charges.values()) {
++      const matchUser = userId && c.user_id === userId;
++      const matchEmail = email && c.user_email?.toLowerCase() === email.toLowerCase();
++      if ((matchUser || matchEmail) && (c.status === 'PENDING' || c.status === 'PROCESSING')) {
++        return {
++          id: c.id,
++          providerPaymentId: c.provider_payment_id || c.id,
++          userId: c.user_id,
++          userEmail: c.user_email,
++          amount: c.amount,
++          amountCents: c.amount,
++          currency: c.currency,
++          status: c.status,
++          description: c.description,
++          qrCodeText: c.qr_code_text,
++          createdAt: c.created_at,
++          updatedAt: c.created_at
++        };
++      }
++    }
++    return null;
++  }
++
++  async checkActiveSubscription(userId: string | null, email?: string): Promise<boolean> {
++    if (this.forceError) throw new Error(this.forceError);
++    if (userId && this.userSubscriptions.get(userId)?.toLowerCase() === 'active') return true;
++    if (email && this.userSubscriptions.get(email.toLowerCase())?.toLowerCase() === 'active') return true;
++    return false;
++  }
++
+   async getChargeById(chargeId: string): Promise<any | null> {
+     if (this.forceError) throw new Error(this.forceError);
+     const c = this.charges.get(chargeId);
+@@ -536,6 +582,92 @@ async function main() {
+     assert(res.errorCode === 'INVALID_PREVIOUS_STATUS', 'Erro deve ser INVALID_PREVIOUS_STATUS');
+   });
+ 
++  await runTest('2.8 Respeito a billing_one_pending: Reutilização de cobrança pendente existente para o mesmo usuário', async () => {
++    const userEmail = 'mesmo.usuario@fatosbr.com.br';
++    const { res: res1, result: result1 } = createMockRes();
++    const req1 = createMockReq({
++      method: 'POST',
++      url: '/api/zynpay/charges',
++      body: { amount: 29.90, customer: { email: userEmail, name: 'Assinante' } }
++    });
++    await chargesHandler(req1, res1);
++    const out1 = result1();
++    assert(out1.statusCode === 200, 'Primeira cobrança deve ter sido criada com sucesso');
++    const firstChargeId = out1.json.charge.id;
++
++    // Segunda chamada para o mesmo usuário com cobrança pendente ativa
++    const { res: res2, result: result2 } = createMockRes();
++    const req2 = createMockReq({
++      method: 'POST',
++      url: '/api/zynpay/charges',
++      body: { amount: 29.90, customer: { email: userEmail, name: 'Assinante' } }
++    });
++    await chargesHandler(req2, res2);
++    const out2 = result2();
++
++    assert(out2.statusCode === 200, 'Segunda requisição deve responder 200 reutilizando a cobrança pendente');
++    assert(out2.json.reused === true, 'A flag reused deve ser true para evitar violação do índice billing_one_pending');
++    assert(out2.json.charge.id === firstChargeId, 'Deve retornar o mesmo identificador da cobrança pendente');
++  });
++
++  await runTest('2.9 Bloqueio de criação de cobrança quando usuário já possui assinatura Pro ativa (USER_ALREADY_SUBSCRIBED)', async () => {
++    const userEmail = 'ja.assinante@fatosbr.com.br';
++    // Ativa assinatura previamente
++    dbHarness.userSubscriptions.set(userEmail, 'active');
++
++    const { res, result } = createMockRes();
++    const req = createMockReq({
++      method: 'POST',
++      url: '/api/zynpay/charges',
++      body: { amount: 29.90, customer: { email: userEmail, name: 'Assinante Pro' } }
++    });
++    await chargesHandler(req, res);
++    const out = result();
++
++    assert(out.statusCode === 409, `Esperado HTTP 409 para já assinante, recebido ${out.statusCode}`);
++    assert(out.json?.code === 'USER_ALREADY_SUBSCRIBED', 'Código deve ser USER_ALREADY_SUBSCRIBED');
++  });
++
++  await runTest('2.10 Rejeição de operações financeiras quando PostgreSQL não estiver configurado (fail-closed sem PostgREST fallback)', async () => {
++    // Desliga temporariamente o adaptador de teste para checar o comportamento real do db.ts sem connection string
++    setTestDatabaseAdapter(null);
++    let capturedError = '';
++    try {
++      await recordPendingCharge({
++        id: 'zyn_fail_closed_test',
++        userEmail: 'failclosed@fatosbr.com.br',
++        amountCents: 2990,
++        description: 'Teste Fail-Closed'
++      });
++    } catch (err: any) {
++      capturedError = err.message;
++    } finally {
++      setTestDatabaseAdapter(dbHarness);
++    }
++
++    assert(
++      capturedError.includes('POSTGRES_UNAVAILABLE'),
++      `Deveria falhar com POSTGRES_UNAVAILABLE sem tentar fallback silencioso para a Data API. Erro: ${capturedError}`
++    );
++  });
++
++  await runTest('2.11 Concorrência: Duas requisições simultâneas de cobrança para o mesmo usuário tratadas de forma idempotente', async () => {
++    const userEmail = 'concorrente@fatosbr.com.br';
++    const reqFactory = () => {
++      const { res, result } = createMockRes();
++      const req = createMockReq({
++        method: 'POST',
++        url: '/api/zynpay/charges',
++        body: { amount: 29.90, customer: { email: userEmail, name: 'Concorrente' } }
++      });
++      return chargesHandler(req, res).then(() => result());
++    };
++
++    const [outA, outB] = await Promise.all([reqFactory(), reqFactory()]);
++    assert(outA.statusCode === 200 && outB.statusCode === 200, 'Ambas as requisições concorrentes devem concluir com sucesso');
++    assert(outA.json.charge.id === outB.json.charge.id, 'Ambas as requisições concorrentes devem compartilhar a mesma cobrança única');
++  });
++
+   // ---------------------------------------------------------------------------
+   // CATEGORIA 3: AUDITORIA REAL ZYNPAY & WEBHOOK
+   // ---------------------------------------------------------------------------
 -- 
 2.34.1
 

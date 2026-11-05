@@ -114,6 +114,19 @@ class MockDatabaseHarness implements TestDatabaseAdapter {
 
   async recordPendingCharge(charge: any): Promise<boolean> {
     if (this.forceError) throw new Error(this.forceError);
+
+    // Simula a restrição do índice parcial real billing_one_pending do PostgreSQL:
+    const userEmail = (charge.userEmail || '').toLowerCase().trim();
+    const userId = charge.userId;
+    for (const existing of this.charges.values()) {
+      const match = (userId && existing.user_id === userId) || (userEmail && existing.user_email?.toLowerCase() === userEmail);
+      if (match && (existing.status === 'PENDING' || existing.status === 'PROCESSING')) {
+        const err: any = new Error('duplicate key value violates unique constraint "billing_one_pending"');
+        err.code = '23505';
+        throw err;
+      }
+    }
+
     const amount = charge.amount ?? charge.amountCents ?? 2990;
     const paymentId = charge.providerPaymentId || charge.id;
     this.charges.set(paymentId, {
@@ -127,9 +140,42 @@ class MockDatabaseHarness implements TestDatabaseAdapter {
       status: 'PENDING',
       provider: 'zynpay',
       description: charge.description,
+      qr_code_text: charge.qrCodeText,
       created_at: new Date().toISOString()
     });
     return true;
+  }
+
+  async getActivePendingCharge(userId: string | null, email?: string): Promise<any | null> {
+    if (this.forceError) throw new Error(this.forceError);
+    for (const c of this.charges.values()) {
+      const matchUser = userId && c.user_id === userId;
+      const matchEmail = email && c.user_email?.toLowerCase() === email.toLowerCase();
+      if ((matchUser || matchEmail) && (c.status === 'PENDING' || c.status === 'PROCESSING')) {
+        return {
+          id: c.id,
+          providerPaymentId: c.provider_payment_id || c.id,
+          userId: c.user_id,
+          userEmail: c.user_email,
+          amount: c.amount,
+          amountCents: c.amount,
+          currency: c.currency,
+          status: c.status,
+          description: c.description,
+          qrCodeText: c.qr_code_text,
+          createdAt: c.created_at,
+          updatedAt: c.created_at
+        };
+      }
+    }
+    return null;
+  }
+
+  async checkActiveSubscription(userId: string | null, email?: string): Promise<boolean> {
+    if (this.forceError) throw new Error(this.forceError);
+    if (userId && this.userSubscriptions.get(userId)?.toLowerCase() === 'active') return true;
+    if (email && this.userSubscriptions.get(email.toLowerCase())?.toLowerCase() === 'active') return true;
+    return false;
   }
 
   async getChargeById(chargeId: string): Promise<any | null> {
@@ -534,6 +580,92 @@ async function main() {
 
     assert(res.success === false, 'Cobrança cancelada não pode ser liquidada');
     assert(res.errorCode === 'INVALID_PREVIOUS_STATUS', 'Erro deve ser INVALID_PREVIOUS_STATUS');
+  });
+
+  await runTest('2.8 Respeito a billing_one_pending: Reutilização de cobrança pendente existente para o mesmo usuário', async () => {
+    const userEmail = 'mesmo.usuario@fatosbr.com.br';
+    const { res: res1, result: result1 } = createMockRes();
+    const req1 = createMockReq({
+      method: 'POST',
+      url: '/api/zynpay/charges',
+      body: { amount: 29.90, customer: { email: userEmail, name: 'Assinante' } }
+    });
+    await chargesHandler(req1, res1);
+    const out1 = result1();
+    assert(out1.statusCode === 200, 'Primeira cobrança deve ter sido criada com sucesso');
+    const firstChargeId = out1.json.charge.id;
+
+    // Segunda chamada para o mesmo usuário com cobrança pendente ativa
+    const { res: res2, result: result2 } = createMockRes();
+    const req2 = createMockReq({
+      method: 'POST',
+      url: '/api/zynpay/charges',
+      body: { amount: 29.90, customer: { email: userEmail, name: 'Assinante' } }
+    });
+    await chargesHandler(req2, res2);
+    const out2 = result2();
+
+    assert(out2.statusCode === 200, 'Segunda requisição deve responder 200 reutilizando a cobrança pendente');
+    assert(out2.json.reused === true, 'A flag reused deve ser true para evitar violação do índice billing_one_pending');
+    assert(out2.json.charge.id === firstChargeId, 'Deve retornar o mesmo identificador da cobrança pendente');
+  });
+
+  await runTest('2.9 Bloqueio de criação de cobrança quando usuário já possui assinatura Pro ativa (USER_ALREADY_SUBSCRIBED)', async () => {
+    const userEmail = 'ja.assinante@fatosbr.com.br';
+    // Ativa assinatura previamente
+    dbHarness.userSubscriptions.set(userEmail, 'active');
+
+    const { res, result } = createMockRes();
+    const req = createMockReq({
+      method: 'POST',
+      url: '/api/zynpay/charges',
+      body: { amount: 29.90, customer: { email: userEmail, name: 'Assinante Pro' } }
+    });
+    await chargesHandler(req, res);
+    const out = result();
+
+    assert(out.statusCode === 409, `Esperado HTTP 409 para já assinante, recebido ${out.statusCode}`);
+    assert(out.json?.code === 'USER_ALREADY_SUBSCRIBED', 'Código deve ser USER_ALREADY_SUBSCRIBED');
+  });
+
+  await runTest('2.10 Rejeição de operações financeiras quando PostgreSQL não estiver configurado (fail-closed sem PostgREST fallback)', async () => {
+    // Desliga temporariamente o adaptador de teste para checar o comportamento real do db.ts sem connection string
+    setTestDatabaseAdapter(null);
+    let capturedError = '';
+    try {
+      await recordPendingCharge({
+        id: 'zyn_fail_closed_test',
+        userEmail: 'failclosed@fatosbr.com.br',
+        amountCents: 2990,
+        description: 'Teste Fail-Closed'
+      });
+    } catch (err: any) {
+      capturedError = err.message;
+    } finally {
+      setTestDatabaseAdapter(dbHarness);
+    }
+
+    assert(
+      capturedError.includes('POSTGRES_UNAVAILABLE'),
+      `Deveria falhar com POSTGRES_UNAVAILABLE sem tentar fallback silencioso para a Data API. Erro: ${capturedError}`
+    );
+  });
+
+  await runTest('2.11 Concorrência: Duas requisições simultâneas de cobrança para o mesmo usuário tratadas de forma idempotente', async () => {
+    const userEmail = 'concorrente@fatosbr.com.br';
+    const reqFactory = () => {
+      const { res, result } = createMockRes();
+      const req = createMockReq({
+        method: 'POST',
+        url: '/api/zynpay/charges',
+        body: { amount: 29.90, customer: { email: userEmail, name: 'Concorrente' } }
+      });
+      return chargesHandler(req, res).then(() => result());
+    };
+
+    const [outA, outB] = await Promise.all([reqFactory(), reqFactory()]);
+    assert(outA.statusCode === 200 && outB.statusCode === 200, 'Ambas as requisições concorrentes devem concluir com sucesso');
+    assert(outA.json.charge.id === outB.json.charge.id, 'Ambas as requisições concorrentes devem compartilhar a mesma cobrança única');
   });
 
   // ---------------------------------------------------------------------------

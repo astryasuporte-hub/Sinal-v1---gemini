@@ -93,39 +93,17 @@ export async function enforceRateLimit(
         };
       }
     } else {
-      // 3. Fallback via cliente Supabase se disponível
-      if (!isDatabaseConfigured()) {
-        if (profile.isHighRisk) {
-          console.error(`[Rate Limit Security] Bloqueio fail-closed ativo para ${key}: Banco de dados indisponível.`);
-          sendJson(res, 503, {
-            error: 'Serviço temporariamente indisponível. Medida de segurança ativa para operações sensíveis.',
-            code: 'RATE_LIMIT_STORE_UNAVAILABLE'
-          });
-          return false;
-        }
-        return true;
+      // 3. Ausência de conexão PostgreSQL server-side: bloqueio fail-closed para categorias sensíveis
+      if (profile.isHighRisk) {
+        console.error(`[Rate Limit Security] Bloqueio fail-closed ativo para ${key}: Conexão PostgreSQL direta indisponível.`);
+        sendJson(res, 503, {
+          error: 'Serviço temporariamente indisponível. Medida de segurança ativa para operações sensíveis.',
+          code: 'RATE_LIMIT_STORE_UNAVAILABLE'
+        });
+        return false;
       }
-
-      const supabase = getServerSupabase();
-      const { data, error } = await supabase.rpc('check_and_increment_rate_limit', {
-        p_key: key,
-        p_max_requests: profile.maxRequests,
-        p_window_ms: profile.windowMs
-      });
-
-      if (error) {
-        throw error;
-      }
-
-      if (data) {
-        result = {
-          allowed: Boolean(data.allowed),
-          current: Number(data.current || 1),
-          limit: Number(data.limit || profile.maxRequests),
-          retry_after: Number(data.retry_after || 0),
-          remaining: Number(data.remaining ?? 0)
-        };
-      }
+      // Rotas de leitura pública geral podem operar em modo tolerante
+      return true;
     }
   } catch (err: any) {
     console.error(`[Rate Limit Store Failure] Falha ao verificar taxa para ${key}:`, err.message);
