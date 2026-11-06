@@ -114,7 +114,7 @@ export function getServerKeys() {
     NVIDIA_NIM: process.env.NVIDIA_NIM_API_KEY || '',
     RESEND: process.env.RESEND_API_KEY || '',
     ZYNPAY: process.env.ZYNPAY_API_KEY || '',
-    ZYNPAY_WEBHOOK_SECRET: process.env.ZYNPAY_WEBHOOK_SECRET || 'whsec_zynpay_live_prod',
+    ZYNPAY_WEBHOOK_SECRET: (process.env.ZYNPAY_WEBHOOK_SECRET || '').trim(),
     ADMIN_SECRET: process.env.ADMIN_SECRET || ''
   };
 }

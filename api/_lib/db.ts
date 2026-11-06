@@ -85,6 +85,10 @@ export interface TestDatabaseAdapter {
   getActivePendingCharge?: (userId: string | null, email?: string) => Promise<any | null>;
   checkActiveSubscription?: (userId: string | null, email?: string) => Promise<boolean>;
   getChargeByIdempotencyKey?: (userId: string, idempotencyKey: string) => Promise<any | null>;
+  reserveCheckoutAttempt?: (params: any) => Promise<{ id: string; alreadyCompleted?: boolean; charge?: any; inProgress?: boolean }>;
+  finalizeReservedCheckoutAttempt?: (params: any) => Promise<any>;
+  failReservedCheckoutAttempt?: (reservationId: string, reason?: string) => Promise<boolean>;
+  linkLegacyChargeToUser?: (chargeId: string, userId: string) => Promise<boolean>;
 }
 
 let activeTestAdapter: TestDatabaseAdapter | null = null;
@@ -197,7 +201,8 @@ export async function getActivePendingChargeForUser(userId: string | null, userE
         updated_at
       FROM internal.billing_payments
       WHERE status IN ('PENDING', 'PROCESSING')
-        AND request_state <> 'FAILED'
+        AND request_state = 'COMPLETED'
+        AND provider_payment_id NOT LIKE 'reserved_%'
     `;
     const params: any[] = [];
 
@@ -401,6 +406,309 @@ export async function recordOfficialZynPayCharge(params: {
     console.error(`[Postgres Error] Falha ao gravar cobrança oficial ${params.gatewayCharge.id}:`, err.message);
     throw new Error(`DATABASE_PERSISTENCE_FAILED: Falha na gravação do pagamento via PostgreSQL (${err.message})`);
   }
+}
+
+/**
+ * Reserva transacional durável no PostgreSQL ANTES de qualquer chamada ao Gateway ZynPay.
+ * 
+ * Garante:
+ * 1. Exclusão mútua por idempotency_key e índice parcial billing_one_pending.
+ * 2. Bloqueio imediato de chamadas externas duplicadas por concorrência/duplo clique.
+ * 3. Rastreabilidade durável da tentativa antes do tráfego de rede.
+ */
+export async function reserveCheckoutAttempt(params: {
+  userId: string;
+  userEmail: string;
+  planId: string;
+  amountCents: number;
+  currency?: string;
+  idempotencyKey: string;
+  description: string;
+}): Promise<{
+  id: string;
+  alreadyCompleted?: boolean;
+  charge?: StoredCharge;
+  inProgress?: boolean;
+}> {
+  if (activeTestAdapter?.reserveCheckoutAttempt) {
+    return activeTestAdapter.reserveCheckoutAttempt(params);
+  }
+
+  if (!isPostgresConfigured()) {
+    throw new Error('POSTGRES_UNAVAILABLE: Reserva transacional exige conexão PostgreSQL server-side.');
+  }
+
+  const currency = params.currency || 'BRL';
+
+  // 1. Verifica se já existe tentativa registrada com a mesma chave de idempotência
+  const existingSql = `
+    SELECT id, provider_payment_id, user_id, amount, currency, status, request_state, checkout_data, expiration_date, created_at, updated_at
+    FROM internal.billing_payments
+    WHERE user_id = $1
+      AND checkout_data->>'idempotency_key' = $2
+    ORDER BY created_at DESC
+    LIMIT 1
+  `;
+  const existingRes = await executeSql(existingSql, [params.userId, params.idempotencyKey]);
+
+  if (existingRes.rows.length > 0) {
+    const row = existingRes.rows[0];
+    const amount = Number(row.amount || 0);
+    const mapped: StoredCharge = {
+      id: row.id,
+      providerPaymentId: row.provider_payment_id || row.id,
+      userId: row.user_id,
+      userEmail: row.checkout_data?.user_email || params.userEmail,
+      amount,
+      amountCents: amount,
+      currency: row.currency || currency,
+      status: row.status,
+      description: row.checkout_data?.description || params.description,
+      planId: row.checkout_data?.plan_id || params.planId,
+      idempotencyKey: row.checkout_data?.idempotency_key || params.idempotencyKey,
+      qrCodeText: row.checkout_data?.qr_code_text,
+      expirationDate: row.expiration_date,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+
+    if (row.status === 'PAID') {
+      return { id: row.id, alreadyCompleted: true, charge: mapped };
+    }
+
+    if (row.status === 'PENDING' && row.request_state === 'COMPLETED' && row.provider_payment_id && !row.provider_payment_id.startsWith('reserved_')) {
+      return { id: row.id, alreadyCompleted: true, charge: mapped };
+    }
+
+    // Se estiver em estado CREATING registrado há menos de 30s: requisição simultânea em andamento
+    const ageSeconds = (Date.now() - new Date(row.created_at).getTime()) / 1000;
+    if (row.request_state === 'CREATING' && ageSeconds < 30) {
+      return { id: row.id, inProgress: true, charge: mapped };
+    }
+  }
+
+  // 2. Reserva atômica no PostgreSQL com provider_payment_id provisório único
+  const reservedPaymentId = `reserved_${Date.now()}_${Math.floor(100000 + Math.random() * 900000)}`;
+  const checkoutData = JSON.stringify({
+    plan_id: params.planId,
+    user_email: params.userEmail,
+    description: params.description,
+    idempotency_key: params.idempotencyKey,
+    attempt_state: 'RESERVED',
+    reserved_at: new Date().toISOString()
+  });
+
+  const insertSql = `
+    INSERT INTO internal.billing_payments (
+      id,
+      user_id,
+      provider,
+      provider_payment_id,
+      amount,
+      currency,
+      status,
+      type,
+      request_state,
+      checkout_data,
+      created_at,
+      updated_at
+    ) VALUES (
+      gen_random_uuid(),
+      $1,
+      'zynpay',
+      $2,
+      $3,
+      $4,
+      'PENDING',
+      'PIX',
+      'CREATING',
+      $5::jsonb,
+      NOW(),
+      NOW()
+    )
+    RETURNING id
+  `;
+
+  const res = await executeSql(insertSql, [
+    params.userId,
+    reservedPaymentId,
+    params.amountCents,
+    currency,
+    checkoutData
+  ]);
+
+  return {
+    id: res.rows[0].id,
+    alreadyCompleted: false
+  };
+}
+
+/**
+ * Atualiza e finaliza a tentativa reservada com os dados oficiais do gateway ZynPay.
+ */
+export async function finalizeReservedCheckoutAttempt(params: {
+  reservationId: string;
+  gatewayCharge: ZynPayOfficialChargeResponse;
+  planId: string;
+  userEmail: string;
+  description: string;
+  idempotencyKey?: string;
+}): Promise<StoredCharge> {
+  if (activeTestAdapter?.finalizeReservedCheckoutAttempt) {
+    return activeTestAdapter.finalizeReservedCheckoutAttempt(params);
+  }
+
+  if (!isPostgresConfigured()) {
+    throw new Error('POSTGRES_UNAVAILABLE: Finalização exige conexão PostgreSQL configurada.');
+  }
+
+  const updateData = JSON.stringify({
+    plan_id: params.planId,
+    user_email: params.userEmail,
+    description: params.description,
+    qr_code_text: params.gatewayCharge.qrCodeText,
+    idempotency_key: params.idempotencyKey || null,
+    attempt_state: 'COMPLETED',
+    finalized_at: new Date().toISOString()
+  });
+
+  const updateSql = `
+    UPDATE internal.billing_payments
+    SET provider_payment_id = $1,
+        amount = $2,
+        currency = $3,
+        status = $4,
+        request_state = 'COMPLETED',
+        expiration_date = $5,
+        checkout_data = checkout_data || $6::jsonb,
+        last_synced_at = NOW(),
+        updated_at = NOW()
+    WHERE id = $7::uuid
+    RETURNING id, provider_payment_id, user_id, amount, currency, status, checkout_data, expiration_date, created_at, updated_at
+  `;
+
+  const res = await executeSql(updateSql, [
+    params.gatewayCharge.id,
+    params.gatewayCharge.amount,
+    params.gatewayCharge.currency || 'BRL',
+    params.gatewayCharge.status || 'PENDING',
+    params.gatewayCharge.expirationDate || null,
+    updateData,
+    params.reservationId
+  ]);
+
+  if (res.rows.length === 0) {
+    throw new Error(`RESERVATION_NOT_FOUND: Tentativa reservada ${params.reservationId} não encontrada para finalização.`);
+  }
+
+  const row = res.rows[0];
+  const amount = Number(row.amount || 0);
+
+  return {
+    id: row.id,
+    providerPaymentId: row.provider_payment_id,
+    userId: row.user_id,
+    userEmail: row.checkout_data?.user_email || params.userEmail,
+    amount,
+    amountCents: amount,
+    currency: row.currency || 'BRL',
+    status: row.status,
+    description: row.checkout_data?.description || params.description,
+    qrCodeText: row.checkout_data?.qr_code_text || params.gatewayCharge.qrCodeText,
+    expirationDate: row.expiration_date,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+/**
+ * Marca a tentativa reservada como FAILED em caso de falha da ZynPay, liberando a constraint billing_one_pending.
+ */
+export async function failReservedCheckoutAttempt(reservationId: string, reason?: string): Promise<boolean> {
+  if (activeTestAdapter?.failReservedCheckoutAttempt) {
+    return activeTestAdapter.failReservedCheckoutAttempt(reservationId, reason);
+  }
+
+  if (!isPostgresConfigured()) return false;
+
+  try {
+    const sql = `
+      UPDATE internal.billing_payments
+      SET status = 'FAILED',
+          request_state = 'FAILED',
+          cancelled_at = NOW(),
+          checkout_data = checkout_data || jsonb_build_object('failure_reason', $1::text, 'attempt_state', 'FAILED'),
+          updated_at = NOW()
+      WHERE id = $2::uuid
+    `;
+    await executeSql(sql, [reason || 'GATEWAY_ERROR', reservationId]);
+    return true;
+  } catch (err: any) {
+    console.error(`[Postgres Error] Falha ao marcar reserva ${reservationId} como FAILED:`, err.message);
+    return false;
+  }
+}
+
+/**
+ * Vincula com auditoria um user_id a uma cobrança legada onde user_id era NULL.
+ */
+export async function linkLegacyChargeToUser(chargeId: string, userId: string): Promise<boolean> {
+  if (activeTestAdapter?.linkLegacyChargeToUser) {
+    return activeTestAdapter.linkLegacyChargeToUser(chargeId, userId);
+  }
+
+  if (!isPostgresConfigured()) {
+    throw new Error('POSTGRES_UNAVAILABLE: Operação de reconciliação exige conexão PostgreSQL.');
+  }
+
+  try {
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(chargeId);
+    let queryText = `
+      UPDATE internal.billing_payments
+      SET user_id = $1,
+          updated_at = NOW()
+      WHERE user_id IS NULL
+        AND (
+    `;
+    if (isUuid) {
+      queryText += ` id = $2::uuid OR provider_payment_id = $2 )`;
+    } else {
+      queryText += ` provider_payment_id = $2 )`;
+    }
+
+    const res = await executeSql(queryText, [userId, chargeId]);
+    return (res.rowCount || 0) > 0;
+  } catch (err: any) {
+    console.error(`[Postgres Error] Falha ao vincular usuário à cobrança legada ${chargeId}:`, err.message);
+    throw new Error(`LEGACY_LINK_FAILED: ${err.message}`);
+  }
+}
+
+/**
+ * Verifica se um usuário Supabase autenticado possui papel administrativo para acesso financeiro.
+ * Consulta claims de app_metadata e a tabela pública public.user_roles.
+ */
+export async function isFinancialAdminUser(user: any): Promise<boolean> {
+  if (!user || !user.id) return false;
+
+  // 1. Claims assinadas no app_metadata do Supabase Auth (gerenciadas exclusivamente pelo backend)
+  const appMeta = user.app_metadata || {};
+  if (appMeta.is_admin === true || appMeta.role === 'admin' || appMeta.role === 'super_admin' || appMeta.role === 'financial_admin') {
+    return true;
+  }
+
+  // 2. Consulta tabela de papéis de usuário (public.user_roles) no PostgreSQL
+  if (isPostgresConfigured()) {
+    try {
+      const roleRes = await executeSql(
+        `SELECT role FROM public.user_roles WHERE user_id = $1 AND role IN ('admin', 'super_admin', 'financial_admin') LIMIT 1`,
+        [user.id]
+      );
+      if (roleRes.rows.length > 0) return true;
+    } catch {}
+  }
+
+  return false;
 }
 
 /**

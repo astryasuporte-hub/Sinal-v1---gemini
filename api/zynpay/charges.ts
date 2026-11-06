@@ -22,9 +22,13 @@ import {
   checkUserActiveSubscription,
   getActivePendingChargeForUser,
   cancelOrExpirePendingCharge,
-  recordOfficialZynPayCharge,
   getChargeById,
-  getChargeByIdempotencyKey
+  getChargeByIdempotencyKey,
+  reserveCheckoutAttempt,
+  finalizeReservedCheckoutAttempt,
+  failReservedCheckoutAttempt,
+  linkLegacyChargeToUser,
+  isFinancialAdminUser
 } from '../_lib/db';
 import { resolvePlanPrice } from '../_lib/plans';
 import { createPixChargeOnGateway, fetchChargeFromGateway } from '../_lib/zynpayClient';
@@ -267,100 +271,93 @@ export default async function handler(req: any, res: any) {
       idempotencyKey = `fatosbr_chk_${userId}_${attemptHash}`;
     }
 
-    // 6.1 Idempotência Persistente: reutiliza resposta se a tentativa lógica já foi registrada
+    // 6.1 Idempotência Persistente e Fail-Closed:
+    let existingByIdempotency = null;
     try {
-      const existingByIdempotency = await getChargeByIdempotencyKey(userId, idempotencyKey);
-      if (existingByIdempotency) {
-        if (existingByIdempotency.status === 'PAID') {
-          return sendJson(res, 200, {
-            success: true,
-            reused: true,
-            idempotent: true,
-            message: 'Esta cobrança já foi confirmada como paga.',
-            charge: {
-              id: existingByIdempotency.providerPaymentId,
-              amount: existingByIdempotency.amountCents,
-              amountFormatted: planConfig.amountFormatted,
-              status: 'PAID',
-              description: existingByIdempotency.description,
-              customer: { name: customerName, email: userEmail },
-              createdAt: existingByIdempotency.createdAt,
-              paidAt: existingByIdempotency.paidAt
-            }
-          });
-        }
-        if (existingByIdempotency.status === 'PENDING' || existingByIdempotency.status === 'PROCESSING') {
-          let qrCodeBase64 = '';
-          if (existingByIdempotency.qrCodeText) {
-            try { qrCodeBase64 = await QRCode.toDataURL(existingByIdempotency.qrCodeText, { width: 320, margin: 2 }); } catch {}
-          }
-          return sendJson(res, 200, {
-            success: true,
-            reused: true,
-            idempotent: true,
-            charge: {
-              id: existingByIdempotency.providerPaymentId,
-              amount: existingByIdempotency.amountCents,
-              amountFormatted: planConfig.amountFormatted,
-              status: existingByIdempotency.status,
-              description: existingByIdempotency.description,
-              customer: { name: customerName, email: userEmail },
-              qrCode: qrCodeBase64,
-              qrCodeText: existingByIdempotency.qrCodeText,
-              createdAt: existingByIdempotency.createdAt,
-              expiresAt: existingByIdempotency.expirationDate || new Date(new Date(existingByIdempotency.createdAt).getTime() + 15 * 60 * 1000).toISOString()
-            }
-          });
-        }
-      }
+      existingByIdempotency = await getChargeByIdempotencyKey(userId, idempotencyKey);
     } catch (idempErr: any) {
-      console.warn('[Idempotency Check Notice]', idempErr.message);
-    }
-
-    // 7. Criação de cobrança oficial pela API oficial da ZynPay (ZERO PIX FICTÍCIO)
-    let gatewayResponse;
-    try {
-      gatewayResponse = await createPixChargeOnGateway({
-        amountCents: planAmountCents,
-        description: planDescription,
-        customer: {
-          name: customerName,
-          email: userEmail
-        },
-        idempotencyKey
-      });
-    } catch (gatewayErr: any) {
-      console.error('[ZynPay Gateway Failure] Não foi possível criar cobrança oficial:', gatewayErr.message);
+      console.error('[Idempotency Fail-Closed] Erro crítico ao verificar estado da tentativa no PostgreSQL:', idempErr.message);
       return sendJson(res, 503, {
-        error: 'Serviço de pagamento temporariamente indisponível. A emissão de cobranças oficiais Pix foi suspensa. Tente novamente em instantes.',
-        code: 'GATEWAY_UNAVAILABLE',
-        details: gatewayErr.message
+        error: 'Não foi possível verificar sua tentativa de pagamento. Tente novamente em instantes.',
+        code: 'PAYMENT_STATE_UNAVAILABLE'
       });
     }
 
-    // 8. Persistência mandatória no PostgreSQL Supabase
-    let storedCharge;
+    if (existingByIdempotency) {
+      if (existingByIdempotency.status === 'PAID') {
+        return sendJson(res, 200, {
+          success: true,
+          reused: true,
+          idempotent: true,
+          message: 'Esta cobrança já foi confirmada como paga.',
+          charge: {
+            id: existingByIdempotency.providerPaymentId,
+            amount: existingByIdempotency.amountCents,
+            amountFormatted: planConfig.amountFormatted,
+            status: 'PAID',
+            description: existingByIdempotency.description,
+            customer: { name: customerName, email: userEmail },
+            createdAt: existingByIdempotency.createdAt,
+            paidAt: existingByIdempotency.paidAt
+          }
+        });
+      }
+      if (existingByIdempotency.status === 'PENDING' || existingByIdempotency.status === 'PROCESSING') {
+        let qrCodeBase64 = '';
+        if (existingByIdempotency.qrCodeText) {
+          try { qrCodeBase64 = await QRCode.toDataURL(existingByIdempotency.qrCodeText, { width: 320, margin: 2 }); } catch {}
+        }
+        return sendJson(res, 200, {
+          success: true,
+          reused: true,
+          idempotent: true,
+          charge: {
+            id: existingByIdempotency.providerPaymentId,
+            amount: existingByIdempotency.amountCents,
+            amountFormatted: planConfig.amountFormatted,
+            status: existingByIdempotency.status,
+            description: existingByIdempotency.description,
+            customer: { name: customerName, email: userEmail },
+            qrCode: qrCodeBase64,
+            qrCodeText: existingByIdempotency.qrCodeText,
+            createdAt: existingByIdempotency.createdAt,
+            expiresAt: existingByIdempotency.expirationDate || null,
+            isEstimatedExpiration: !existingByIdempotency.expirationDate
+          }
+        });
+      }
+    }
+
+    // 7. Reserva Transacional Durável no PostgreSQL ANTES da chamada ao Gateway ZynPay
+    let reservedAttempt;
     try {
-      storedCharge = await recordOfficialZynPayCharge({
+      reservedAttempt = await reserveCheckoutAttempt({
         userId,
-        gatewayCharge: gatewayResponse,
-        planId: planConfig.id,
         userEmail,
-        description: planDescription,
-        idempotencyKey
+        planId: planConfig.id,
+        amountCents: planAmountCents,
+        currency: 'BRL',
+        idempotencyKey,
+        description: planDescription
       });
-    } catch (dbErr: any) {
-      console.error('[Persistence Failure] Erro ao persistir cobrança oficial no PostgreSQL:', dbErr.message);
-      // Tratamento de concorrência com o índice parcial billing_one_pending:
-      if (dbErr.code === '23505' || dbErr.message?.includes('billing_one_pending')) {
+    } catch (resErr: any) {
+      console.error('[Reservation Error] Falha ao reservar tentativa no PostgreSQL:', resErr.message);
+      if (resErr.code === '23505' || resErr.message?.includes('billing_one_pending')) {
         try {
-          const concurrentPending = await getActivePendingChargeForUser(userId, userEmail);
-          if (concurrentPending) {
+          let concurrentPending = await getActivePendingChargeForUser(userId, userEmail);
+          if (!concurrentPending || concurrentPending.providerPaymentId.startsWith('reserved_')) {
+            for (let i = 0; i < 8; i++) {
+              await new Promise((r) => setTimeout(r, 40));
+              concurrentPending = await getActivePendingChargeForUser(userId, userEmail);
+              if (concurrentPending && !concurrentPending.providerPaymentId.startsWith('reserved_')) {
+                break;
+              }
+            }
+          }
+          if (concurrentPending && !concurrentPending.providerPaymentId.startsWith('reserved_')) {
             let qrCodeBase64 = '';
             if (concurrentPending.qrCodeText) {
-              try {
-                qrCodeBase64 = await QRCode.toDataURL(concurrentPending.qrCodeText, { width: 320, margin: 2 });
-              } catch {}
+              try { qrCodeBase64 = await QRCode.toDataURL(concurrentPending.qrCodeText, { width: 320, margin: 2 }); } catch {}
             }
             return sendJson(res, 200, {
               success: true,
@@ -375,15 +372,104 @@ export default async function handler(req: any, res: any) {
                 qrCode: qrCodeBase64,
                 qrCodeText: concurrentPending.qrCodeText,
                 createdAt: concurrentPending.createdAt,
-                expiresAt: new Date(new Date(concurrentPending.createdAt).getTime() + 15 * 60 * 1000).toISOString()
+                expiresAt: concurrentPending.expirationDate || null,
+                isEstimatedExpiration: !concurrentPending.expirationDate
               }
             });
           }
         } catch {}
       }
       return sendJson(res, 503, {
-        error: 'Falha na persistência da cobrança no banco de dados. Operação abortada para segurança do usuário.',
-        code: 'DATABASE_PERSISTENCE_FAILED'
+        error: 'Não foi possível registrar a reserva da tentativa de pagamento no banco de dados.',
+        code: 'PAYMENT_STATE_UNAVAILABLE',
+        details: resErr.message
+      });
+    }
+
+    // Se a tentativa já estava concluída (reuso idempotente):
+    if (reservedAttempt.alreadyCompleted && reservedAttempt.charge) {
+      return sendJson(res, 200, {
+        success: true,
+        reused: true,
+        idempotent: true,
+        charge: reservedAttempt.charge
+      });
+    }
+
+    if (reservedAttempt.inProgress) {
+      let finalized = null;
+      for (let i = 0; i < 8; i++) {
+        await new Promise((r) => setTimeout(r, 40));
+        finalized = await getActivePendingChargeForUser(userId, userEmail);
+        if (finalized && !finalized.providerPaymentId.startsWith('reserved_')) {
+          break;
+        }
+      }
+      if (finalized && !finalized.providerPaymentId.startsWith('reserved_')) {
+        let qrCodeBase64 = '';
+        if (finalized.qrCodeText) {
+          try { qrCodeBase64 = await QRCode.toDataURL(finalized.qrCodeText, { width: 320, margin: 2 }); } catch {}
+        }
+        return sendJson(res, 200, {
+          success: true,
+          reused: true,
+          idempotent: true,
+          charge: {
+            id: finalized.providerPaymentId,
+            amount: finalized.amountCents,
+            amountFormatted: planConfig.amountFormatted,
+            status: finalized.status,
+            description: finalized.description,
+            customer: { name: customerName, email: userEmail },
+            qrCode: qrCodeBase64,
+            qrCodeText: finalized.qrCodeText,
+            createdAt: finalized.createdAt,
+            expiresAt: finalized.expirationDate || null,
+            isEstimatedExpiration: !finalized.expirationDate
+          }
+        });
+      }
+    }
+
+    // 8. Criação de cobrança oficial pela API oficial da ZynPay (ZERO PIX FICTÍCIO)
+    let gatewayResponse;
+    try {
+      gatewayResponse = await createPixChargeOnGateway({
+        amountCents: planAmountCents,
+        description: planDescription,
+        customer: {
+          name: customerName,
+          email: userEmail
+        },
+        idempotencyKey
+      });
+    } catch (gatewayErr: any) {
+      console.error('[ZynPay Gateway Failure] Não foi possível criar cobrança oficial:', gatewayErr.message);
+      await failReservedCheckoutAttempt(reservedAttempt.id, gatewayErr.message).catch(() => {});
+      return sendJson(res, 503, {
+        error: 'Serviço de pagamento temporariamente indisponível. A emissão de cobranças oficiais Pix foi suspensa. Tente novamente em instantes.',
+        code: 'GATEWAY_UNAVAILABLE',
+        details: gatewayErr.message
+      });
+    }
+
+    // 9. Persistência e finalização do resultado oficial no PostgreSQL
+    let storedCharge;
+    try {
+      storedCharge = await finalizeReservedCheckoutAttempt({
+        reservationId: reservedAttempt.id,
+        gatewayCharge: gatewayResponse,
+        planId: planConfig.id,
+        userEmail,
+        description: planDescription,
+        idempotencyKey
+      });
+    } catch (dbErr: any) {
+      console.error('[Persistence Failure] Erro ao finalizar cobrança oficial no PostgreSQL:', dbErr.message);
+      return sendJson(res, 503, {
+        error: 'Falha na persistência da cobrança no banco de dados. Cobrança em reconciliação.',
+        code: 'RECONCILIATION_REQUIRED',
+        chargeId: gatewayResponse.id
       });
     }
 
@@ -407,7 +493,8 @@ export default async function handler(req: any, res: any) {
         qrCode: qrCodeBase64,
         qrCodeText: storedCharge.qrCodeText,
         createdAt: storedCharge.createdAt,
-        expiresAt: storedCharge.expirationDate || new Date(Date.now() + 15 * 60 * 1000).toISOString()
+        expiresAt: storedCharge.expirationDate || null,
+        isEstimatedExpiration: !storedCharge.expirationDate
       }
     });
   }
@@ -433,30 +520,37 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    let authenticatedUser: any = null;
-    let isAdmin = false;
+    // Regra 2: Bloqueia categoricamente o uso de ADMIN_SECRET como Bearer token para consulta de cobranças
     const keys = getServerKeys();
     if (keys.ADMIN_SECRET && token === keys.ADMIN_SECRET) {
-      isAdmin = true;
-    } else {
-      try {
-        const supabase = getServerSupabase();
-        const { data: { user }, error: authErr } = await supabase.auth.getUser(token);
-        if (authErr || !user) {
-          return sendJson(res, 403, {
-            error: 'Sessão inválida ou expirada. Autentique-se novamente.',
-            code: 'INVALID_SESSION'
-          });
-        }
-        authenticatedUser = user;
-      } catch (authException: any) {
-        console.error('[Auth Error] Falha ao validar token na consulta de cobrança:', authException.message);
+      console.warn('[Security Alert] Tentativa de consulta financeira via ADMIN_SECRET rejeitada. Requer sessão autenticada.');
+      return sendJson(res, 403, {
+        error: 'Acesso financeiro requer autenticação individual de usuário via Supabase Auth. Tokens compartilhados estáticos não são aceitos.',
+        code: 'SHARED_SECRET_FORBIDDEN'
+      });
+    }
+
+    let authenticatedUser: any = null;
+    try {
+      const supabase = getServerSupabase();
+      const { data: { user }, error: authErr } = await supabase.auth.getUser(token);
+      if (authErr || !user) {
         return sendJson(res, 403, {
-          error: 'Falha na validação da identidade do solicitante.',
-          code: 'AUTH_VALIDATION_FAILED'
+          error: 'Sessão inválida ou expirada. Autentique-se novamente.',
+          code: 'INVALID_SESSION'
         });
       }
+      authenticatedUser = user;
+    } catch (authException: any) {
+      console.error('[Auth Error] Falha ao validar token na consulta de cobrança:', authException.message);
+      return sendJson(res, 403, {
+        error: 'Falha na validação da identidade do solicitante.',
+        code: 'AUTH_VALIDATION_FAILED'
+      });
     }
+
+    // Identificação de papel administrativo no servidor com privilégio mínimo (RBAC)
+    const isAdmin = await isFinancialAdminUser(authenticatedUser);
 
     const urlObj = new URL(req.url, 'http://localhost');
     let chargeId = urlObj.searchParams.get('id') || urlObj.searchParams.get('chargeId');
@@ -481,25 +575,53 @@ export default async function handler(req: any, res: any) {
         });
       }
 
-      // 2. Prevenção de IDOR/BOLA:
-      // O usuário solicitante deve ser comprovadamente o proprietário da cobrança (ou admin autorizado)
+      // Regra 3: Endurecimento estrito da verificação de propriedade (Anti-IDOR / Anti-BOLA)
       if (!isAdmin) {
-        const userIdMatch = Boolean(
-          authenticatedUser?.id && stored.userId && stored.userId === authenticatedUser.id
-        );
-        const userEmailMatch = Boolean(
-          authenticatedUser?.email &&
-          stored.userEmail &&
-          stored.userEmail.toLowerCase().trim() === authenticatedUser.email.toLowerCase().trim()
-        );
-
-        if (!userIdMatch && !userEmailMatch) {
-          // Resposta 404 neutra para prevenir enumeração de identificadores
-          return sendJson(res, 404, {
-            error: 'Cobrança não encontrada no banco de dados.',
-            code: 'CHARGE_NOT_FOUND'
-          });
+        if (stored.userId) {
+          // Quando a cobrança já possui user_id vinculado, a verificação DEVE ser estritamente stored.userId === authenticatedUser.id:
+          if (stored.userId !== authenticatedUser.id) {
+            // NUNCA aceitar correspondência por e-mail se os user_id forem divergentes
+            return sendJson(res, 404, {
+              error: 'Cobrança não encontrada no banco de dados.',
+              code: 'CHARGE_NOT_FOUND'
+            });
+          }
+        } else {
+          // Registro legado sem user_id:
+          // Não liberar acesso automaticamente. Requer reconciliação auditada server-side:
+          if (
+            authenticatedUser.email &&
+            stored.userEmail &&
+            stored.userEmail.toLowerCase().trim() === authenticatedUser.email.toLowerCase().trim()
+          ) {
+            try {
+              await linkLegacyChargeToUser(stored.id, authenticatedUser.id);
+              stored.userId = authenticatedUser.id;
+              console.log('[Audit Log] Cobrança legada reconciliada com user_id:', {
+                chargeId: stored.id,
+                userId: authenticatedUser.id,
+                email: authenticatedUser.email
+              });
+            } catch (linkErr: any) {
+              console.error('[Legacy Reconcile Error] Falha ao reconciliar cobrança legada:', linkErr.message);
+              return sendJson(res, 404, {
+                error: 'Cobrança não encontrada no banco de dados.',
+                code: 'CHARGE_NOT_FOUND'
+              });
+            }
+          } else {
+            return sendJson(res, 404, {
+              error: 'Cobrança não encontrada no banco de dados.',
+              code: 'CHARGE_NOT_FOUND'
+            });
+          }
         }
+      } else {
+        // Auditoria de acesso administrativo legítimo
+        console.log('[Audit Log] Consulta de cobrança realizada por admin autorizado:', {
+          adminUserId: authenticatedUser.id,
+          chargeId
+        });
       }
 
       // Se a cobrança local ainda estiver PENDING, tenta reconciliar ativamente com a ZynPay
@@ -531,7 +653,8 @@ export default async function handler(req: any, res: any) {
           qrCodeText: stored.qrCodeText,
           createdAt: stored.createdAt,
           paidAt: stored.paidAt,
-          expiresAt: stored.expirationDate || new Date(new Date(stored.createdAt).getTime() + 15 * 60 * 1000).toISOString()
+          expiresAt: stored.expirationDate || null,
+          isEstimatedExpiration: !stored.expirationDate
         }
       });
     } catch (err: any) {

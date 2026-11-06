@@ -71,7 +71,7 @@ export const AdminFinancialZynPayPanel: React.FC<AdminFinancialZynPayPanelProps>
   // Estado para formulário de configuração do Webhook ZynPay
   const [webhookConfig, setWebhookConfig] = useState<ZynPayWebhookConfig>({
     webhookUrl: 'https://api.fatosbr.com.br/api/zynpay/webhook',
-    secret: 'whsec_zynpay_live_prod',
+    secret: '',
     autoSyncEnabled: true,
     updatedAt: new Date().toISOString()
   });
@@ -258,7 +258,7 @@ export const AdminFinancialZynPayPanel: React.FC<AdminFinancialZynPayPanelProps>
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-ZynPay-Signature': webhookConfig.secret || 'whsec_zynpay_live_prod'
+          'X-ZynPay-Signature': webhookConfig.secret || ''
         },
         body: JSON.stringify(parsed)
       });
