@@ -13,7 +13,7 @@
  * 6. Mascaramento de dados e credenciais em logs de auditoria.
  */
 
-import { Pool, PoolClient, QueryResult } from 'pg';
+import { Pool, PoolClient, QueryResult, QueryResultRow } from 'pg';
 
 const rawConnectionString =
   process.env.SUPABASE_DATABASE_URL ||
@@ -94,7 +94,7 @@ export function getPostgresPool(): Pool {
 /**
  * Executa uma consulta SQL parametrizada garantindo liberação imediata do cliente no pool.
  */
-export async function executeSql<T = any>(
+export async function executeSql<T extends QueryResultRow = any>(
   text: string,
   params: any[] = []
 ): Promise<QueryResult<T>> {
