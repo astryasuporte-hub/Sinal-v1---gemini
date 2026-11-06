@@ -1,6 +1,6 @@
 {
-  "summary": "Relatório de conclusão das correções definitivas de segurança financeira da ZynPay na FatosBR (IDOR, reconciliação upstream estrita, moeda BRL e idempotência persistente).",
-  "updatedAt": "2026-11-05T23:36:15.156715232Z",
+  "summary": "Relatório da auditoria e implementação definitiva da resolução da falha de build e deploy da FatosBR na Vercel (dpl_687YfSSpy6TTNsJYj2JgWbX8fpzz), cobrindo eliminação do erro TS5096/allowImportingTsExtensions, correção do __dirname em ESM, reestruturação canônica dos rewrites em vercel.json e validação de 52 testes de segurança.",
+  "updatedAt": "2026-11-06T23:00:08.860592736Z",
   "requestFeedback": true,
   "userFacing": true
 }

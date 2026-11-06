@@ -3,8 +3,12 @@ import react from '@vitejs/plugin-react';
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
+import { fileURLToPath } from 'url';
 import QRCode from 'qrcode';
 import { defineConfig, Plugin } from 'vite';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 import { renderEmailTemplate, buildEditorialBriefingHtml } from './src/server/templateEngine';
 import { instagramEngine } from './src/server/instagramEngine';
 import { verifyAndSanitizeAvatarUpload } from './src/server/avatarSecurityService';

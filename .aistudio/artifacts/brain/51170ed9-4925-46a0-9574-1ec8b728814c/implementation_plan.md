@@ -1,37 +1,37 @@
-# FATOSBR — CONCLUÍDO: HARDENING DEFINITIVO ZYNPAY & SUPABASE POSTGRESQL
+# FATOSBR — RESOLUÇÃO DEFINITIVA DO BUILD E DEPLOY NA VERCEL
 
-## 1. Escopo das Correções Executadas
+## 1. Diagnóstico da Causa Raiz do Status "ERROR" pós-Vite
 
-### 1.1 Eliminação Definitiva de IDOR / BOLA no `GET /api/zynpay/charges`
-- **Autenticação Obrigatória**: Consulta de cobranças exige agora `Authorization: Bearer <token>`.
-- **Validação de Sessão Supabase**: Validação rigorosa via `supabase.auth.getUser(token)` obtendo o `userId` real do pagador.
-- **Proteção de Titularidade Fail-Closed**: Verifica se `stored.userId === authenticatedUser.id` (ou correspondência por email seguro). Usuários não autenticados recebem HTTP 401 (`UNAUTHORIZED_CHARGE_QUERY`), sessões inválidas recebem HTTP 403 (`INVALID_SESSION`) e tentativas de acessar cobrança de terceiros recebem HTTP 404 neutro (`CHARGE_NOT_FOUND`) para impedir enumeração de cobranças.
-- **Acesso Administrativo Seguro**: Permite auditoria administrativa legítima via token mestre `ADMIN_SECRET`.
-- **Frontend Atualizado**: `src/services/zynpayService.ts` injeta `Authorization: Bearer ${session.access_token}` nos métodos `getChargeStatus` e `listCharges`.
+1. **Conflito Fatal do TypeScript no `@vercel/node` (TS5096)**:
+   - O arquivo `tsconfig.json` continha a opção `"allowImportingTsExtensions": true`.
+   - Ao compilar as Serverless Functions da pasta `/api`, o builder `@vercel/node` ativa a emissão de arquivos JavaScript (`noEmit: false`).
+   - Sob `noEmit: false`, o TypeScript rejeita categoricamente o uso de `allowImportingTsExtensions`, emitindo o erro fatal:
+     `error TS5096: Option 'allowImportingTsExtensions' can only be used when one of 'noEmit', 'emitDeclarationOnly', or 'rewriteRelativeImportExtensions' is set.`
+   - Esse erro abortava a compilação de todas as Serverless Functions da Vercel.
 
-### 1.2 Webhook e Reconciliação Upstream Estrita (`api/zynpay/webhook.ts` & `api/_lib/zynpayClient.ts`)
-- **Eliminação de Fallbacks Permissivos**: Removido `verifiedAmountCents = upCharge.amount || storedCharge.amountCents`.
-- **Validação Upstream 100% Obrigatória**:
-  1. Cobrança localizada na API oficial da ZynPay (`fetchChargeFromGateway`).
-  2. Identificador correspondente (`upCharge.id === storedCharge.providerPaymentId`).
-  3. Status comprovado como `PAID` no gateway (rejeita com HTTP 422 `PAYMENT_NOT_CONFIRMED` se divergente).
-  4. Valor inteiro positivo em centavos exatamente idêntico ao registrado (`upCharge.amount === storedCharge.amountCents`). Rejeita com HTTP 422 `AMOUNT_MISMATCH` ou `INVALID_UPSTREAM_AMOUNT` sem ativar Pro.
-  5. Moeda BRL explicitamente confirmada (`validateCurrency(data.currency, { required: true })`). Rejeita com HTTP 422 `CURRENCY_MISMATCH` se não for BRL.
-  6. Idempotência por evento atômica em `internal.billing_events` prevenindo ataques de repetição.
-  7. Confirmação atômica e ativação Pro via RPC PostgreSQL `public.confirm_payment_and_activate_subscription_atomic`.
+2. **Extensão de Arquivo Indevida em Import (`src/main.tsx`)**:
+   - `src/main.tsx` continha `import App from './App.tsx';`, forçando a necessidade espúria de `allowImportingTsExtensions`.
+   - Corrigido para a importação padrão universal `import App from './App';`.
 
-### 1.3 Idempotência Real e Persistente por Tentativa de Checkout (`api/zynpay/charges.ts` & `api/_lib/db.ts`)
-- **Consulta Persistente Antes do Gateway**: Implementado `getChargeByIdempotencyKey(userId, idempotencyKey)` no PostgreSQL server-side.
-- **Retries da Mesma Tentativa**: Reenvios da mesma chave retornam imediatamente a cobrança original já registrada (`reused: true`), evitando cobranças duplicadas ou novas chamadas desnecessárias à ZynPay.
-- **Respeito a `billing_one_pending`**: Tratamento atômico de concorrência com reutilização de cobrança pendente para o mesmo plano.
+3. **Incompatibilidade ESM com `__dirname` em `vite.config.ts`**:
+   - `vite.config.ts` utilizava `__dirname` diretamente em módulo ESM (`"type": "module"`).
+   - Corrigido com a definição canônica ESM `fileURLToPath(import.meta.url)` e `path.dirname`, eliminando alertas de config loader do Vite 8.
+
+4. **Roteamento SPA vs Serverless Functions em `vercel.json`**:
+   - O `vercel.json` continha rewrite com regex de lookahead negativo `/((?!api/).*)` e rewrite tautológico `/api/(.*) -> /api/$1`, causando conflito no roteador de produção e fallback indevido para `index.html`.
+   - Atualizado para a especificação canônica da Vercel:
+     - `/api/:match* -> /api/:match*` (preserva e despacha nativamente para as funções em `/api`)
+     - `/:path* -> /index.html` (despacha todas as rotas de cliente para o SPA)
+     - Headers de segurança e no-cache aplicados em `/api/:match*`.
+
+5. **Definição de Runtime Node no `package.json`**:
+   - Adicionado `"engines": { "node": ">=20.x" }` para garantir runtime Node estável e compatível com Bun e `pg`.
 
 ---
 
-## 2. Resultados dos Testes Automatizados
+## 2. Resultados das Validações
 
-- **Suíte Executada**: `tests/security-validation.ts`
-- **Total de Testes**: **47 testes**
-- **Testes Passados**: **47 (100%)**
-- **Testes Falhos**: **0 (0%)**
-- **Compilação TypeScript**: `tsc --noEmit` concluído sem nenhum erro.
-- **Vite Production Build**: `npm run build` gerou os bundles sem falhas.
+- **Type Check (`npm run lint` / `tsc --noEmit`)**: 0 erros.
+- **Client Build (`bun run build` / `vite build`)**: 100% de sucesso (2752 módulos transformados, 0 erros).
+- **Suíte de Segurança Financeira (`tests/security-validation.ts`)**: 52 testes executados, 52 aprovados (100%).
+- **Compilação e Linter do Applet**: `compile_applet` e `lint_applet` concluídos com sucesso.
