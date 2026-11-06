@@ -1,37 +1,34 @@
-# FATOSBR — RESOLUÇÃO DEFINITIVA DO BUILD E DEPLOY NA VERCEL
+# FATOSBR — MISSÃO P0: ESTABILIZAÇÃO DO RUNTIME E DEPLOY NA VERCEL
 
-## 1. Diagnóstico da Causa Raiz do Status "ERROR" pós-Vite
+## 1. Diagnóstico do Deployment `dpl_9H3315ENuuZcjZyDeLgqxj3iqhMD`
 
-1. **Conflito Fatal do TypeScript no `@vercel/node` (TS5096)**:
-   - O arquivo `tsconfig.json` continha a opção `"allowImportingTsExtensions": true`.
-   - Ao compilar as Serverless Functions da pasta `/api`, o builder `@vercel/node` ativa a emissão de arquivos JavaScript (`noEmit: false`).
-   - Sob `noEmit: false`, o TypeScript rejeita categoricamente o uso de `allowImportingTsExtensions`, emitindo o erro fatal:
-     `error TS5096: Option 'allowImportingTsExtensions' can only be used when one of 'noEmit', 'emitDeclarationOnly', or 'rewriteRelativeImportExtensions' is set.`
-   - Esse erro abortava a compilação de todas as Serverless Functions da Vercel.
+1. **Alinhamento do Node.js Runtime (Engines vs Project Settings)**:
+   - O `package.json` definia `"engines": { "node": ">=20.x" }`.
+   - A Vercel interpretou a faixa aberta e selecionou automaticamente a versão mais recente (`Node.js 26.x`), sobrescrevendo a versão `24.x` configurada nas Project Settings do projeto `fatosbr`.
+   - A Vercel emitiu os seguintes avisos:
+     `Warning: Due to "engines": { "node": ">=20.x" } in your package.json file, the Node.js Version defined in your Project Settings ("24.x") will not apply, Node.js Version "26.x" will be used instead.`
+     `Warning: Detected "engines": { "node": ">=20.x" } in your package.json that will automatically upgrade when a new major Node.js Version is released.`
+   - **Correção**: Travado explicitamente em `"node": "24.x"` no `package.json`, eliminando a atualização automática para versões não-LTS.
 
-2. **Extensão de Arquivo Indevida em Import (`src/main.tsx`)**:
-   - `src/main.tsx` continha `import App from './App.tsx';`, forçando a necessidade espúria de `allowImportingTsExtensions`.
-   - Corrigido para a importação padrão universal `import App from './App';`.
+2. **Eliminação de Colisão de Rotas Serverless (`api/[...path].ts`)**:
+   - O arquivo `api/[...path].ts` atuava como um catch-all monolítico competindo com todas as 20 rotas filhas em `/api/`.
+   - Na Vercel, cada arquivo em `/api` é empacotado como uma função independente; ter um catch-all na raiz do diretório gera colisões no roteador da Vercel.
+   - **Correção**: Removido `api/[...path].ts`. Cada rota possui agora sua Serverless Function isolada.
 
-3. **Incompatibilidade ESM com `__dirname` em `vite.config.ts`**:
-   - `vite.config.ts` utilizava `__dirname` diretamente em módulo ESM (`"type": "module"`).
-   - Corrigido com a definição canônica ESM `fileURLToPath(import.meta.url)` e `path.dirname`, eliminando alertas de config loader do Vite 8.
+3. **Criação de Endpoints Dedicados Faltantes**:
+   - Criados `api/resend/config.ts` e `api/resend/preview.ts`, garantindo suporte nativo serverless para as chamadas do painel editorial e de configurações.
 
-4. **Roteamento SPA vs Serverless Functions em `vercel.json`**:
-   - O `vercel.json` continha rewrite com regex de lookahead negativo `/((?!api/).*)` e rewrite tautológico `/api/(.*) -> /api/$1`, causando conflito no roteador de produção e fallback indevido para `index.html`.
-   - Atualizado para a especificação canônica da Vercel:
-     - `/api/:match* -> /api/:match*` (preserva e despacha nativamente para as funções em `/api`)
-     - `/:path* -> /index.html` (despacha todas as rotas de cliente para o SPA)
-     - Headers de segurança e no-cache aplicados em `/api/:match*`.
-
-5. **Definição de Runtime Node no `package.json`**:
-   - Adicionado `"engines": { "node": ">=20.x" }` para garantir runtime Node estável e compatível com Bun e `pg`.
+4. **Padronização dos Rewrites no `vercel.json`**:
+   - Removido o rewrite reflexivo `/api/:match* -> /api/:match*`.
+   - Aplicado o padrão canônico da Vercel:
+     `"source": "/((?!api/.*).*)"` -> `"destination": "/index.html"`.
+     Garante que todas as chamadas `/api/*` sejam despachadas diretamente para as funções serverless sem interceptação pela SPA.
 
 ---
 
 ## 2. Resultados das Validações
 
 - **Type Check (`npm run lint` / `tsc --noEmit`)**: 0 erros.
-- **Client Build (`bun run build` / `vite build`)**: 100% de sucesso (2752 módulos transformados, 0 erros).
-- **Suíte de Segurança Financeira (`tests/security-validation.ts`)**: 52 testes executados, 52 aprovados (100%).
-- **Compilação e Linter do Applet**: `compile_applet` e `lint_applet` concluídos com sucesso.
+- **Client Build (`bun run build` / `vite build`)**: 100% aprovado (2752 módulos).
+- **Suíte de Segurança Financeira (`tests/security-validation.ts`)**: 52 testes aprovados (100%).
+- **Compilação e Linter do Applet**: `compile_applet` e `lint_applet` 100% aprovados.

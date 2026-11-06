@@ -1,6 +1,6 @@
 {
-  "summary": "Relatório da auditoria e implementação definitiva da resolução da falha de build e deploy da FatosBR na Vercel (dpl_687YfSSpy6TTNsJYj2JgWbX8fpzz), cobrindo eliminação do erro TS5096/allowImportingTsExtensions, correção do __dirname em ESM, reestruturação canônica dos rewrites em vercel.json e validação de 52 testes de segurança.",
-  "updatedAt": "2026-11-06T23:00:08.860592736Z",
+  "summary": "Relatório da Missão P0 de estabilização do deploy da FatosBR na Vercel: alinhamento do Node.js em 24.x nas engines do package.json, eliminação do catch-all api/[...path].ts para evitar colisão de rotas serverless, criação dos endpoints dedicados api/resend/config.ts e api/resend/preview.ts, e correção do padrão de rewrites no vercel.json.",
+  "updatedAt": "2026-11-06T23:18:09.378602803Z",
   "requestFeedback": true,
   "userFacing": true
 }
