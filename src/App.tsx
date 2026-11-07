@@ -450,8 +450,10 @@ export default function App() {
     }
   }, [historyItems]);
 
-  // Função para buscar notícias reais via provedores e alimentar o feed em tempo real com cache em 2 camadas (Memória + localStorage)
+  // Função para buscar notícias reais via provedores e alimentar o feed em tempo real com Stale-While-Revalidate (SWR)
   const loadRealTimeNews = async (isManualRefresh = false) => {
+    let hasShownStale = false;
+
     if (isManualRefresh) {
       const check = rateLimitService.recordUserRefresh();
       if (!check.allowed) {
@@ -464,9 +466,9 @@ export default function App() {
       setDailyRefreshRemaining(check.remaining);
       setIsFeedRefreshing(true);
     } else {
-      // 1. Camada 1 & 2: Verifica cache de duas camadas (Memória + localStorage)
+      // 1. Stale-While-Revalidate: Exibe imediatamente dados em cache (Tier 1/2) para 0ms de tela branca
       const cached = rateLimitService.getCachedFeed();
-      if (cached && cached.length >= 20) {
+      if (cached && cached.length > 0) {
         const viewedIds = new Set(historyItems.map((h) => h.event.id));
         const cachedWithViewed = cached.map((e) => ({
           ...e,
@@ -477,23 +479,25 @@ export default function App() {
           new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
         );
         setIsLoading(false);
+        hasShownStale = true;
         setFeedAnimationKey((k) => k + 1);
-        return;
-      }
-
-      // Se há cache instantâneo prévio, exibe imediatamente para 0ms de tela branca
-      const instantFallback = rateLimitService.getInstantFeedSync();
-      if (instantFallback && instantFallback.length > 0 && events.length === 0) {
-        setEvents(instantFallback as Event[]);
-        setIsLoading(false);
-      } else if (events.length === 0) {
-        setIsLoading(true);
+        // Não encerra a execução: prossegue com a revalidação assíncrona em segundo plano
+      } else {
+        const instantFallback = rateLimitService.getInstantFeedSync();
+        if (instantFallback && instantFallback.length > 0) {
+          setEvents(instantFallback as Event[]);
+          setIsLoading(false);
+          hasShownStale = true;
+        } else if (events.length === 0) {
+          setIsLoading(true);
+        }
       }
     }
 
     setHasError(false);
 
     try {
+      // 2. Revalidação em segundo plano consultando Supabase / backend canônico / provedores reais
       const realEvents = await newsIngestionService.fetchRealTimeEventsFeed(savedEventIds);
       if (realEvents && realEvents.length > 0) {
         const viewedIds = new Set(historyItems.map((h) => h.event.id));
@@ -518,10 +522,14 @@ export default function App() {
             handleOpenEventDetail(breakingEvent);
           });
         }
+      } else if (!hasShownStale && events.length === 0) {
+        // Se a busca retornar vazia e não há dados prévios
+        setHasError(false);
       }
     } catch (err) {
-      console.error('Falha ao buscar notícias em tempo real:', err);
-      if (events.length === 0) {
+      console.warn('[News Engine SWR] Revalidação em segundo plano falhou:', err);
+      // Mantém os dados stale na tela para não quebrar a experiência do usuário
+      if (events.length === 0 && !hasShownStale) {
         setHasError(true);
       }
     } finally {

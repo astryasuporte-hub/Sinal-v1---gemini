@@ -107,7 +107,7 @@ export const rateLimitService = {
     const now = Date.now();
 
     // 1. Verifica Tier 1 (Memória RAM instantânea)
-    if (memoryFeedCache && memoryFeedCache.length >= 20 && now - memoryFeedTimestamp < maxAgeMs) {
+    if (memoryFeedCache && memoryFeedCache.length > 0 && now - memoryFeedTimestamp < maxAgeMs) {
       return memoryFeedCache;
     }
 
@@ -122,7 +122,7 @@ export const rateLimitService = {
       const rawFeed = localStorage.getItem(STORAGE_KEY_FEED_CACHE);
       if (!rawFeed) return null;
       const parsed = JSON.parse(rawFeed);
-      if (Array.isArray(parsed) && parsed.length >= 20) {
+      if (Array.isArray(parsed) && parsed.length > 0) {
         // Aquece Tier 1 de Memória para chamadas subsequentes
         memoryFeedCache = parsed;
         memoryFeedTimestamp = parseInt(rawTime, 10);

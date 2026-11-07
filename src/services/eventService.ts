@@ -12,6 +12,15 @@ export const eventService = {
    */
   async getEvents(): Promise<Event[]> {
     if (!isSupabaseConfigured) {
+      try {
+        const proxyRes = await fetch('/api/proxy/events').catch(() => null);
+        if (proxyRes && proxyRes.ok) {
+          const body = await proxyRes.json();
+          if (Array.isArray(body.events) && body.events.length > 0) {
+            return body.events;
+          }
+        }
+      } catch {}
       return [];
     }
 
@@ -22,6 +31,16 @@ export const eventService = {
         .order('published_at', { ascending: false });
 
       if (error || !eventsData || eventsData.length === 0) {
+        // Fallback para o backend seguro caso o client PostgREST retorne vazio ou com restrição
+        try {
+          const proxyRes = await fetch('/api/proxy/events').catch(() => null);
+          if (proxyRes && proxyRes.ok) {
+            const body = await proxyRes.json();
+            if (Array.isArray(body.events) && body.events.length > 0) {
+              return body.events;
+            }
+          }
+        } catch {}
         return [];
       }
 

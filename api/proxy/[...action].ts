@@ -12,6 +12,7 @@ import newsapiHandler from '../_lib/handlers/proxy/newsapi';
 import worldnewsHandler from '../_lib/handlers/proxy/worldnews';
 import statusHandler from '../_lib/handlers/proxy/status';
 import nvidiaChatHandler from '../_lib/handlers/proxy/nvidiaChat';
+import eventsHandler from '../_lib/handlers/proxy/events';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);
@@ -25,6 +26,9 @@ export default async function handler(req: any, res: any) {
   const urlObj = new URL(req.url, 'http://localhost');
   const pathname = urlObj.pathname;
 
+  if (pathname.includes('/events') || pathname.includes('/feed') || pathname.includes('/ingest')) {
+    return eventsHandler(req, res);
+  }
   if (pathname.includes('/gnews')) {
     return gnewsHandler(req, res);
   }

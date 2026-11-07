@@ -57,10 +57,28 @@ export default async function handler(req: any, res: any) {
     }
   };
 
+  let databaseEventsCount: number | null = null;
+  let databaseConnected = false;
+
+  try {
+    const { isPostgresConfigured, executeSql } = await import('../../postgres');
+    if (isPostgresConfigured()) {
+      const countRes = await executeSql('SELECT count(*)::int as total FROM public.events');
+      databaseEventsCount = countRes.rows[0]?.total ?? 0;
+      databaseConnected = true;
+    }
+  } catch {}
+
   return sendJson(res, 200, {
     status: 'ONLINE',
     environment: process.env.NODE_ENV || 'production',
     serverTime: new Date().toISOString(),
+    newsEngine: {
+      databaseConnected,
+      databaseEventsCount,
+      pipeline: 'FatosBR News Engine V1',
+      supportedProviders: ['gnews', 'newsapi', 'worldnews', 'nvidia']
+    },
     specs
   });
 }
