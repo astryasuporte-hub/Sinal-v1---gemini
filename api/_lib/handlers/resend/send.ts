@@ -5,8 +5,8 @@
  * Vercel Serverless Function: Resend Send Email
  */
 
-import { getServerKeys, sendJson, setCorsHeaders, readJsonBody } from '../_lib/common';
-import { enforceRateLimit } from '../_lib/rateLimiter';
+import { getServerKeys, sendJson, setCorsHeaders, readJsonBody } from '../../common';
+import { enforceRateLimit } from '../../rateLimiter';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);

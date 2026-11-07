@@ -5,9 +5,9 @@
  * Vercel Serverless Function: Auth Verify OTP
  */
 
-import { sendJson, setCorsHeaders, readJsonBody } from '../_lib/common';
-import { enforceRateLimit } from '../_lib/rateLimiter';
-import { otpStore } from './send-otp';
+import { sendJson, setCorsHeaders, readJsonBody } from '../../common';
+import { enforceRateLimit } from '../../rateLimiter';
+import { otpStore } from './sendOtp';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);

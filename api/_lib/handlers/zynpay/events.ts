@@ -5,8 +5,8 @@
  * Vercel Serverless Function: ZynPay SSE Events Endpoint
  */
 
-import { setCorsHeaders } from '../_lib/common';
-import { subscribeBillingEvents } from '../_lib/eventsHub';
+import { setCorsHeaders } from '../../common';
+import { subscribeBillingEvents } from '../../eventsHub';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);

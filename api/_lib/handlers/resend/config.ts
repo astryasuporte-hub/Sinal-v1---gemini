@@ -5,7 +5,7 @@
  * Vercel Serverless Function: Resend Configuration
  */
 
-import { getServerKeys, sendJson, setCorsHeaders, readJsonBody, maskSecret } from '../_lib/common';
+import { getServerKeys, sendJson, setCorsHeaders, readJsonBody, maskSecret } from '../../common';
 
 let customSender = 'FatosBR Briefing <onboarding@resend.dev>';
 

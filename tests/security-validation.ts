@@ -13,10 +13,15 @@
  */
 
 import crypto from 'crypto';
-import webhookHandler from '../api/zynpay/webhook';
-import chargesHandler from '../api/zynpay/charges';
-import configHandler from '../api/zynpay/config';
-import balanceHandler from '../api/zynpay/balance';
+import webhookHandler from '../api/_lib/handlers/zynpay/webhook';
+import chargesHandler from '../api/_lib/handlers/zynpay/charges';
+import configHandler from '../api/_lib/handlers/zynpay/config';
+import balanceHandler from '../api/_lib/handlers/zynpay/balance';
+import zynpayRouter from '../api/zynpay/[...action]';
+import resendRouter from '../api/resend/[...action]';
+import proxyRouter from '../api/proxy/[...action]';
+import authRouter from '../api/auth/[...action]';
+import notificationsRouter from '../api/notifications/[...action]';
 import { isAllowedDomain } from '../api/_lib/common';
 import {
   setTestDatabaseAdapter,
@@ -1831,6 +1836,85 @@ async function main() {
     for (const url of officialUrls) {
       assert(isAllowedDomain(url), `URL oficial deve ser permitida: ${url}`);
     }
+  });
+
+  console.log('\n--- 6. TESTES DOS ROTEADORES CONSOLIDADOS (LIMITE VERCEL HOBBY) ---');
+
+  await runTest('6.1 zynpayRouter despacha /api/zynpay/charges (POST sem auth retorna 401)', async () => {
+    const req = createMockReq({
+      method: 'POST',
+      url: '/api/zynpay/charges',
+      body: { planId: 'pro_monthly' }
+    });
+    const { res, result } = createMockRes();
+    await zynpayRouter(req, res);
+    assert(result().statusCode === 401, 'Deve retornar 401 para criação sem autenticação');
+  });
+
+  await runTest('6.2 zynpayRouter despacha /api/zynpay/webhook (POST sem assinatura retorna 401)', async () => {
+    const req = createMockReq({
+      method: 'POST',
+      url: '/api/zynpay/webhook',
+      body: { event: 'charge.paid' }
+    });
+    const { res, result } = createMockRes();
+    await zynpayRouter(req, res);
+    assert(result().statusCode === 401, 'Deve retornar 401 para webhook sem assinatura');
+  });
+
+  await runTest('6.3 zynpayRouter rejeita rota inexistente com HTTP 404 neutro', async () => {
+    const req = createMockReq({
+      method: 'GET',
+      url: '/api/zynpay/rota-fantasma-inexistente'
+    });
+    const { res, result } = createMockRes();
+    await zynpayRouter(req, res);
+    assert(result().statusCode === 404, 'Deve retornar 404 para sub-rota desconhecida');
+    const data = result().json;
+    assert(data.error === 'ENDPOINT_NOT_FOUND', 'Deve retornar erro ENDPOINT_NOT_FOUND');
+  });
+
+  await runTest('6.4 resendRouter responde a /api/resend/status com HTTP 200', async () => {
+    const req = createMockReq({
+      method: 'GET',
+      url: '/api/resend/status'
+    });
+    const { res, result } = createMockRes();
+    await resendRouter(req, res);
+    assert(result().statusCode === 200, 'Deve retornar 200 para status do Resend');
+    const data = result().json;
+    assert(data.provider === 'Resend', 'Provider deve ser Resend');
+  });
+
+  await runTest('6.5 proxyRouter responde a /api/proxy/status com HTTP 200', async () => {
+    const req = createMockReq({
+      method: 'GET',
+      url: '/api/proxy/status'
+    });
+    const { res, result } = createMockRes();
+    await proxyRouter(req, res);
+    assert(result().statusCode === 200, 'Deve retornar 200 para status do proxy');
+  });
+
+  await runTest('6.6 authRouter valida payload em /api/auth/send-otp', async () => {
+    const req = createMockReq({
+      method: 'POST',
+      url: '/api/auth/send-otp',
+      body: {}
+    });
+    const { res, result } = createMockRes();
+    await authRouter(req, res);
+    assert(result().statusCode === 400, 'Deve retornar 400 para body vazio');
+  });
+
+  await runTest('6.7 notificationsRouter rejeita sub-rota desconhecida com HTTP 404', async () => {
+    const req = createMockReq({
+      method: 'POST',
+      url: '/api/notifications/desconhecida'
+    });
+    const { res, result } = createMockRes();
+    await notificationsRouter(req, res);
+    assert(result().statusCode === 404, 'Deve retornar 404 para sub-rota desconhecida de notificações');
   });
 
   console.log('\n------------------------------------------------------');

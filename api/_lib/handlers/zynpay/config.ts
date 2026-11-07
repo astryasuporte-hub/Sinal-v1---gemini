@@ -5,9 +5,9 @@
  * Vercel Serverless Function: ZynPay Webhook Configuration & Test Tool (Admin Protected)
  */
 
-import { sendJson, setCorsHeaders, readJsonBody, maskSecret } from '../_lib/common';
-import { verifyAdminRequest } from '../_lib/adminAuth';
-import { enforceRateLimit } from '../_lib/rateLimiter';
+import { sendJson, setCorsHeaders, readJsonBody, maskSecret } from '../../common';
+import { verifyAdminRequest } from '../../adminAuth';
+import { enforceRateLimit } from '../../rateLimiter';
 
 let currentConfig = {
   webhookUrl: 'https://fatosbr.com.br/api/zynpay/webhook',

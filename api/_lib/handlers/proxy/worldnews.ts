@@ -5,8 +5,8 @@
  * Vercel Serverless Function: World News API Proxy
  */
 
-import { getServerKeys, sendJson, setCorsHeaders, isAllowedDomain } from '../_lib/common';
-import { enforceRateLimit } from '../_lib/rateLimiter';
+import { getServerKeys, sendJson, setCorsHeaders, isAllowedDomain } from '../../common';
+import { enforceRateLimit } from '../../rateLimiter';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);

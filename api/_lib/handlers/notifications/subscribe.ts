@@ -5,7 +5,7 @@
  * Vercel Serverless Function: Web Push Subscriptions
  */
 
-import { sendJson, setCorsHeaders, readJsonBody } from '../_lib/common';
+import { sendJson, setCorsHeaders, readJsonBody } from '../../common';
 
 const subscriptions = new Map<string, any>();
 

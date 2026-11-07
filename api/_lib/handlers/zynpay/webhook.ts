@@ -14,12 +14,12 @@
  * 7. Execução de confirmação e ativação Pro via RPC atômico PostgreSQL (SELECT ... FOR UPDATE).
  */
 
-import { sendJson, setCorsHeaders, readRawAndJsonBody, getServerKeys, getClientIp } from '../_lib/common';
-import { verifyWebhookSignature } from '../_lib/crypto';
-import { checkAndLockWebhookEvent, getChargeById, confirmPaymentAndActivateSubscriptionAtomic } from '../_lib/db';
-import { fetchChargeFromGateway } from '../_lib/zynpayClient';
-import { broadcastBillingEvent } from '../_lib/eventsHub';
-import { enforceRateLimit } from '../_lib/rateLimiter';
+import { sendJson, setCorsHeaders, readRawAndJsonBody, getServerKeys, getClientIp } from '../../common';
+import { verifyWebhookSignature } from '../../crypto';
+import { checkAndLockWebhookEvent, getChargeById, confirmPaymentAndActivateSubscriptionAtomic } from '../../db';
+import { fetchChargeFromGateway } from '../../zynpayClient';
+import { broadcastBillingEvent } from '../../eventsHub';
+import { enforceRateLimit } from '../../rateLimiter';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);

@@ -5,8 +5,8 @@
  * Vercel Serverless Function: Resend Preview HTML Briefing
  */
 
-import { setCorsHeaders, readJsonBody } from '../_lib/common';
-import { buildEditorialBriefingHtml } from '../../src/server/templateEngine';
+import { setCorsHeaders, readJsonBody } from '../../common';
+import { buildEditorialBriefingHtml } from '../../../../src/server/templateEngine';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);

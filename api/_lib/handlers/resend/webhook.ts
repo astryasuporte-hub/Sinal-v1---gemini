@@ -5,7 +5,7 @@
  * Vercel Serverless Function: Resend Webhooks Handler
  */
 
-import { sendJson, setCorsHeaders, readJsonBody } from '../_lib/common';
+import { sendJson, setCorsHeaders, readJsonBody } from '../../common';
 
 const globalEvents: any[] = [];
 

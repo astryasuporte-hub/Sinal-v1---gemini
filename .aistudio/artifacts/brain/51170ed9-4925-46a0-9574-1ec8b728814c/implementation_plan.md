@@ -1,34 +1,36 @@
-# FATOSBR — MISSÃO P0: ESTABILIZAÇÃO DO RUNTIME E DEPLOY NA VERCEL
+# FATOSBR — RESOLUÇÃO DO LIMITE DE SERVERLESS FUNCTIONS (HOBBY PLAN)
 
-## 1. Diagnóstico do Deployment `dpl_9H3315ENuuZcjZyDeLgqxj3iqhMD`
+## 1. Diagnóstico do Erro Fatal `exceeded_serverless_functions_per_deployment`
 
-1. **Alinhamento do Node.js Runtime (Engines vs Project Settings)**:
-   - O `package.json` definia `"engines": { "node": ">=20.x" }`.
-   - A Vercel interpretou a faixa aberta e selecionou automaticamente a versão mais recente (`Node.js 26.x`), sobrescrevendo a versão `24.x` configurada nas Project Settings do projeto `fatosbr`.
-   - A Vercel emitiu os seguintes avisos:
-     `Warning: Due to "engines": { "node": ">=20.x" } in your package.json file, the Node.js Version defined in your Project Settings ("24.x") will not apply, Node.js Version "26.x" will be used instead.`
-     `Warning: Detected "engines": { "node": ">=20.x" } in your package.json that will automatically upgrade when a new major Node.js Version is released.`
-   - **Correção**: Travado explicitamente em `"node": "24.x"` no `package.json`, eliminando a atualização automática para versões não-LTS.
-
-2. **Eliminação de Colisão de Rotas Serverless (`api/[...path].ts`)**:
-   - O arquivo `api/[...path].ts` atuava como um catch-all monolítico competindo com todas as 20 rotas filhas em `/api/`.
-   - Na Vercel, cada arquivo em `/api` é empacotado como uma função independente; ter um catch-all na raiz do diretório gera colisões no roteador da Vercel.
-   - **Correção**: Removido `api/[...path].ts`. Cada rota possui agora sua Serverless Function isolada.
-
-3. **Criação de Endpoints Dedicados Faltantes**:
-   - Criados `api/resend/config.ts` e `api/resend/preview.ts`, garantindo suporte nativo serverless para as chamadas do painel editorial e de configurações.
-
-4. **Padronização dos Rewrites no `vercel.json`**:
-   - Removido o rewrite reflexivo `/api/:match* -> /api/:match*`.
-   - Aplicado o padrão canônico da Vercel:
-     `"source": "/((?!api/.*).*)"` -> `"destination": "/index.html"`.
-     Garante que todas as chamadas `/api/*` sejam despachadas diretamente para as funções serverless sem interceptação pela SPA.
+- **Deployment afetado**: `dpl_EwAMtKNHULSfHJqa6hzHGZLKzgi4` (commit `a59c083402a4e9bf756eee05c37fecc101d09d7c`)
+- **Etapa da falha**: `patchBuild`
+- **Mensagem da Vercel**:
+  `No more than 12 Serverless Functions can be added to a Deployment on the Hobby plan. Create a team (Pro plan) to deploy more.`
+- **Causa Raiz**: O projeto continha 23 arquivos `.ts` espalhados pelas pastas de `/api`, fazendo a Vercel gerar 23 funções serverless isoladas, violando o limite de 12 funções do plano Hobby.
 
 ---
 
-## 2. Resultados das Validações
+## 2. Estratégia de Consolidação Arquitetural
 
-- **Type Check (`npm run lint` / `tsc --noEmit`)**: 0 erros.
-- **Client Build (`bun run build` / `vite build`)**: 100% aprovado (2752 módulos).
-- **Suíte de Segurança Financeira (`tests/security-validation.ts`)**: 52 testes aprovados (100%).
-- **Compilação e Linter do Applet**: `compile_applet` e `lint_applet` 100% aprovados.
+Conforme a documentação da Vercel, arquivos e diretórios iniciados por `_` (como `_lib/`) são ignorados para a contagem de Serverless Functions. Os handlers reais foram movidos para `api/_lib/handlers/` e os pontos de entrada foram unificados por domínio de negócio:
+
+### Mapeamento:
+1. **`api/zynpay/[...action].ts`** (1 função) -> Atende `/api/zynpay/charges`, `/api/zynpay/webhook`, `/api/zynpay/balance`, `/api/zynpay/config`, `/api/zynpay/events`.
+2. **`api/resend/[...action].ts`** (1 função) -> Atende `/api/resend/send`, `/api/resend/status`, `/api/resend/ticket`, `/api/resend/webhook`, `/api/resend/config`, `/api/resend/preview`.
+3. **`api/proxy/[...action].ts`** (1 função) -> Atende `/api/proxy/gnews`, `/api/proxy/newsapi`, `/api/proxy/worldnews`, `/api/proxy/nvidia/chat`, `/api/proxy/status`.
+4. **`api/auth/[...action].ts`** (1 função) -> Atende `/api/auth/send-otp`, `/api/auth/verify-otp`.
+5. **`api/notifications/[...action].ts`** (1 função) -> Atende `/api/notifications/subscribe`, `/api/notifications/broadcast-push`.
+6. **`api/instagram/[...action].ts`** (1 função) -> Atende `/api/instagram/*`.
+7. **`api/avatar/verify.ts`** (1 função) -> Atende `/api/avatar/verify`.
+8. **`api/admin/company-logo.ts`** (1 função) -> Atende `/api/admin/company-logo`.
+
+**Total de Funções Geradas na Vercel: EXATAMENTE 8 (Limite do plano: 12).**
+
+---
+
+## 3. Validação e Testes
+
+- **Typecheck (`tsc --noEmit`)**: 0 erros.
+- **Frontend Build (`bun run build`)**: 2752 módulos transformados com sucesso.
+- **Suíte de Testes (`tests/security-validation.ts`)**: **59 testes executados, 59 aprovados (100%)**, incluindo os 7 testes de integração com os roteadores consolidados.
+- **Proteções ZynPay Preservadas**: Verificação HMAC `x-zinpay-signature`, idempotência, reserva transacional `CREATING`, reconciliação de valores e moeda BRL 100% ativas e validadas.
