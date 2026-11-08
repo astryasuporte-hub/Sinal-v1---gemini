@@ -77,6 +77,34 @@ export function getProviderDiagnostics(): Record<string, ProviderDiagnostic> {
   return { ...providerDiagnostics };
 }
 
+/**
+ * Gera um UUID RFC 4122 v4 determinístico baseado numa seed estável (ex: URL da notícia).
+ * Garante que os identificadores sejam UUIDs válidos e compatíveis com PostgreSQL/Supabase.
+ */
+export function generateDeterministicUuid(seed: string): string {
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for (let i = 0; i < seed.length; i++) {
+    const ch = seed.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+
+  let h3 = 0x12345678, h4 = 0x87654321;
+  for (let i = seed.length - 1; i >= 0; i--) {
+    const ch = seed.charCodeAt(i);
+    h3 = Math.imul(h3 ^ ch, 2246822507);
+    h4 = Math.imul(h4 ^ ch, 3266489909);
+  }
+
+  const hex = [h1, h2, h3, h4]
+    .map(n => (n >>> 0).toString(16).padStart(8, '0'))
+    .join('');
+
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
 export const newsIngestionService = {
   /**
    * Obtém status de cotas e especificações de todos os provedores via endpoint seguro
@@ -582,12 +610,12 @@ export const newsIngestionService = {
         const imageUrl = art.imageUrl && art.imageUrl.startsWith('http') ? art.imageUrl : fallbackImg;
         const badge = getSourceBadge(art.sourceName);
         const relativeTime = formatRelativeTime(art.publishedAt);
-        const eventId = `evt-real-${Date.now()}-${idx}`;
+        const eventId = generateDeterministicUuid(art.url);
         const isSaved = savedIds ? savedIds.has(eventId) : false;
 
         const sources: SourceReference[] = [
           {
-            id: `src-${Date.now()}-${idx}`,
+            id: generateDeterministicUuid(`src:${art.domain}:${art.url}`),
             sourceName: art.sourceName,
             domain: art.domain,
             headline: art.title,
@@ -606,7 +634,7 @@ export const newsIngestionService = {
         const whyItMatters = `A cobertura por ${art.sourceName} contextualiza os impactos no cenário de ${category} no Brasil.`;
 
         const entity: Entity = {
-          id: `ent-real-${idx}`,
+          id: generateDeterministicUuid(`ent:${art.sourceName}`),
           name: art.sourceName,
           type: 'organization',
           description: `Veículo jornalístico cobrindo ${category}`,
@@ -616,7 +644,7 @@ export const newsIngestionService = {
         };
 
         const topic: Topic = {
-          id: `top-real-${category.toLowerCase().replace(/[^a-z0-9]/g, '-')}`,
+          id: generateDeterministicUuid(`top:${category}`),
           name: category,
           slug: category.toLowerCase().replace(/[^a-z0-9]/g, '-'),
           description: `Notícias e análises em tempo real de ${category}`,
@@ -662,15 +690,6 @@ export const newsIngestionService = {
           ]
         };
       });
-
-      // Solicita em segundo plano a persistência desses eventos no backend/Supabase se configurado
-      if (liveEvents.length > 0 && typeof window !== 'undefined') {
-        fetch('/api/proxy/ingest', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ events: liveEvents.slice(0, 20) })
-        }).catch(() => null);
-      }
 
       return liveEvents;
     } catch (err: any) {
@@ -723,12 +742,12 @@ export const newsIngestionService = {
         const imageUrl = art.imageUrl && art.imageUrl.startsWith('http') ? art.imageUrl : fallbackImg;
         const badge = getSourceBadge(art.sourceName);
         const relativeTime = formatRelativeTime(art.publishedAt);
-        const eventId = `evt-search-${Date.now()}-${idx}`;
+        const eventId = generateDeterministicUuid(art.url);
         const isSaved = savedIds ? savedIds.has(eventId) : false;
 
         const sources: SourceReference[] = [
           {
-            id: `src-search-${Date.now()}-${idx}`,
+            id: generateDeterministicUuid(`src:${art.domain}:${art.url}`),
             sourceName: art.sourceName,
             domain: art.domain,
             headline: art.title,
@@ -747,7 +766,7 @@ export const newsIngestionService = {
         const whyItMatters = `A apuração sobre "${q}" traz relevância para o contexto de ${category} em tempo real.`;
 
         const entity: Entity = {
-          id: `ent-search-${idx}`,
+          id: generateDeterministicUuid(`ent:${art.sourceName}`),
           name: art.sourceName,
           type: 'organization',
           description: `Veículo jornalístico reportando sobre ${q}`,
@@ -757,7 +776,7 @@ export const newsIngestionService = {
         };
 
         const topic: Topic = {
-          id: `top-search-${category.toLowerCase().replace(/[^a-z0-9]/g, '-')}`,
+          id: generateDeterministicUuid(`top:${category}`),
           name: category,
           slug: category.toLowerCase().replace(/[^a-z0-9]/g, '-'),
           description: `Notícias sobre ${category}`,

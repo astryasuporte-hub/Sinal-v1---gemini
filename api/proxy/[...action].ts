@@ -4,6 +4,7 @@
  * 
  * Vercel Serverless Function: Proxy APIs Consolidated Domain Router
  * Consolidates all News & AI Proxy endpoints into a single Serverless Function to comply with Hobby plan limits.
+ * Implements global fail-safe try/catch boundary to prevent FUNCTION_INVOCATION_FAILED.
  */
 
 import { sendJson, setCorsHeaders } from '../_lib/common';
@@ -15,38 +16,46 @@ import nvidiaChatHandler from '../_lib/handlers/proxy/nvidiaChat';
 import eventsHandler from '../_lib/handlers/proxy/events';
 
 export default async function handler(req: any, res: any) {
-  setCorsHeaders(res);
+  try {
+    setCorsHeaders(res);
 
-  if (req.method === 'OPTIONS') {
-    res.statusCode = 204;
-    res.end();
-    return;
-  }
+    if (req.method === 'OPTIONS') {
+      res.statusCode = 204;
+      res.end();
+      return;
+    }
 
-  const urlObj = new URL(req.url, 'http://localhost');
-  const pathname = urlObj.pathname;
+    const urlObj = new URL(req.url, 'http://localhost');
+    const pathname = urlObj.pathname;
 
-  if (pathname.includes('/events') || pathname.includes('/feed') || pathname.includes('/ingest')) {
-    return eventsHandler(req, res);
-  }
-  if (pathname.includes('/gnews')) {
-    return gnewsHandler(req, res);
-  }
-  if (pathname.includes('/newsapi')) {
-    return newsapiHandler(req, res);
-  }
-  if (pathname.includes('/worldnews')) {
-    return worldnewsHandler(req, res);
-  }
-  if (pathname.includes('/status')) {
-    return statusHandler(req, res);
-  }
-  if (pathname.includes('/nvidia') || pathname.includes('/chat')) {
-    return nvidiaChatHandler(req, res);
-  }
+    if (pathname.includes('/events') || pathname.includes('/feed') || pathname.includes('/ingest')) {
+      return await eventsHandler(req, res);
+    }
+    if (pathname.includes('/gnews')) {
+      return await gnewsHandler(req, res);
+    }
+    if (pathname.includes('/newsapi')) {
+      return await newsapiHandler(req, res);
+    }
+    if (pathname.includes('/worldnews')) {
+      return await worldnewsHandler(req, res);
+    }
+    if (pathname.includes('/status')) {
+      return await statusHandler(req, res);
+    }
+    if (pathname.includes('/nvidia') || pathname.includes('/chat')) {
+      return await nvidiaChatHandler(req, res);
+    }
 
-  return sendJson(res, 404, {
-    error: 'ENDPOINT_NOT_FOUND',
-    message: `Endpoint de Proxy não encontrado: ${pathname}`
-  });
+    return sendJson(res, 404, {
+      error: 'ENDPOINT_NOT_FOUND',
+      message: `Endpoint de Proxy não encontrado: ${pathname}`
+    });
+  } catch (criticalErr: any) {
+    console.error('[Proxy Router Global Exception]', criticalErr);
+    return sendJson(res, 500, {
+      error: 'PROXY_INTERNAL_ERROR',
+      message: criticalErr?.message || 'Erro interno inesperado no roteador de proxy.'
+    });
+  }
 }

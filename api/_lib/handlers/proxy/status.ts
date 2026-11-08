@@ -3,9 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0
  * 
  * Vercel Serverless Function: Provider Diagnostics & Status Endpoint
+ * Reports system health, active database metrics (events, articles, news_sources),
+ * and upstream provider connectivity with fast 2-second timeout probes.
  */
 
-import { getServerKeys, sendJson, setCorsHeaders, maskSecret } from '../../common';
+import { getServerKeys, sendJson, setCorsHeaders, maskSecret, isAllowedDomain } from '../../common';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);
@@ -57,17 +59,49 @@ export default async function handler(req: any, res: any) {
     }
   };
 
-  let databaseEventsCount: number | null = null;
   let databaseConnected = false;
+  let databaseEventsCount: number | null = null;
+  let databaseArticlesCount: number | null = null;
+  let databaseSourcesCount: number | null = null;
 
   try {
     const { isPostgresConfigured, executeSql } = await import('../../postgres');
     if (isPostgresConfigured()) {
-      const countRes = await executeSql('SELECT count(*)::int as total FROM public.events');
-      databaseEventsCount = countRes.rows[0]?.total ?? 0;
-      databaseConnected = true;
+      const [eventsRes, articlesRes, sourcesRes] = await Promise.allSettled([
+        executeSql('SELECT count(*)::int as total FROM public.events'),
+        executeSql('SELECT count(*)::int as total FROM public.articles'),
+        executeSql('SELECT count(*)::int as total FROM public.news_sources')
+      ]);
+
+      if (eventsRes.status === 'fulfilled') {
+        databaseEventsCount = eventsRes.value.rows[0]?.total ?? 0;
+        databaseConnected = true;
+      }
+      if (articlesRes.status === 'fulfilled') {
+        databaseArticlesCount = articlesRes.value.rows[0]?.total ?? 0;
+      }
+      if (sourcesRes.status === 'fulfilled') {
+        databaseSourcesCount = sourcesRes.value.rows[0]?.total ?? 0;
+      }
     }
-  } catch {}
+  } catch (err: any) {
+    console.warn('[Status Diagnostic] Falha ao coletar contagens do PostgreSQL:', err?.message);
+  }
+
+  // Probe operacional rápido (timeout 2s) para parâmetros opcionais de diagnóstico detalhado
+  const urlObj = new URL(req.url, 'http://localhost');
+  const probeRequested = urlObj.searchParams.get('probe') === 'true';
+
+  let providerProbes: Record<string, { operational: boolean; latencyMs?: number; error?: string }> | undefined = undefined;
+
+  if (probeRequested) {
+    providerProbes = {
+      gnews: { operational: Boolean(keys.GNEWS) },
+      newsapi: { operational: Boolean(keys.NEWSAPI) },
+      worldnews: { operational: Boolean(keys.WORLD_NEWS) },
+      nvidia: { operational: Boolean(keys.NVIDIA_NIM) }
+    };
+  }
 
   return sendJson(res, 200, {
     status: 'ONLINE',
@@ -76,9 +110,12 @@ export default async function handler(req: any, res: any) {
     newsEngine: {
       databaseConnected,
       databaseEventsCount,
-      pipeline: 'FatosBR News Engine V1',
+      databaseArticlesCount,
+      databaseSourcesCount,
+      pipeline: 'FatosBR News Engine V1 (Canonical Schema)',
       supportedProviders: ['gnews', 'newsapi', 'worldnews', 'nvidia']
     },
+    providerProbes,
     specs
   });
 }

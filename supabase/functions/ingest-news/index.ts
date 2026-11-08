@@ -8,9 +8,9 @@
  * 1. Coleta concorrente dos provedores reais configurados (GNews, NewsAPI, World News API).
  * 2. Normalização estrita de dados (URLs canônicas, títulos, metadados de imprensa).
  * 3. Deduplicação determinística por URL e similaridade lexical de manchetes.
- * 4. Agrupamento factual em Acontecimentos (Event Clusters).
+ * 4. Agrupamento factual em Acontecimentos (Event Clusters) com UUIDs RFC 4122.
  * 5. Síntese editorial com IA via NVIDIA NIM (quando configurada) ou sumarização determinística.
- * 6. Persistência atômica no Supabase (events, sources, event_sources, event_timeline).
+ * 6. Persistência canônica no Supabase (public.events, public.articles, public.news_sources, public.event_articles).
  * 7. ZERO matérias inventadas ou mockadas.
  */
 
@@ -23,7 +23,7 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-interface IngestedArticle {
+export interface IngestedArticle {
   id: string;
   title: string;
   snippet: string;
@@ -35,7 +35,7 @@ interface IngestedArticle {
   imageUrl?: string;
 }
 
-interface EventCluster {
+export interface EventCluster {
   id: string;
   title: string;
   summary: string;
@@ -46,6 +46,33 @@ interface EventCluster {
   imageUrl?: string;
   publishedAt: string;
   articles: IngestedArticle[];
+}
+
+/**
+ * Gera um UUID RFC 4122 v4 determinístico baseado numa seed estável.
+ */
+function generateDeterministicUuid(seed: string): string {
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for (let i = 0; i < seed.length; i++) {
+    const ch = seed.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+
+  let h3 = 0x12345678, h4 = 0x87654321;
+  for (let i = seed.length - 1; i >= 0; i--) {
+    const ch = seed.charCodeAt(i);
+    h3 = Math.imul(h3 ^ ch, 2246822507);
+    h4 = Math.imul(h4 ^ ch, 3266489909);
+  }
+
+  const hex = [h1, h2, h3, h4]
+    .map(n => (n >>> 0).toString(16).padStart(8, '0'))
+    .join('');
+
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
 serve(async (req: Request) => {
@@ -233,7 +260,6 @@ serve(async (req: Request) => {
     }
 
     // 3. Agrupamento em Acontecimentos (Event Clusters)
-    // Agrupa artigos de mesmo tópico ou que compartilham palavras-chave significativas
     const clusters: EventCluster[] = [];
     const usedIndices = new Set<number>();
 
@@ -251,7 +277,6 @@ serve(async (req: Request) => {
         if (usedIndices.has(j)) continue;
         const candidate = deduplicatedArticles[j];
 
-        // Se pertencer à mesma categoria e compartilhar pelo menos 2 palavras-chave relevantes
         if (candidate.category === primary.category) {
           const candidateWords = candidate.title.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter((w) => w.length > 4);
           const sharedWords = candidateWords.filter((w) => primaryWords.has(w));
@@ -280,13 +305,15 @@ serve(async (req: Request) => {
             if (aiRes.relevanceScore) relevanceScore = aiRes.relevanceScore;
           }
         } catch {
-          // Mantém síntese factual determinística caso a IA atinja rate limit
+          // Fallback gracioso
         }
       }
 
-      const eventId = `evt-${Date.now()}-${clusters.length + 1}`;
+      const clusterSeed = `evt:${primary.category}:${primary.title.toLowerCase().slice(0, 30)}`;
+      const eventUuid = generateDeterministicUuid(clusterSeed);
+
       clusters.push({
-        id: eventId,
+        id: eventUuid,
         title,
         summary: summary.length > 240 ? summary.slice(0, 240) + '...' : summary,
         whatHappened,
@@ -299,9 +326,10 @@ serve(async (req: Request) => {
       });
     }
 
-    // 5. Persistência real no Supabase se configurado e !dryRun
+    // 5. Persistência real no Supabase nas tabelas canônicas de produção
     let eventsPersisted = 0;
     let sourcesPersisted = 0;
+    let articlesPersisted = 0;
 
     if (supabaseUrl && serviceRoleKey && !dryRun && clusters.length > 0) {
       const supabase = createClient(supabaseUrl, serviceRoleKey, {
@@ -309,47 +337,52 @@ serve(async (req: Request) => {
       });
 
       for (const cl of clusters) {
-        // Upsert Evento
+        // Upsert Evento em public.events (schema canônico)
         const { error: evtErr } = await supabase.from('events').upsert({
           id: cl.id,
           title: cl.title,
           summary: cl.summary,
-          what_happened: cl.whatHappened,
-          why_it_matters: cl.whyItMatters,
-          category: cl.category,
-          relevance_score: cl.relevanceScore,
-          image_url: cl.imageUrl,
           published_at: cl.publishedAt,
-          updated_at: new Date().toISOString()
+          updated_at: new Date().toISOString(),
+          relevance_score: cl.relevanceScore
         }, { onConflict: 'id' });
 
         if (!evtErr) {
           eventsPersisted++;
 
-          // Upsert Fontes e Relacionamentos
+          // Upsert Fontes em public.news_sources e Matérias em public.articles
           for (const art of cl.articles) {
-            const sourceId = `src-${art.domain.replace(/[^a-z0-9]/gi, '-').toLowerCase()}`;
+            const sourceUuid = generateDeterministicUuid(`src:${art.domain}`);
+            const articleUuid = generateDeterministicUuid(`art:${art.url}`);
 
-            // Upsert fonte em public.sources
-            await supabase.from('sources').upsert({
-              id: sourceId,
+            // Upsert fonte em public.news_sources
+            await supabase.from('news_sources').upsert({
+              id: sourceUuid,
               name: art.sourceName,
               domain: art.domain,
-              category: art.category
-            }, { onConflict: 'id' });
-
-            // Upsert relacionamento em public.event_sources
-            await supabase.from('event_sources').upsert({
-              event_id: cl.id,
-              source_id: sourceId,
-              source_name: art.sourceName,
-              domain: art.domain,
-              headline: art.title,
-              url: art.url,
-              published_at: art.publishedAt
-            }, { onConflict: 'event_id,source_id,url' });
-
+              category: art.category,
+              brand_color: '#64748b'
+            }, { onConflict: 'domain' });
             sourcesPersisted++;
+
+            // Upsert artigo em public.articles
+            await supabase.from('articles').upsert({
+              id: articleUuid,
+              title: art.title,
+              url: art.url,
+              snippet: art.snippet || art.title,
+              source_id: sourceUuid,
+              image_url: art.imageUrl || null,
+              category: art.category,
+              published_at: art.publishedAt
+            }, { onConflict: 'url' });
+            articlesPersisted++;
+
+            // Vincular em public.event_articles
+            await supabase.from('event_articles').upsert({
+              event_id: cl.id,
+              article_id: articleUuid
+            }, { onConflict: 'event_id,article_id' });
           }
         }
       }
@@ -360,7 +393,7 @@ serve(async (req: Request) => {
     return new Response(
       JSON.stringify({
         status: "success",
-        pipeline: "FatosBR News Engine V1 (Real Production Pipeline)",
+        pipeline: "FatosBR News Engine V1 (Real Canonical Schema)",
         dryRun,
         durationMs,
         stats: {
@@ -368,7 +401,8 @@ serve(async (req: Request) => {
           deduplicatedCount: deduplicatedArticles.length,
           clustersIdentified: clusters.length,
           eventsPersisted,
-          sourcesPersisted
+          sourcesPersisted,
+          articlesPersisted
         },
         providers: providerStats,
         clusters: dryRun ? clusters.slice(0, 5) : undefined,

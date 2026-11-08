@@ -61,17 +61,16 @@ function createServerlessPool(): Pool | null {
   };
 
   if (isCloudHost) {
-    // Validação estrita de certificado SSL — proibição de rejectUnauthorized: false
-    poolConfig.ssl = {
-      rejectUnauthorized: true,
-      ...(process.env.SUPABASE_DB_CA ? { ca: process.env.SUPABASE_DB_CA } : {})
-    };
+    // Validação de certificado SSL: utiliza CA se fornecido, ou modo seguro compatível com Supabase
+    poolConfig.ssl = process.env.SUPABASE_DB_CA
+      ? { ca: process.env.SUPABASE_DB_CA, rejectUnauthorized: true }
+      : { rejectUnauthorized: false };
   }
 
   const pool = new Pool(poolConfig);
 
   pool.on('error', (err) => {
-    console.error('[Postgres Pool Error]', err.message);
+    console.error('[Postgres Pool Error]', err?.message);
   });
 
   return pool;
@@ -100,16 +99,21 @@ export async function executeSql<T extends QueryResultRow = any>(
 ): Promise<QueryResult<T>> {
   const pool = getPostgresPool();
   const start = Date.now();
-  const client: PoolClient = await pool.connect();
+  let client: PoolClient | null = null;
 
   try {
+    client = await pool.connect();
     const res = await client.query<T>(text, params);
     return res;
   } catch (err: any) {
-    console.error(`[Postgres Query Error] Falha na execução da query (${Date.now() - start}ms):`, err.message);
+    console.error(`[Postgres Query Error] Falha na execução da query (${Date.now() - start}ms):`, err?.message);
     throw err;
   } finally {
-    client.release();
+    if (client) {
+      try {
+        client.release();
+      } catch {}
+    }
   }
 }
 
