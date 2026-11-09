@@ -337,43 +337,56 @@ serve(async (req: Request) => {
       });
 
       for (const cl of clusters) {
+        // Slug obrigatório para public.events
+        const eventSlug = `${cl.title.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').slice(0, 70)}-${cl.id.slice(0, 8)}`;
+
         // Upsert Evento em public.events (schema canônico)
         const { error: evtErr } = await supabase.from('events').upsert({
           id: cl.id,
           title: cl.title,
+          slug: eventSlug,
           summary: cl.summary,
+          why_it_matters: cl.whyItMatters,
           published_at: cl.publishedAt,
           updated_at: new Date().toISOString(),
-          relevance_score: cl.relevanceScore
+          relevance_score: cl.relevanceScore,
+          article_count: cl.articles.length,
+          status: 'published'
         }, { onConflict: 'id' });
 
         if (!evtErr) {
           eventsPersisted++;
 
           // Upsert Fontes em public.news_sources e Matérias em public.articles
-          for (const art of cl.articles) {
+          for (let artIdx = 0; artIdx < cl.articles.length; artIdx++) {
+            const art = cl.articles[artIdx];
             const sourceUuid = generateDeterministicUuid(`src:${art.domain}`);
             const articleUuid = generateDeterministicUuid(`art:${art.url}`);
+            const sourceSlug = art.domain.replace(/[^a-z0-9]/gi, '-').toLowerCase();
 
-            // Upsert fonte em public.news_sources
+            // Upsert fonte em public.news_sources (apenas colunas existentes)
             await supabase.from('news_sources').upsert({
               id: sourceUuid,
               name: art.sourceName,
+              slug: sourceSlug,
               domain: art.domain,
-              category: art.category,
-              brand_color: '#64748b'
+              country_code: 'BR',
+              language_code: 'pt',
+              authority_score: 80,
+              is_active: true
             }, { onConflict: 'domain' });
             sourcesPersisted++;
 
-            // Upsert artigo em public.articles
+            // Upsert artigo em public.articles (usando description e canonical_url)
             await supabase.from('articles').upsert({
               id: articleUuid,
               title: art.title,
               url: art.url,
-              snippet: art.snippet || art.title,
+              canonical_url: art.url.split('?')[0],
+              description: art.snippet || art.title,
               source_id: sourceUuid,
               image_url: art.imageUrl || null,
-              category: art.category,
+              language_code: 'pt',
               published_at: art.publishedAt
             }, { onConflict: 'url' });
             articlesPersisted++;
@@ -381,7 +394,9 @@ serve(async (req: Request) => {
             // Vincular em public.event_articles
             await supabase.from('event_articles').upsert({
               event_id: cl.id,
-              article_id: articleUuid
+              article_id: articleUuid,
+              is_primary: artIdx === 0,
+              similarity_score: artIdx === 0 ? 1.0 : 0.85
             }, { onConflict: 'event_id,article_id' });
           }
         }

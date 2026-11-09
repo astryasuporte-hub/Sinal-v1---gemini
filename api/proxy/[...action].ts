@@ -2,18 +2,12 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  * 
- * Vercel Serverless Function: Proxy APIs Consolidated Domain Router
+ * Vercel Serverless Function: Proxy APIs Consolidated Domain Router V1.1
  * Consolidates all News & AI Proxy endpoints into a single Serverless Function to comply with Hobby plan limits.
- * Implements global fail-safe try/catch boundary to prevent FUNCTION_INVOCATION_FAILED.
+ * Implements lazy dynamic imports per route to prevent module-level bootstrap crashes from affecting other services.
  */
 
 import { sendJson, setCorsHeaders } from '../_lib/common';
-import gnewsHandler from '../_lib/handlers/proxy/gnews';
-import newsapiHandler from '../_lib/handlers/proxy/newsapi';
-import worldnewsHandler from '../_lib/handlers/proxy/worldnews';
-import statusHandler from '../_lib/handlers/proxy/status';
-import nvidiaChatHandler from '../_lib/handlers/proxy/nvidiaChat';
-import eventsHandler from '../_lib/handlers/proxy/events';
 
 export default async function handler(req: any, res: any) {
   try {
@@ -28,34 +22,51 @@ export default async function handler(req: any, res: any) {
     const urlObj = new URL(req.url, 'http://localhost');
     const pathname = urlObj.pathname;
 
+    // Rota 1: Eventos, Feed e Ingestão (Core do Motor de Notícias)
     if (pathname.includes('/events') || pathname.includes('/feed') || pathname.includes('/ingest')) {
-      return await eventsHandler(req, res);
+      const eventsModule = await import('../_lib/handlers/proxy/events');
+      return await eventsModule.default(req, res);
     }
-    if (pathname.includes('/gnews')) {
-      return await gnewsHandler(req, res);
-    }
-    if (pathname.includes('/newsapi')) {
-      return await newsapiHandler(req, res);
-    }
-    if (pathname.includes('/worldnews')) {
-      return await worldnewsHandler(req, res);
-    }
+
+    // Rota 2: Diagnóstico e Status da Plataforma
     if (pathname.includes('/status')) {
-      return await statusHandler(req, res);
+      const statusModule = await import('../_lib/handlers/proxy/status');
+      return await statusModule.default(req, res);
     }
+
+    // Rota 3: GNews Proxy
+    if (pathname.includes('/gnews')) {
+      const gnewsModule = await import('../_lib/handlers/proxy/gnews');
+      return await gnewsModule.default(req, res);
+    }
+
+    // Rota 4: NewsAPI Proxy
+    if (pathname.includes('/newsapi')) {
+      const newsapiModule = await import('../_lib/handlers/proxy/newsapi');
+      return await newsapiModule.default(req, res);
+    }
+
+    // Rota 5: World News API Proxy
+    if (pathname.includes('/worldnews')) {
+      const worldnewsModule = await import('../_lib/handlers/proxy/worldnews');
+      return await worldnewsModule.default(req, res);
+    }
+
+    // Rota 6: NVIDIA NIM Chat & Síntese
     if (pathname.includes('/nvidia') || pathname.includes('/chat')) {
-      return await nvidiaChatHandler(req, res);
+      const nvidiaModule = await import('../_lib/handlers/proxy/nvidiaChat');
+      return await nvidiaModule.default(req, res);
     }
 
     return sendJson(res, 404, {
       error: 'ENDPOINT_NOT_FOUND',
-      message: `Endpoint de Proxy não encontrado: ${pathname}`
+      message: 'Endpoint de proxy não encontrado.'
     });
   } catch (criticalErr: any) {
-    console.error('[Proxy Router Global Exception]', criticalErr);
+    console.error('[Proxy Router Global Exception]', criticalErr?.message || criticalErr);
     return sendJson(res, 500, {
-      error: 'PROXY_INTERNAL_ERROR',
-      message: criticalErr?.message || 'Erro interno inesperado no roteador de proxy.'
+      error: 'PROXY_SERVICE_UNAVAILABLE',
+      message: 'Serviço de proxy temporariamente indisponível. Tente novamente em instantes.'
     });
   }
 }

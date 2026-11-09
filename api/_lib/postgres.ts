@@ -6,7 +6,7 @@
  * 
  * Diretrizes de Segurança e Performance (Vercel Serverless + Supabase):
  * 1. Exclusivamente server-side: Credenciais e conexões NÃO vazam para o bundle client-side.
- * 2. TLS estrito: Validação correta de certificados da nuvem sem 'rejectUnauthorized: false'.
+ * 2. TLS estrito: Validação obrigatória de certificados da nuvem com rejectUnauthorized: true.
  * 3. Limites adequados ao ambiente serverless (pool max reduzido, timeouts estritos).
  * 4. Queries parametrizadas com sanitização estrita para prevenir SQL Injection.
  * 5. Liberação obrigatória de conexões em blocos 'finally'.
@@ -61,10 +61,18 @@ function createServerlessPool(): Pool | null {
   };
 
   if (isCloudHost) {
-    // Validação de certificado SSL: utiliza CA se fornecido, ou modo seguro compatível com Supabase
-    poolConfig.ssl = process.env.SUPABASE_DB_CA
-      ? { ca: process.env.SUPABASE_DB_CA, rejectUnauthorized: true }
-      : { rejectUnauthorized: false };
+    // Validação estrita de certificado TLS sempre ativa com rejectUnauthorized: true.
+    // Utiliza CA customizada (SUPABASE_DB_CA) se fornecida, ou a cadeia de certificados confiáveis da plataforma.
+    if (process.env.SUPABASE_DB_CA) {
+      poolConfig.ssl = {
+        ca: process.env.SUPABASE_DB_CA,
+        rejectUnauthorized: true
+      };
+    } else {
+      poolConfig.ssl = {
+        rejectUnauthorized: true
+      };
+    }
   }
 
   const pool = new Pool(poolConfig);

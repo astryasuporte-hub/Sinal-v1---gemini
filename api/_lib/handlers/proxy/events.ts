@@ -2,16 +2,28 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  * 
- * Vercel Serverless Function: Events & Ingestion Proxy Handler
- * Provides canonical persistence and querying for real news events in PostgreSQL / Supabase.
- * Enforces server-side only ingestion and resilient fallback for schema queries.
+ * Vercel Serverless Function: Events & Ingestion Proxy Handler V1.1
+ * 
+ * Correções Críticas Implementadas:
+ * 1. GET /api/proxy/ingest: Suporte a GET exclusivo para o Cron oficial da Vercel.
+ * 2. POST /api/proxy/ingest: Suporte a POST para execuções administrativas manuais.
+ * 3. Autenticação Criptográfica Estrita: Validação com safeCompare de Authorization: Bearer <CRON_SECRET>.
+ * 4. Bloqueio absoluto de spoofing de cabeçalhos arbitrários (x-vercel-cron sem token é rejeitado com 401).
+ * 5. Consultas SQL estritas ao esquema real do Supabase:
+ *    - public.events (slug, why_it_matters, key_points, primary_article_id)
+ *    - public.articles (description, canonical_url, image_url)
+ *    - public.news_sources (slug, domain, logo_url)
+ *    - public.event_topics e public.topics (category)
+ * 6. Resiliência: Retorno 200 com array vazio e zero falhas HTTP 500 quando a base estiver vazia.
  */
 
 import { executeSql, isPostgresConfigured } from '../../postgres';
 import { getServerSupabase, isDatabaseConfigured } from '../../db';
 import { sendJson, setCorsHeaders, readJsonBody, getServerKeys } from '../../common';
 import { enforceRateLimit } from '../../rateLimiter';
+import { safeCompare } from '../../crypto';
 import { runServerSideIngestion } from '../../ingestionEngine';
+import { verifyAdminRequest } from '../../adminAuth';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);
@@ -25,7 +37,105 @@ export default async function handler(req: any, res: any) {
   const urlObj = new URL(req.url, 'http://localhost');
   const pathname = urlObj.pathname;
 
-  // ROTA 1: GET /api/proxy/events ou /api/proxy/feed -> Consulta de Acontecimentos
+  // ===========================================================================
+  // ROTA 1: INGESTÃO CANÔNICA SERVER-SIDE (GET via Cron Vercel / POST via Admin)
+  // ===========================================================================
+  if (pathname.includes('/ingest')) {
+    if (req.method !== 'GET' && req.method !== 'POST') {
+      return sendJson(res, 405, {
+        error: 'METHOD_NOT_ALLOWED',
+        message: 'Endpoint de ingestão aceita apenas GET (Vercel Cron) ou POST (Admin Trigger).'
+      });
+    }
+
+    const rateLimitAllowed = await enforceRateLimit(req, res, 'general');
+    if (!rateLimitAllowed) return;
+
+    // 1. Extração segura de credenciais do cabeçalho Authorization
+    const authHeader = String(req.headers['authorization'] || '').trim();
+    const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+
+    const cronSecret = process.env.CRON_SECRET || '';
+    const adminSecret = process.env.ADMIN_SECRET || '';
+
+    let isAuthorized = false;
+    let authType = 'unauthorized';
+
+    // 1.1 Verificação de token CRON_SECRET (padrão oficial Vercel Cron)
+    if (bearerToken && cronSecret && safeCompare(bearerToken, cronSecret)) {
+      isAuthorized = true;
+      authType = 'cron_secret';
+    }
+
+    // 1.2 Verificação de token ADMIN_SECRET do servidor
+    if (!isAuthorized && bearerToken && adminSecret && safeCompare(bearerToken, adminSecret)) {
+      isAuthorized = true;
+      authType = 'admin_secret';
+    }
+
+    // 1.3 Se for POST administrativo manual, valida sessão real Supabase via RBAC
+    if (!isAuthorized && req.method === 'POST') {
+      try {
+        const isAdminSession = await verifyAdminRequest(req);
+        if (isAdminSession) {
+          isAuthorized = true;
+          authType = 'admin_rbac_session';
+        }
+      } catch {}
+    }
+
+    // Bloqueio rigoroso: falha fechada se não autenticado
+    // A presença isolada do cabeçalho 'x-vercel-cron' SEM token válido é expressamente rejeitada!
+    if (!isAuthorized) {
+      return sendJson(res, 401, {
+        error: 'UNAUTHORIZED_CRON',
+        code: 'UNAUTHORIZED_CRON',
+        message: 'Acesso negado. A ingestão requer token de autorização criptográfico via Authorization: Bearer <CRON_SECRET>.'
+      });
+    }
+
+    // 2. Execução da Ingestão Canônica Server-Side
+    try {
+      let keywords = ['brasil', 'economia', 'tecnologia'];
+
+      if (req.method === 'POST') {
+        const body = await readJsonBody(req).catch(() => ({}));
+        if (Array.isArray(body?.keywords) && body.keywords.length > 0) {
+          keywords = body.keywords.map(String).slice(0, 5);
+        }
+      }
+
+      console.log(`[Ingest Handler] Iniciando ciclo de ingestão (${authType}, método ${req.method})...`);
+      const result = await runServerSideIngestion({ keywords });
+
+      return sendJson(res, 200, {
+        success: result.success,
+        ingestion: {
+          articlesFetched: result.articlesFetched,
+          deduplicatedCount: result.deduplicatedCount,
+          articlesPersisted: result.articlesPersisted,
+          eventsCreated: result.eventsCreated,
+          eventsUpdated: result.eventsUpdated,
+          sourcesUpserted: result.sourcesUpserted,
+          durationMs: result.durationMs,
+          providers: result.providers,
+          error: result.error
+        },
+        authType,
+        serverTime: new Date().toISOString()
+      });
+    } catch (err: any) {
+      console.error('[Ingest Handler Critical Error]', err?.message);
+      return sendJson(res, 500, {
+        error: 'INGESTION_FAILED',
+        message: err?.message || 'Falha durante o pipeline de ingestão.'
+      });
+    }
+  }
+
+  // ===========================================================================
+  // ROTA 2: CONSULTA CANÔNICA DE ACONTECIMENTOS (GET /api/proxy/events ou /feed)
+  // ===========================================================================
   if (req.method === 'GET' && (pathname.includes('/events') || pathname.includes('/feed'))) {
     const rateLimitAllowed = await enforceRateLimit(req, res, 'general');
     if (!rateLimitAllowed) return;
@@ -33,17 +143,20 @@ export default async function handler(req: any, res: any) {
     try {
       const limit = Math.min(50, Math.max(1, parseInt(urlObj.searchParams.get('limit') || '30', 10)));
       const categoryParam = urlObj.searchParams.get('category');
-      const category = categoryParam && categoryParam !== 'Todos' ? categoryParam : null;
+      const categoryFilter = categoryParam && categoryParam !== 'Todos' ? categoryParam.toLowerCase() : null;
 
-      // 1. Tentar PostgreSQL nativo com as tabelas canônicas de produção
+      // 1. Consulta ao PostgreSQL Nativo usando o Esquema Canônico Real
       if (isPostgresConfigured()) {
         try {
           const sql = `
             SELECT 
               e.id,
               e.title,
+              e.slug,
               e.summary,
+              e.why_it_matters,
               e.relevance_score,
+              e.article_count,
               e.published_at,
               e.updated_at,
               COALESCE(
@@ -51,20 +164,20 @@ export default async function handler(req: any, res: any) {
                   SELECT a.image_url 
                   FROM public.event_articles ea_img 
                   JOIN public.articles a ON a.id = ea_img.article_id 
-                  WHERE ea_img.event_id = e.id AND a.image_url IS NOT NULL 
+                  WHERE ea_img.event_id = e.id AND a.image_url IS NOT NULL AND a.image_url != ''
                   LIMIT 1
                 ), 
                 NULL
               ) as image_url,
               COALESCE(
                 (
-                  SELECT a.category 
-                  FROM public.event_articles ea_cat 
-                  JOIN public.articles a ON a.id = ea_cat.article_id 
-                  WHERE ea_cat.event_id = e.id AND a.category IS NOT NULL 
+                  SELECT t.name 
+                  FROM public.event_topics et 
+                  JOIN public.topics t ON t.id = et.topic_id 
+                  WHERE et.event_id = e.id 
                   LIMIT 1
                 ), 
-                'Geral'
+                'Brasil'
               ) as category,
               COALESCE(
                 json_agg(
@@ -74,13 +187,26 @@ export default async function handler(req: any, res: any) {
                     'domain', ns.domain,
                     'headline', a.title,
                     'url', a.url,
-                    'snippet', a.snippet,
+                    'canonicalUrl', a.canonical_url,
+                    'description', a.description,
                     'publishedAt', a.published_at,
-                    'imageUrl', a.image_url
-                  )
+                    'imageUrl', a.image_url,
+                    'isPrimary', ea.is_primary
+                  ) ORDER BY ea.is_primary DESC, a.published_at DESC
                 ) FILTER (WHERE a.id IS NOT NULL),
                 '[]'::json
-              ) as sources
+              ) as sources,
+              COALESCE(
+                (
+                  SELECT a.description 
+                  FROM public.event_articles ea_desc 
+                  JOIN public.articles a ON a.id = ea_desc.article_id 
+                  WHERE ea_desc.event_id = e.id 
+                  ORDER BY ea_desc.is_primary DESC 
+                  LIMIT 1
+                ),
+                e.summary
+              ) as primary_description
             FROM public.events e
             LEFT JOIN public.event_articles ea ON e.id = ea.event_id
             LEFT JOIN public.articles a ON ea.article_id = a.id
@@ -94,36 +220,37 @@ export default async function handler(req: any, res: any) {
           let mapped = (dbRes.rows || []).map((row: any) => {
             const sources = Array.isArray(row.sources) ? row.sources : [];
             const mainArticle = sources[0] || {};
-            const itemCategory = row.category || 'Geral';
+            const itemCategory = row.category || 'Brasil';
 
             return {
               id: row.id,
               title: row.title,
+              slug: row.slug || `evento-${row.id}`,
               summary: row.summary,
-              whatHappened: row.summary || (mainArticle.snippet ? mainArticle.snippet : row.title),
-              whyItMatters: 'Fato com múltiplas coberturas verificadas e relevância apurada pelo motor da FatosBR.',
+              whatHappened: row.summary || (row.primary_description ? row.primary_description : row.title),
+              whyItMatters: row.why_it_matters || 'Fato apurado com múltiplas coberturas verificadas pelo motor FatosBR.',
               category: itemCategory,
               relevanceScore: row.relevance_score || 90,
               imageUrl: row.image_url || mainArticle.imageUrl || null,
               publishedAt: row.published_at,
               updatedAt: row.updated_at,
               relativeTime: 'Recente',
-              sourceCountText: `${sources.length || 1} fontes`,
+              sourceCountText: `${sources.length || row.article_count || 1} fontes`,
               sources: sources.map((s: any) => ({
                 id: s.id,
                 sourceName: s.sourceName,
                 domain: s.domain,
                 headline: s.headline,
                 url: s.url,
-                snippet: s.snippet,
+                description: s.description,
                 publishedAt: s.publishedAt
               }))
             };
           });
 
-          if (category) {
-            mapped = mapped.filter((item: any) => 
-              item.category.toLowerCase().includes(category.toLowerCase())
+          if (categoryFilter) {
+            mapped = mapped.filter((item: any) =>
+              item.category.toLowerCase().includes(categoryFilter)
             );
           }
 
@@ -134,7 +261,7 @@ export default async function handler(req: any, res: any) {
             source: 'postgresql_canonical'
           });
         } catch (pgErr: any) {
-          console.warn('[Events API] Erro ao consultar PostgreSQL canônico, tentando fallback gracioso:', pgErr?.message);
+          console.warn('[Events API] Erro na query PostgreSQL, tentando fallback:', pgErr?.message);
         }
       }
 
@@ -142,27 +269,27 @@ export default async function handler(req: any, res: any) {
       if (isDatabaseConfigured()) {
         try {
           const client = getServerSupabase();
-          let queryBuilder = client
+          const { data, error } = await client
             .from('events')
-            .select('id, title, summary, published_at, updated_at, relevance_score')
+            .select('id, title, slug, summary, why_it_matters, published_at, updated_at, relevance_score, article_count')
             .order('published_at', { ascending: false })
             .limit(limit);
 
-          const { data, error } = await queryBuilder;
           if (!error && Array.isArray(data)) {
             const events = data.map((row: any) => ({
               id: row.id,
               title: row.title,
+              slug: row.slug || `evento-${row.id}`,
               summary: row.summary,
               whatHappened: row.summary || row.title,
-              whyItMatters: 'Fato em apuração editorial.',
-              category: 'Geral',
+              whyItMatters: row.why_it_matters || 'Fato em acompanhamento editorial.',
+              category: 'Brasil',
               relevanceScore: row.relevance_score || 90,
               imageUrl: null,
               publishedAt: row.published_at,
               updatedAt: row.updated_at,
               relativeTime: 'Recente',
-              sourceCountText: '1 fonte',
+              sourceCountText: `${row.article_count || 1} fonte(s)`,
               sources: []
             }));
 
@@ -173,12 +300,12 @@ export default async function handler(req: any, res: any) {
               source: 'supabase_client'
             });
           }
-        } catch (supabaseErr: any) {
-          console.warn('[Events API] Supabase fallback falhou:', supabaseErr?.message);
+        } catch (sbErr: any) {
+          console.warn('[Events API] Supabase fallback falhou:', sbErr?.message);
         }
       }
 
-      // 3. Resposta segura sem erro 500 caso banco esteja inicializando ou vazio
+      // 3. Resposta segura HTTP 200 sem erro 500 para base em inicialização ou vazia
       return sendJson(res, 200, {
         success: true,
         count: 0,
@@ -187,74 +314,13 @@ export default async function handler(req: any, res: any) {
       });
     } catch (err: any) {
       console.error('[Events Handler Fatal Error]', err);
-      // NUNCA disparar 500 sem tratamento estruturado
+      // NUNCA disparar 500 não tratado para o cliente
       return sendJson(res, 200, {
         success: true,
         count: 0,
         events: [],
         warning: 'Falha temporária ao consultar banco de dados.',
         error: err?.message
-      });
-    }
-  }
-
-  // ROTA 2: POST /api/proxy/ingest -> Pipeline Server-Side de Ingestão Autenticado
-  if (req.method === 'POST' && (pathname.includes('/ingest') || pathname.includes('/events'))) {
-    const rateLimitAllowed = await enforceRateLimit(req, res, 'general');
-    if (!rateLimitAllowed) return;
-
-    // Proteção de Segurança: Bloqueia envio de dados arbitrários de clientes não autorizados
-    const authHeader = req.headers['authorization'] || '';
-    const cronHeader = req.headers['x-vercel-cron'];
-    const adminKeyHeader = req.headers['x-admin-key'];
-    const keys = getServerKeys();
-
-    const isCron = Boolean(cronHeader);
-    const isAdminSecret = Boolean(keys.ADMIN_SECRET && (
-      authHeader === `Bearer ${keys.ADMIN_SECRET}` || 
-      adminKeyHeader === keys.ADMIN_SECRET
-    ));
-
-    // Usuário admin autenticado via Supabase token ou chave administrativa
-    let isAuthorizedAdmin = false;
-    if (isAdminSecret) {
-      isAuthorizedAdmin = true;
-    } else {
-      try {
-        const { verifyAdminRequest } = await import('../../adminAuth');
-        isAuthorizedAdmin = await verifyAdminRequest(req);
-      } catch {}
-    }
-
-    if (!isCron && !isAuthorizedAdmin) {
-      return sendJson(res, 403, {
-        error: 'FORBIDDEN_INGESTION',
-        code: 'UNAUTHORIZED_INGESTION',
-        message: 'A ingestão de notícias é estritamente server-side e automatizada. Gravação direta por clientes é proibida.'
-      });
-    }
-
-    try {
-      const body = await readJsonBody(req).catch(() => ({}));
-      const keywords = Array.isArray(body?.keywords) ? body.keywords : ['brasil', 'economia', 'tecnologia'];
-
-      console.log('[Ingest Trigger] Iniciando ciclo de ingestão server-side autorizado:', {
-        trigger: isCron ? 'vercel_cron' : (isAdminSecret ? 'admin_secret' : 'admin_user'),
-        keywords
-      });
-
-      const result = await runServerSideIngestion({ keywords });
-
-      return sendJson(res, 200, {
-        success: result.success,
-        ingestion: result,
-        timestamp: new Date().toISOString()
-      });
-    } catch (err: any) {
-      console.error('[Ingest Execution Error]', err);
-      return sendJson(res, 500, {
-        error: 'INGESTION_FAILED',
-        message: err?.message || 'Falha durante o pipeline de ingestão.'
       });
     }
   }

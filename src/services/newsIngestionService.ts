@@ -78,31 +78,60 @@ export function getProviderDiagnostics(): Record<string, ProviderDiagnostic> {
 }
 
 /**
- * Gera um UUID RFC 4122 v4 determinístico baseado numa seed estável (ex: URL da notícia).
- * Garante que os identificadores sejam UUIDs válidos e compatíveis com PostgreSQL/Supabase.
+ * Implementação síncrona formal de SHA-1 para geração de UUID v5 RFC 4122 no navegador
+ */
+function sha1Hex(str: string): string {
+  const utf8 = unescape(encodeURIComponent(str));
+  const words: number[] = [];
+  for (let i = 0; i < utf8.length; i++) {
+    words[i >> 2] |= (utf8.charCodeAt(i) & 0xff) << (24 - (i % 4) * 8);
+  }
+  const len = utf8.length * 8;
+  words[len >> 5] |= 0x80 << (24 - (len % 32));
+  words[(((len + 64) >> 9) << 4) + 15] = len;
+
+  let H0 = 0x67452301, H1 = 0xefcdab89, H2 = 0x98badcfe, H3 = 0x10325476, H4 = 0xc3d2e1f0;
+  const w = new Array(80);
+
+  for (let i = 0; i < words.length; i += 16) {
+    let a = H0, b = H1, c = H2, d = H3, e = H4;
+    for (let t = 0; t < 80; t++) {
+      if (t < 16) {
+        w[t] = words[i + t] | 0;
+      } else {
+        const n = w[t - 3] ^ w[t - 8] ^ w[t - 14] ^ w[t - 16];
+        w[t] = (n << 1) | (n >>> 31);
+      }
+      let temp = ((a << 5) | (a >>> 27)) + e + w[t] + 0x5a827999;
+      if (t >= 20 && t < 40) temp = ((a << 5) | (a >>> 27)) + (b ^ c ^ d) + e + w[t] + 0x6ed9eba1;
+      else if (t >= 40 && t < 60) temp = ((a << 5) | (a >>> 27)) + ((b & c) | (b & d) | (c & d)) + e + w[t] - 0x70e44324;
+      else if (t >= 60) temp = ((a << 5) | (a >>> 27)) + (b ^ c ^ d) + e + w[t] - 0x359d3e2a;
+      else temp = ((a << 5) | (a >>> 27)) + ((b & c) | (~b & d)) + e + w[t] + 0x5a827999;
+
+      e = d; d = c; c = (b << 30) | (b >>> 2); b = a; a = temp | 0;
+    }
+    H0 = (H0 + a) | 0; H1 = (H1 + b) | 0; H2 = (H2 + c) | 0; H3 = (H3 + d) | 0; H4 = (H4 + e) | 0;
+  }
+
+  return [H0, H1, H2, H3, H4].map(h => (h >>> 0).toString(16).padStart(8, '0')).join('');
+}
+
+/**
+ * Gera um UUID v5 determinístico (RFC 4122 v5) baseado em SHA-1 e Namespace fixo.
+ * Garante que os identificadores sejam UUIDs válidos, canônicos e compatíveis com PostgreSQL/Supabase.
  */
 export function generateDeterministicUuid(seed: string): string {
-  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
-  for (let i = 0; i < seed.length; i++) {
-    const ch = seed.charCodeAt(i);
-    h1 = Math.imul(h1 ^ ch, 2654435761);
-    h2 = Math.imul(h2 ^ ch, 1597334677);
-  }
-  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  const namespace = '8f4c2c109b425f8ea6124f81023a845d';
+  const hex = sha1Hex(namespace + seed);
+  // Define versão 5 (0x50) e variante RFC 4122 (0x80)
+  const part1 = hex.slice(0, 8);
+  const part2 = hex.slice(8, 12);
+  const part3 = '5' + hex.slice(13, 16);
+  const variantDigit = (parseInt(hex.slice(16, 17), 16) & 0x3 | 0x8).toString(16);
+  const part4 = variantDigit + hex.slice(17, 20);
+  const part5 = hex.slice(20, 32);
 
-  let h3 = 0x12345678, h4 = 0x87654321;
-  for (let i = seed.length - 1; i >= 0; i--) {
-    const ch = seed.charCodeAt(i);
-    h3 = Math.imul(h3 ^ ch, 2246822507);
-    h4 = Math.imul(h4 ^ ch, 3266489909);
-  }
-
-  const hex = [h1, h2, h3, h4]
-    .map(n => (n >>> 0).toString(16).padStart(8, '0'))
-    .join('');
-
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+  return `${part1}-${part2}-${part3}-${part4}-${part5}`;
 }
 
 export const newsIngestionService = {
