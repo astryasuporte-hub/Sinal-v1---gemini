@@ -109,9 +109,34 @@ Para que o Magic Link e confirmação de e-mail redirecionem os usuários de vol
 
 ---
 
-## 6. Recursos Inclusos na Sinal com Supabase
+## 7. Configuração do Backend FatosBR V1.3 (News Engine, Cron & TLS)
 
-- **Autenticação Real**: Modal de login completo com abas para *Entrar*, *Criar Conta* e *Link Mágico (sem senha)*.
-- **Sincronização em Nuvem**: Quando o usuário clica em salvar um acontecimento (bookmark), o ID é gravado na tabela `user_saved_events` com proteção RLS.
-- **Modo Resiliente**: Se o projeto for executado sem as variáveis de ambiente preenchidas, a aplicação roda normalmente em modo local/demonstração sem quebrar.
-- **SPA Routing com `vercel.json`**: Suporte nativo a reescritas de URLs na Vercel para evitar erros 404 em navegações diretas.
+### 7.1. Variáveis de Ambiente na Vercel (Produção & Preview)
+
+No painel da Vercel (**Settings** > **Environment Variables**), configure as seguintes variáveis:
+
+| Variável | Descrição / Exemplo | Escopo |
+| :--- | :--- | :--- |
+| `SUPABASE_DATABASE_URL` | `postgresql://postgres.[ID]:[SENHA]@db.[ID].supabase.co:5432/postgres?sslmode=require` | Production, Preview |
+| `CRON_SECRET` | Segredo aleatório de 32+ bytes (ex: `openssl rand -hex 32`) | Production, Preview |
+| `ADMIN_SECRET` | Chave de administração para disparos manuais e testes | Production, Preview |
+| `SUPABASE_SERVICE_ROLE_KEY` | Chave secreta `service_role` do Supabase para operações privilegiadas | Production, Preview |
+| `VITE_SUPABASE_URL` | `https://zopbitgtexefmqfvwgzj.supabase.co` | Production, Preview, Dev |
+| `VITE_SUPABASE_ANON_KEY` | Chave pública anônima do Supabase | Production, Preview, Dev |
+| `GNEWS_API_KEY` | Chave de API do provedor GNews | Production, Preview |
+| `NEWSAPI_API_KEY` | Chave de API do provedor NewsAPI | Production, Preview |
+| `WORLD_NEWS_API_KEY` | Chave de API do provedor World News API | Production, Preview |
+
+### 7.2. Validação TLS Segura com PostgreSQL da Supabase
+O backend da FatosBR V1.3 utiliza validação estrita com `rejectUnauthorized: true`. A cadeia de certificados da **Supabase Root 2021 CA** e **Intermediate CA 2021** está embutida de forma resiliente em `api/_lib/postgres.ts`, garantindo que não ocorra o erro `self-signed certificate in certificate chain` mesmo sem fornecer manualmente `SUPABASE_DB_CA`.
+
+### 7.3. Ativação e Disparo do Cron de Ingestão de Notícias
+1. **Automático**: O cron configurado em `vercel.json` (`schedule: "0 10 * * *"`) dispara diariamente às 10h UTC chamando `GET /api/proxy/ingest`. A Vercel injeta automaticamente o cabeçalho `Authorization: Bearer <CRON_SECRET>`.
+2. **Manual (Admin)**: Pode ser disparado a qualquer momento via terminal ou cURL:
+```bash
+curl -X POST https://app.fatosbr.com.br/api/proxy/ingest \
+  -H "Authorization: Bearer SEU_ADMIN_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"keywords": ["brasil", "economia", "tecnologia"]}'
+```
+

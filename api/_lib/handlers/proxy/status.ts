@@ -120,6 +120,25 @@ export default async function handler(req: any, res: any) {
       providerProbes.gnews = { operational: false, error: 'Chave não configurada' };
     }
 
+    // Probe real rápido NewsAPI
+    if (keys.NEWSAPI) {
+      const start = Date.now();
+      try {
+        const ctrl = new AbortController();
+        const to = setTimeout(() => ctrl.abort(), 2000);
+        const r = await fetch(`https://newsapi.org/v2/top-headlines?country=br&pageSize=1&apiKey=${keys.NEWSAPI}`, {
+          signal: ctrl.signal,
+          headers: { 'User-Agent': 'FatosBR-Engine/1.3' }
+        });
+        clearTimeout(to);
+        providerProbes.newsapi = { operational: r.ok, latencyMs: Date.now() - start };
+      } catch (err: any) {
+        providerProbes.newsapi = { operational: false, latencyMs: Date.now() - start, error: err?.message };
+      }
+    } else {
+      providerProbes.newsapi = { operational: false, error: 'Chave não configurada' };
+    }
+
     // Probe real rápido World News
     if (keys.WORLD_NEWS) {
       const start = Date.now();
@@ -146,7 +165,7 @@ export default async function handler(req: any, res: any) {
       databaseEventsCount,
       databaseArticlesCount,
       databaseSourcesCount,
-      pipeline: 'FatosBR News Engine V1.1 (Canonical Schema)',
+      pipeline: 'FatosBR News Engine V1.3 (Canonical Schema + Strict TLS)',
       supportedProviders: ['gnews', 'newsapi', 'worldnews', 'nvidia']
     },
     providers: providersPublic,

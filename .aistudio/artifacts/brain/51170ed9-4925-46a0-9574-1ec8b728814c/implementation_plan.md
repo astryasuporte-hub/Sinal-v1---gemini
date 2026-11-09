@@ -31,22 +31,41 @@
   - `status`: Definido como `'CONFIRMED'` para acontecimentos com 3 ou mais matérias relacionadas e `'DEVELOPING'` para matérias iniciais.
   - `enrichment_status`: Definido estritamente como `'PENDING'` (aguardando enriquecimento de IA).
 
+### 1.5 Resolução Definitiva de TLS no PostgreSQL (Supabase CA Bundle) - V1.3
+- **Sintoma**: `self-signed certificate in certificate chain` ao conectar ao PostgreSQL (`db.zopbitgtexefmqfvwgzj.supabase.co:5432`) no Node.js 24.
+- **Causa Raiz**: O certificado SSL do servidor Supabase é assinado pela autoridade privada `Supabase Root 2021 CA` (intermediária: `Supabase Intermediate 2021 CA`), que não faz parte do repositório padrão de CAs públicas do Mozilla no Node.js.
+- **Solução Aplicada**:
+  1. Embutido o bundle oficial dos certificados públicos da `Supabase Root 2021 CA` e `Supabase Intermediate 2021 CA` diretamente em `api/_lib/postgres.ts` (`SUPABASE_OFFICIAL_CA_BUNDLE`) e em `api/_lib/supabase-ca-bundle.crt`.
+  2. Configuração do pool `pg` com `ssl: { ca: trustedCa, rejectUnauthorized: true, servername: extractedHost }`.
+  3. Eliminação total de `rejectUnauthorized: false` preservando 100% de segurança contra ataques MITM.
+  4. Adicionada extração do host para configuração explícita de Server Name Indication (SNI).
+
 ---
 
 ## 2. Resumo das Alterações por Arquivo
 
-1. **`vercel.json`**: Adicionada chave `functions` mapeando `api/**/*.ts` para `includeFiles: "api/_lib/**"`.
+1. **`vercel.json`**: Adicionada chave `functions` mapeando `api/**/*.ts` para `includeFiles: "api/_lib/**"`, cron diário às 10h UTC.
 2. **`api/proxy/[...action].ts`**: Importações estáticas com extensões `.js` para os 6 submódulos.
-3. **`api/_lib/ingestionEngine.ts`**:
+3. **`api/_lib/postgres.ts`**:
+   - Bundle público oficial da Supabase Root CA 2021 embutido com fallback seguro.
+   - SNI dinâmico (`servername: extractedHost`).
+   - Validação estrita obrigatória (`rejectUnauthorized: true`).
+4. **`api/_lib/supabase-ca-bundle.crt`**: Arquivo independente com a cadeia completa de certificados da Supabase.
+5. **`api/_lib/handlers/proxy/status.ts`**:
+   - Probe real de `newsapi` para diagnóstico de integridade.
+   - Atualização do status para `FatosBR News Engine V1.3 (Canonical Schema + Strict TLS)`.
+6. **`api/_lib/ingestionEngine.ts`**:
    - Correção dos imports com extensões `.js`.
    - Implementação de UUID v5 em tópicos e relacionamento `event_topics`.
    - Correção do `ON CONFLICT (canonical_url)` em `articles`.
    - Alinhamento estrito dos status `'DEVELOPING'`, `'CONFIRMED'`, `'UPDATED'` e `'PENDING'` em `events`.
-4. **`api/_lib/handlers/proxy/events.ts`** e **`status.ts`**:
+7. **`api/_lib/handlers/proxy/events.ts`**:
    - Extensões `.js` em todos os imports.
+   - Autenticação com `safeCompare` para `CRON_SECRET` (GET) e `ADMIN_SECRET` (POST).
    - Retorno seguro HTTP 200 com array vazio e zero código 500 para base em inicialização.
-5. **Todos os demais módulos de `api/`**:
+8. **Todos os demais módulos de `api/`**:
    - 100% dos imports relativos normalizados com extensão `.js`.
+   - Consolidação em apenas 8 funções serverless (limite Hobby <= 12).
 
 ---
 
@@ -60,3 +79,4 @@
 | `bun ./tests/security-validation.ts` | Rate limit distribuído, ZynPay HMAC, transações atômicas, anti-tampering, roteadores consolidados | ✅ 59/59 Aprovados |
 | `bun run build` | Build do Vite para produção (2752 módulos) | ✅ Concluído em 2.30s |
 | `compile_applet` & `lint_applet` | Verificação do build system | ✅ Build & Lint Aprovados |
+

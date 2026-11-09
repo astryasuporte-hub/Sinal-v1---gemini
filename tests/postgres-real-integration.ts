@@ -63,7 +63,24 @@ async function runRealPostgresIntegrationSuite() {
     return { executed: false, passed: 0, failed: 0, reason: 'NO_DATABASE_URL' };
   }
 
-  const client = new Client({ connectionString });
+  const isCloudHost = connectionString.includes('supabase.co') || connectionString.includes('supabase.com') || connectionString.includes('pooler.supabase.com');
+  const clientConfig: any = { connectionString };
+  if (isCloudHost) {
+    let caCert = process.env.SUPABASE_DB_CA;
+    if (!caCert) {
+      try {
+        const fs = await import('fs');
+        const path = await import('path');
+        caCert = fs.readFileSync(path.resolve('api/_lib/supabase-ca-bundle.crt'), 'utf-8');
+      } catch {}
+    }
+    clientConfig.ssl = {
+      ca: caCert,
+      rejectUnauthorized: true
+    };
+  }
+
+  const client = new Client(clientConfig);
   const results: TestResult[] = [];
 
   try {

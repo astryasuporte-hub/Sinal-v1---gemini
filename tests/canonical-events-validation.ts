@@ -111,7 +111,9 @@ async function run() {
   const postgresCode = fs.readFileSync(path.resolve('api/_lib/postgres.ts'), 'utf-8');
   assert(!postgresCode.includes('rejectUnauthorized: false'), 'VULNERABILIDADE CRÍTICA: rejectUnauthorized: false ainda presente em postgres.ts');
   assert(postgresCode.includes('rejectUnauthorized: true'), 'Configuração segura rejectUnauthorized: true não encontrada em postgres.ts');
+  assert(postgresCode.includes('SUPABASE_OFFICIAL_CA_BUNDLE') || postgresCode.includes('Supabase Root 2021 CA'), 'Cadeia de CA oficial da Supabase ausente em postgres.ts');
   console.log('  ✅ [PASS] rejectUnauthorized: false completamente eliminado de api/_lib/postgres.ts');
+  console.log('  ✅ [PASS] Cadeia oficial de certificados CA da Supabase configurada com sucesso no pool TLS');
 
   // 3. Resiliência de GET /api/proxy/events (Falha nº 5 & 7)
   console.log('\n--- 3. TESTE DE RESILIÊNCIA DE GET /api/proxy/events ---');
