@@ -16,7 +16,7 @@
 
 import crypto from 'crypto';
 import QRCode from 'qrcode';
-import { sendJson, setCorsHeaders, readJsonBody, getServerKeys } from '../../common';
+import { sendJson, setCorsHeaders, readJsonBody, getServerKeys } from '../../common.js';
 import {
   getServerSupabase,
   checkUserActiveSubscription,
@@ -29,10 +29,10 @@ import {
   failReservedCheckoutAttempt,
   linkLegacyChargeToUser,
   isFinancialAdminUser
-} from '../../db';
-import { resolvePlanPrice } from '../../plans';
-import { createPixChargeOnGateway, fetchChargeFromGateway } from '../../zynpayClient';
-import { enforceRateLimit } from '../../rateLimiter';
+} from '../../db.js';
+import { resolvePlanPrice } from '../../plans.js';
+import { createPixChargeOnGateway, fetchChargeFromGateway } from '../../zynpayClient.js';
+import { enforceRateLimit } from '../../rateLimiter.js';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);

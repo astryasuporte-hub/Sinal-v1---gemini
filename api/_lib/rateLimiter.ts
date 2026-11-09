@@ -8,9 +8,9 @@
  * Garante bloqueio consistente entre múltiplas instâncias serverless da Vercel.
  */
 
-import { getClientIp, sendJson } from './common';
-import { getServerSupabase, isDatabaseConfigured } from './db';
-import { executeSql, isPostgresConfigured } from './postgres';
+import { getClientIp, sendJson } from './common.js';
+import { getServerSupabase, isDatabaseConfigured } from './db.js';
+import { executeSql, isPostgresConfigured } from './postgres.js';
 
 export type RateLimitCategory = 'auth' | 'payments' | 'admin' | 'webhooks' | 'ai' | 'general';
 

@@ -5,8 +5,8 @@
  * Vercel Serverless Function: Instagram Control & Automation
  */
 
-import { sendJson, setCorsHeaders, readJsonBody } from '../_lib/common';
-import { instagramEngine } from '../../src/server/instagramEngine';
+import { sendJson, setCorsHeaders, readJsonBody } from '../_lib/common.js';
+import { instagramEngine } from '../../src/server/instagramEngine.js';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);

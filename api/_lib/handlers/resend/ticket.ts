@@ -5,8 +5,8 @@
  * Vercel Serverless Function: Resend Support Ticket Notification
  */
 
-import { getServerKeys, sendJson, setCorsHeaders, readJsonBody } from '../../common';
-import { enforceRateLimit } from '../../rateLimiter';
+import { getServerKeys, sendJson, setCorsHeaders, readJsonBody } from '../../common.js';
+import { enforceRateLimit } from '../../rateLimiter.js';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);

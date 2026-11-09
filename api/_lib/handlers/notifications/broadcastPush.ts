@@ -5,7 +5,7 @@
  * Vercel Serverless Function: Web Push Broadcast
  */
 
-import { sendJson, setCorsHeaders, readJsonBody } from '../../common';
+import { sendJson, setCorsHeaders, readJsonBody } from '../../common.js';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);

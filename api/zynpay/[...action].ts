@@ -6,12 +6,12 @@
  * Consolidates all ZynPay endpoints into a single Serverless Function to comply with Hobby plan limits.
  */
 
-import { sendJson, setCorsHeaders } from '../_lib/common';
-import chargesHandler from '../_lib/handlers/zynpay/charges';
-import webhookHandler from '../_lib/handlers/zynpay/webhook';
-import balanceHandler from '../_lib/handlers/zynpay/balance';
-import configHandler from '../_lib/handlers/zynpay/config';
-import eventsHandler from '../_lib/handlers/zynpay/events';
+import { sendJson, setCorsHeaders } from '../_lib/common.js';
+import chargesHandler from '../_lib/handlers/zynpay/charges.js';
+import webhookHandler from '../_lib/handlers/zynpay/webhook.js';
+import balanceHandler from '../_lib/handlers/zynpay/balance.js';
+import configHandler from '../_lib/handlers/zynpay/config.js';
+import eventsHandler from '../_lib/handlers/zynpay/events.js';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);

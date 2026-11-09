@@ -11,8 +11,8 @@
  * 4. Informações administrativas e telemetria profunda restritas a administradores autenticados.
  */
 
-import { getServerKeys, sendJson, setCorsHeaders, isAllowedDomain } from '../../common';
-import { safeCompare } from '../../crypto';
+import { getServerKeys, sendJson, setCorsHeaders, isAllowedDomain } from '../../common.js';
+import { safeCompare } from '../../crypto.js';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);
@@ -33,7 +33,7 @@ export default async function handler(req: any, res: any) {
     isAdmin = true;
   } else if (bearerToken) {
     try {
-      const { verifyAdminRequest } = await import('../../adminAuth');
+      const { verifyAdminRequest } = await import('../../adminAuth.js');
       isAdmin = await verifyAdminRequest(req);
     } catch {}
   }
@@ -45,7 +45,7 @@ export default async function handler(req: any, res: any) {
   let databaseSourcesCount: number | null = null;
 
   try {
-    const { isPostgresConfigured, executeSql } = await import('../../postgres');
+    const { isPostgresConfigured, executeSql } = await import('../../postgres.js');
     if (isPostgresConfigured()) {
       const [eventsRes, articlesRes, sourcesRes] = await Promise.allSettled([
         executeSql('SELECT count(*)::int as total FROM public.events'),

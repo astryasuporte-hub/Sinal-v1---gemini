@@ -11,9 +11,9 @@
  * ZERO dependência de listas de e-mails hardcoded ou flags editáveis pelo cliente.
  */
 
-import { safeCompare } from './crypto';
-import { getServerSupabase, isDatabaseConfigured } from './db';
-import { executeSql, isPostgresConfigured } from './postgres';
+import { safeCompare } from './crypto.js';
+import { getServerSupabase, isDatabaseConfigured } from './db.js';
+import { executeSql, isPostgresConfigured } from './postgres.js';
 
 export async function verifyAdminRequest(req: any): Promise<boolean> {
   const authHeader = req.headers?.authorization || '';

@@ -6,13 +6,13 @@
  * Consolidates all Resend endpoints into a single Serverless Function to comply with Hobby plan limits.
  */
 
-import { sendJson, setCorsHeaders } from '../_lib/common';
-import sendHandler from '../_lib/handlers/resend/send';
-import statusHandler from '../_lib/handlers/resend/status';
-import ticketHandler from '../_lib/handlers/resend/ticket';
-import webhookHandler from '../_lib/handlers/resend/webhook';
-import configHandler from '../_lib/handlers/resend/config';
-import previewHandler from '../_lib/handlers/resend/preview';
+import { sendJson, setCorsHeaders } from '../_lib/common.js';
+import sendHandler from '../_lib/handlers/resend/send.js';
+import statusHandler from '../_lib/handlers/resend/status.js';
+import ticketHandler from '../_lib/handlers/resend/ticket.js';
+import webhookHandler from '../_lib/handlers/resend/webhook.js';
+import configHandler from '../_lib/handlers/resend/config.js';
+import previewHandler from '../_lib/handlers/resend/preview.js';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);

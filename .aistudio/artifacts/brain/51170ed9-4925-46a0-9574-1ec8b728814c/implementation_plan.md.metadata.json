@@ -1,6 +1,6 @@
 {
-  "summary":  "Relatório definitivo da resolução do erro fatal exceeded_serverless_functions_per_deployment da Vercel (Hobby plan limit): redução de 23 para 8 Serverless Functions através de roteadores de domínio consolidados, preservando 100% dos endpoints, contratos de API e proteções financeiras ZynPay com 59 testes aprovados.",
-  "updatedAt":  "2026-11-07T11:51:31.149697247Z",
+  "summary":  "Relatório Executivo da MISSÃO P0 — FATOSBR BACKEND V1.2:\n- Resolução de ERR_MODULE_NOT_FOUND no Node 24 ESM adicionando extensões .js em todos os imports de api/\n- Configuração de includeFiles em vercel.json para empacotamento completo de api/_lib/**\n- Correção da constraint única em public.articles para ON CONFLICT (canonical_url)\n- Correção de public.topics e public.event_topics para uso de UUIDs determinísticos v5\n- Alinhamento dos valores de status ('DEVELOPING' / 'CONFIRMED') e enrichment_status ('PENDING') com os CHECK constraints reais do PostgreSQL\n- Preservação estrita de TLS (rejectUnauthorized: true) e autorização Bearer para rotas de Cron e Admin\n- 100% de aprovação em todos os 68 testes (59 de segurança + 9 de news engine + validação canônica)",
+  "updatedAt":  "2026-11-09T00:46:40.418816103Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

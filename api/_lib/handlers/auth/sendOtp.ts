@@ -5,8 +5,8 @@
  * Vercel Serverless Function: Auth Send OTP
  */
 
-import { sendJson, setCorsHeaders, readJsonBody, getServerKeys } from '../../common';
-import { enforceRateLimit } from '../../rateLimiter';
+import { sendJson, setCorsHeaders, readJsonBody, getServerKeys } from '../../common.js';
+import { enforceRateLimit } from '../../rateLimiter.js';
 
 // In-memory OTP storage
 const otpStore = new Map<string, { code: string; expiresAt: number; attempts: number }>();

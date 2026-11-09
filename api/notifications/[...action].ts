@@ -6,9 +6,9 @@
  * Consolidates Push notifications endpoints into a single Serverless Function to comply with Hobby plan limits.
  */
 
-import { sendJson, setCorsHeaders } from '../_lib/common';
-import subscribeHandler from '../_lib/handlers/notifications/subscribe';
-import broadcastPushHandler from '../_lib/handlers/notifications/broadcastPush';
+import { sendJson, setCorsHeaders } from '../_lib/common.js';
+import subscribeHandler from '../_lib/handlers/notifications/subscribe.js';
+import broadcastPushHandler from '../_lib/handlers/notifications/broadcastPush.js';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);

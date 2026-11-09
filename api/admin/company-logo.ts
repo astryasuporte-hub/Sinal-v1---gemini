@@ -5,8 +5,8 @@
  * Vercel Serverless Function: Company Logo Upload & Validation
  */
 
-import { sendJson, setCorsHeaders, readJsonBody } from '../_lib/common';
-import { saveCompanyLogoUpload } from '../../src/server/companyLogoService';
+import { sendJson, setCorsHeaders, readJsonBody } from '../_lib/common.js';
+import { saveCompanyLogoUpload } from '../../src/server/companyLogoService.js';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);

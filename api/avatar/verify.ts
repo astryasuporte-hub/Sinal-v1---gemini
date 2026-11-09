@@ -5,8 +5,8 @@
  * Vercel Serverless Function: Avatar Security & EXIF Sanitizer
  */
 
-import { sendJson, setCorsHeaders, readJsonBody } from '../_lib/common';
-import { verifyAndSanitizeAvatarUpload } from '../../src/server/avatarSecurityService';
+import { sendJson, setCorsHeaders, readJsonBody } from '../_lib/common.js';
+import { verifyAndSanitizeAvatarUpload } from '../../src/server/avatarSecurityService.js';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);

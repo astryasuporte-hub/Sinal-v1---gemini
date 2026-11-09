@@ -5,10 +5,10 @@
  * Vercel Serverless Function: ZynPay Balance Endpoint (Admin Protected)
  */
 
-import { sendJson, setCorsHeaders } from '../../common';
-import { verifyAdminRequest } from '../../adminAuth';
-import { fetchBalanceFromGateway } from '../../zynpayClient';
-import { enforceRateLimit } from '../../rateLimiter';
+import { sendJson, setCorsHeaders } from '../../common.js';
+import { verifyAdminRequest } from '../../adminAuth.js';
+import { fetchBalanceFromGateway } from '../../zynpayClient.js';
+import { enforceRateLimit } from '../../rateLimiter.js';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);

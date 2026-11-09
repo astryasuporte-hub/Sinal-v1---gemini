@@ -17,13 +17,13 @@
  * 6. Resiliência: Retorno 200 com array vazio e zero falhas HTTP 500 quando a base estiver vazia.
  */
 
-import { executeSql, isPostgresConfigured } from '../../postgres';
-import { getServerSupabase, isDatabaseConfigured } from '../../db';
-import { sendJson, setCorsHeaders, readJsonBody, getServerKeys } from '../../common';
-import { enforceRateLimit } from '../../rateLimiter';
-import { safeCompare } from '../../crypto';
-import { runServerSideIngestion } from '../../ingestionEngine';
-import { verifyAdminRequest } from '../../adminAuth';
+import { executeSql, isPostgresConfigured } from '../../postgres.js';
+import { getServerSupabase, isDatabaseConfigured } from '../../db.js';
+import { sendJson, setCorsHeaders, readJsonBody, getServerKeys } from '../../common.js';
+import { enforceRateLimit } from '../../rateLimiter.js';
+import { safeCompare } from '../../crypto.js';
+import { runServerSideIngestion } from '../../ingestionEngine.js';
+import { verifyAdminRequest } from '../../adminAuth.js';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);

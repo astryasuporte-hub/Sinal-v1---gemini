@@ -5,7 +5,7 @@
  * Vercel Serverless Function: Resend Status & Connectivity
  */
 
-import { getServerKeys, sendJson, setCorsHeaders, maskSecret } from '../../common';
+import { getServerKeys, sendJson, setCorsHeaders, maskSecret } from '../../common.js';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);

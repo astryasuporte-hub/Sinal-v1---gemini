@@ -17,9 +17,9 @@
  * 6. Fonte canônica única de planos: public.subscriptions (sem billing_subscriptions).
  */
 
-import { executeSql, isPostgresConfigured } from './postgres';
+import { executeSql, isPostgresConfigured } from './postgres.js';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import type { ZynPayOfficialChargeResponse } from './zynpayClient';
+import type { ZynPayOfficialChargeResponse } from './zynpayClient.js';
 
 const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '';
 const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';

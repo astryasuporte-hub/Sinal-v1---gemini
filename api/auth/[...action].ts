@@ -6,9 +6,9 @@
  * Consolidates OTP send and verify endpoints into a single Serverless Function to comply with Hobby plan limits.
  */
 
-import { sendJson, setCorsHeaders } from '../_lib/common';
-import sendOtpHandler from '../_lib/handlers/auth/sendOtp';
-import verifyOtpHandler from '../_lib/handlers/auth/verifyOtp';
+import { sendJson, setCorsHeaders } from '../_lib/common.js';
+import sendOtpHandler from '../_lib/handlers/auth/sendOtp.js';
+import verifyOtpHandler from '../_lib/handlers/auth/verifyOtp.js';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);

@@ -13,7 +13,7 @@
  * 6. Sanitização de logs: Nenhuma exposição de chaves de API, senhas ou dados pessoais.
  */
 
-import { getServerKeys } from './common';
+import { getServerKeys } from './common.js';
 
 export type ZynPayStatus = 'PENDING' | 'PAID' | 'FAILED' | 'EXPIRED' | 'CANCELLED';
 

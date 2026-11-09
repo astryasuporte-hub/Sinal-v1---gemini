@@ -14,8 +14,8 @@
  */
 
 import crypto from 'crypto';
-import { executeSql, withTransaction, isPostgresConfigured } from './postgres';
-import { getServerKeys, isAllowedDomain } from './common';
+import { executeSql, withTransaction, isPostgresConfigured } from './postgres.js';
+import { getServerKeys, isAllowedDomain } from './common.js';
 
 // Namespace fixo oficial para UUID v5 (FatosBR News Engine)
 const FATOSBR_NAMESPACE_UUID = '8f4c2c10-9b42-5f8e-a612-4f81023a845d';
@@ -379,23 +379,32 @@ export async function runServerSideIngestion(options?: {
 
     // 3. Execução em Transação Atômica Parametrizada
     await withTransaction(async (client) => {
-      // 3.1 Garantir existência dos tópicos em public.topics
+      // 3.1 Garantir existência dos tópicos em public.topics com UUID v5 determinístico
       const topicCategories = [
-        { id: 'tecnologia', name: 'Tecnologia', slug: 'tecnologia', category: 'Tecnologia', color: '#3b82f6' },
-        { id: 'economia', name: 'Economia', slug: 'economia', category: 'Economia', color: '#10b981' },
-        { id: 'politica', name: 'Política', slug: 'politica', category: 'Política', color: '#ef4444' },
-        { id: 'esportes', name: 'Esportes', slug: 'esportes', category: 'Esportes', color: '#f59e0b' },
-        { id: 'sociedade', name: 'Sociedade', slug: 'sociedade', category: 'Sociedade', color: '#8b5cf6' },
-        { id: 'brasil', name: 'Brasil', slug: 'brasil', category: 'Brasil', color: '#06b6d4' }
+        { name: 'Tecnologia', slug: 'tecnologia', category: 'Tecnologia', color: '#3b82f6' },
+        { name: 'Economia', slug: 'economia', category: 'Economia', color: '#10b981' },
+        { name: 'Política', slug: 'politica', category: 'Política', color: '#ef4444' },
+        { name: 'Esportes', slug: 'esportes', category: 'Esportes', color: '#f59e0b' },
+        { name: 'Sociedade', slug: 'sociedade', category: 'Sociedade', color: '#8b5cf6' },
+        { name: 'Brasil', slug: 'brasil', category: 'Brasil', color: '#06b6d4' }
       ];
 
+      const topicMap = new Map<string, string>(); // slug -> topic UUID
+
       for (const t of topicCategories) {
-        await client.query(
+        const topicUuid = generateDeterministicUuidV5(`topic:${t.slug}`);
+        const res = await client.query(
           `INSERT INTO public.topics (id, name, slug, category, brand_color, created_at)
            VALUES ($1, $2, $3, $4, $5, NOW())
-           ON CONFLICT (id) DO NOTHING`,
-          [t.id, t.name, t.slug, t.category, t.color]
-        ).catch(() => null);
+           ON CONFLICT (slug) DO UPDATE SET
+             name = EXCLUDED.name,
+             category = EXCLUDED.category,
+             brand_color = EXCLUDED.brand_color
+           RETURNING id`,
+          [topicUuid, t.name, t.slug, t.category, t.color]
+        );
+        const realTopicId = res.rows[0]?.id || topicUuid;
+        topicMap.set(t.slug, realTopicId);
       }
 
       // 3.2 Upsert de Fontes em public.news_sources (usando colunas REAIS)
@@ -423,7 +432,7 @@ export async function runServerSideIngestion(options?: {
         sourcesUpserted++;
       }
 
-      // 3.3 Inserção / Upsert de Matérias em public.articles (usando colunas REAIS)
+      // 3.3 Inserção / Upsert de Matérias em public.articles (usando colunas REAIS e constraint canonical_url)
       interface SavedArticleRecord {
         id: string;
         article: UpstreamArticle;
@@ -440,10 +449,10 @@ export async function runServerSideIngestion(options?: {
             id, source_id, canonical_url, url, title, description, author, image_url,
             language_code, published_at, created_at, updated_at
           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pt', $9, NOW(), NOW())
-          ON CONFLICT (url) DO UPDATE SET
+          ON CONFLICT (canonical_url) DO UPDATE SET
             title = EXCLUDED.title,
             description = EXCLUDED.description,
-            canonical_url = EXCLUDED.canonical_url,
+            url = EXCLUDED.url,
             image_url = COALESCE(EXCLUDED.image_url, public.articles.image_url),
             updated_at = NOW()
           RETURNING id, (xmax = 0) AS is_new`,
@@ -527,6 +536,11 @@ export async function runServerSideIngestion(options?: {
           cl.relatedArticles.slice(0, 4).map(r => `• ${r.article.title} (${r.article.sourceName})`)
         );
 
+        // Status em conformidade com o CHECK constraint: 'DEVELOPING', 'CONFIRMED', 'UPDATED', 'ARCHIVED'
+        const eventStatus = cl.relatedArticles.length >= 3 ? 'CONFIRMED' : 'DEVELOPING';
+        // Enrichment status em conformidade com o CHECK constraint: 'PENDING', 'FAILED', 'COMPLETED'
+        const enrichmentStatus = 'PENDING';
+
         // Verifica se o evento já existe
         const existingEvt = await client.query(
           `SELECT id, article_count FROM public.events WHERE id = $1 LIMIT 1`,
@@ -541,9 +555,9 @@ export async function runServerSideIngestion(options?: {
               primary_article_id, article_count, first_seen_at, last_updated_at,
               published_at, created_at, updated_at, key_points, revision, enrichment_status
             ) VALUES (
-              $1, $2, $3, $4, $5, 'published', $6,
-              $7, $8, NOW(), NOW(),
-              $9, NOW(), NOW(), $10, 1, 'completed'
+              $1, $2, $3, $4, $5, $6, $7,
+              $8, $9, NOW(), NOW(),
+              $10, NOW(), NOW(), $11, 1, $12
             )`,
             [
               eventUuid,
@@ -551,11 +565,13 @@ export async function runServerSideIngestion(options?: {
               eventSlug,
               summary,
               whyItMatters,
+              eventStatus,
               relevanceScore,
               primary.id,
               cl.relatedArticles.length,
               primary.article.publishedAt ? new Date(primary.article.publishedAt) : new Date(),
-              keyPoints
+              keyPoints,
+              enrichmentStatus
             ]
           );
           eventsCreated++;
@@ -565,6 +581,7 @@ export async function runServerSideIngestion(options?: {
           await client.query(
             `UPDATE public.events SET
               article_count = $2,
+              status = CASE WHEN $2 >= 3 AND status = 'DEVELOPING' THEN 'CONFIRMED' ELSE 'UPDATED' END,
               last_updated_at = NOW(),
               updated_at = NOW(),
               key_points = $3,
@@ -585,18 +602,20 @@ export async function runServerSideIngestion(options?: {
             `INSERT INTO public.event_articles (event_id, article_id, similarity_score, is_primary, created_at)
              VALUES ($1, $2, $3, $4, NOW())
              ON CONFLICT (event_id, article_id) DO UPDATE SET
-               is_primary = EXCLUDED.is_primary`,
+               is_primary = EXCLUDED.is_primary,
+               similarity_score = EXCLUDED.similarity_score`,
             [eventUuid, item.id, similarityScore, isPrimary]
-          ).catch(() => null);
+          );
         }
 
-        // Relacionar com public.event_topics
+        // Relacionar com public.event_topics usando o UUID real do tópico
+        const realTopicId = topicMap.get(cl.topicSlug) || generateDeterministicUuidV5(`topic:${cl.topicSlug}`);
         await client.query(
           `INSERT INTO public.event_topics (event_id, topic_id)
            VALUES ($1, $2)
            ON CONFLICT (event_id, topic_id) DO NOTHING`,
-          [eventUuid, cl.topicSlug]
-        ).catch(() => null);
+          [eventUuid, realTopicId]
+        );
       }
     });
 
