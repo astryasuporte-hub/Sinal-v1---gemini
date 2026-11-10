@@ -125,6 +125,35 @@ O erro `function public.check_and_increment_rate_limit(unknown, unknown, unknown
    - `tests/ingestion-idempotency-pipeline.test.ts`: 5/5 aprovados.
    - Todas as suítes anteriores (segurança, resolver de URL, canônico, news engine): 100% aprovadas.
 
+---
+
+## 6. Missão P0 — Backend V1.7: Migração Assistida do Rate Limiter e Auditoria DCL
+
+### 6.1 Problemas Diagnosticados na V1.6
+1. **Falha Conceitual em `SECURITY DEFINER`**: Em funções `SECURITY DEFINER`, `current_user` retorna o owner da função (`postgres`), e não o chamador (`session_user`). Verificações condicionais de `current_user` eram inócuas ou distorcidas.
+2. **Auto-provisionamento DDL no Runtime**: O runtime HTTP não deve tentar executar `CREATE SCHEMA` ou `CREATE TABLE` durante requisições de clientes. O esquema deve ser provisionado via migração versionada.
+3. **Status Declarativo vs Real**: O endpoint `/api/proxy/status` declarava `rateLimiter.configured: true` sem checar se a função e tabela realmente existiam com a assinatura correta no catálogo.
+
+### 6.2 Soluções Implementadas na V1.7
+1. **Entregável 1 (`supabase/migrations/20261110000002_fix_distributed_rate_limiter.sql`)**:
+   - Assinatura única canônica `public.check_and_increment_rate_limit(p_key TEXT, p_max_requests INTEGER, p_window_ms BIGINT) RETURNS JSONB`.
+   - `SECURITY DEFINER` com `SET search_path = internal, public, pg_temp`.
+   - Remoção de checagens de `current_user` em favor de controle estrito por privilégios DCL:
+     - `REVOKE ALL FROM PUBLIC, anon, authenticated;`
+     - `GRANT EXECUTE TO service_role, postgres;`
+   - Limpeza oportunista (1%) de contadores com mais de 1h.
+2. **Entregável 2 (`supabase/verification/rate_limiter_preflight.sql`)**:
+   - Auditoria read-only completa do schema `internal`, tabela `internal.rate_limit_counters`, colunas, índices, funções e roles no Supabase.
+3. **Entregável 3 (`supabase/verification/rate_limiter_postflight.sql`)**:
+   - Bateria de testes funcionais com chave isolada `test:postflight:...` e limpeza garantida.
+4. **Remoção de DDL em `api/_lib/rateLimiter.ts`**:
+   - Eliminadas tentativas de DDL no runtime serverless.
+   - Preservado `fail-closed` (503) em endpoints sensíveis e log estruturado informando a pendência de migração.
+5. **Diagnóstico Transparente em `api/_lib/handlers/proxy/status.ts`**:
+   - Checagem dinâmica via `information_schema` e `pg_proc`.
+   - Exposição de `codeConfigured: true`, `operational: boolean`, `status: 'OPERATIONAL' | 'PENDING_MIGRATION'`.
+
+
 
 
 

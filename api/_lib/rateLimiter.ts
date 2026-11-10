@@ -78,56 +78,20 @@ export async function enforceRateLimit(
       result = await activeTestStore.checkAndIncrement(key, profile.maxRequests, profile.windowMs);
     } else if (isPostgresConfigured()) {
       // 2. Execução prioritária direta via PostgreSQL server-side com casts explícitos de tipos
-      // Elimina o erro de overload lookup: "function public.check_and_increment_rate_limit(unknown, unknown, unknown) does not exist"
-      try {
-        const sqlRes = await executeSql<{ outcome: any }>(
-          `SELECT public.check_and_increment_rate_limit($1::text, $2::integer, $3::bigint) AS outcome`,
-          [key, profile.maxRequests, profile.windowMs]
-        );
-        const data = sqlRes.rows[0]?.outcome;
-        if (data) {
-          result = {
-            allowed: Boolean(data.allowed),
-            current: Number(data.current || 1),
-            limit: Number(data.limit || profile.maxRequests),
-            retry_after: Number(data.retry_after || 0),
-            remaining: Number(data.remaining ?? 0)
-          };
-        }
-      } catch (sqlErr: any) {
-        const errMsg = String(sqlErr?.message || '');
-        if (errMsg.includes('42883') || errMsg.includes('does not exist') || errMsg.includes('42P01')) {
-          console.warn(`[Rate Limit] Função ou tabela ausente (${errMsg}), tentando auto-provisionamento defensivo...`);
-          try {
-            await executeSql(`
-              CREATE SCHEMA IF NOT EXISTS internal;
-              CREATE TABLE IF NOT EXISTS internal.rate_limit_counters (
-                key TEXT PRIMARY KEY,
-                tokens INTEGER NOT NULL DEFAULT 1,
-                window_start TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
-              );
-            `);
-          } catch {}
-
-          // Tenta novamente após provisionamento da estrutura base
-          const retryRes = await executeSql<{ outcome: any }>(
-            `SELECT public.check_and_increment_rate_limit($1::text, $2::integer, $3::bigint) AS outcome`,
-            [key, profile.maxRequests, profile.windowMs]
-          );
-          const data = retryRes.rows[0]?.outcome;
-          if (data) {
-            result = {
-              allowed: Boolean(data.allowed),
-              current: Number(data.current || 1),
-              limit: Number(data.limit || profile.maxRequests),
-              retry_after: Number(data.retry_after || 0),
-              remaining: Number(data.remaining ?? 0)
-            };
-          }
-        } else {
-          throw sqlErr;
-        }
+      // Assinatura canônica estrita: public.check_and_increment_rate_limit(text, integer, bigint)
+      const sqlRes = await executeSql<{ outcome: any }>(
+        `SELECT public.check_and_increment_rate_limit($1::text, $2::integer, $3::bigint) AS outcome`,
+        [key, profile.maxRequests, profile.windowMs]
+      );
+      const data = sqlRes.rows[0]?.outcome;
+      if (data) {
+        result = {
+          allowed: Boolean(data.allowed),
+          current: Number(data.current || 1),
+          limit: Number(data.limit || profile.maxRequests),
+          retry_after: Number(data.retry_after || 0),
+          remaining: Number(data.remaining ?? 0)
+        };
       }
     } else {
       // 3. Ausência de conexão PostgreSQL server-side: bloqueio fail-closed para categorias sensíveis
@@ -143,13 +107,18 @@ export async function enforceRateLimit(
       return true;
     }
   } catch (err: any) {
-    console.error(`[Rate Limit Store Failure] Falha ao verificar taxa para ${key}:`, err.message);
+    const isMissingFunction = err?.message?.includes('42883') || err?.message?.includes('does not exist');
+    if (isMissingFunction) {
+      console.error(`[Rate Limit Store Unavailable] Função public.check_and_increment_rate_limit ausente no PostgreSQL para ${key}. Aplicação da migração 20261110000002 requerida no Supabase.`);
+    } else {
+      console.error(`[Rate Limit Store Failure] Falha ao verificar taxa para ${key}:`, err?.message);
+    }
 
     // Endpoints de alto risco nunca podem ter acesso liberado quando o limitador falhar
     if (profile.isHighRisk) {
       sendJson(res, 503, {
-        error: 'Falha temporária ao validar cota de requisições. Tente novamente em instantes.',
-        code: 'RATE_LIMIT_CHECK_FAILED'
+        error: 'Serviço temporariamente indisponível. Medida de segurança ativa para operações sensíveis.',
+        code: isMissingFunction ? 'RATE_LIMIT_STORE_UNAVAILABLE' : 'RATE_LIMIT_CHECK_FAILED'
       });
       return false;
     }

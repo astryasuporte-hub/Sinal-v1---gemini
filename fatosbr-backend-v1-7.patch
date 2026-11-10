@@ -1,0 +1,646 @@
+From a0f9f225cd6648e55766d9cf71a773c1b9b2cc1e Mon Sep 17 00:00:00 2001
+From: AI Studio Agent <agent@aistudio.google.com>
+Date: Tue, 10 Nov 2026 22:41:08 +0000
+Subject: [PATCH 1/2] fix(rate-limit): migracao assistida V1.7, remocao de DDL
+ runtime e pacote preflight/postflight para ChatGPT
+
+---
+ api/_lib/handlers/proxy/status.ts             |  38 +++--
+ api/_lib/rateLimiter.ts                       |  75 +++------
+ ...110000002_fix_distributed_rate_limiter.sql | 143 ++++++++++++++++++
+ .../verification/rate_limiter_postflight.sql  | 108 +++++++++++++
+ .../verification/rate_limiter_preflight.sql   |  96 ++++++++++++
+ 5 files changed, 392 insertions(+), 68 deletions(-)
+ create mode 100644 supabase/migrations/20261110000002_fix_distributed_rate_limiter.sql
+ create mode 100644 supabase/verification/rate_limiter_postflight.sql
+ create mode 100644 supabase/verification/rate_limiter_preflight.sql
+
+diff --git a/api/_lib/handlers/proxy/status.ts b/api/_lib/handlers/proxy/status.ts
+index 750c2b9..36fa9f7 100644
+--- a/api/_lib/handlers/proxy/status.ts
++++ b/api/_lib/handlers/proxy/status.ts
+@@ -55,15 +55,18 @@ export default async function handler(req: any, res: any) {
+         executeSql('SELECT count(*)::int as total FROM public.articles'),
+         executeSql('SELECT count(*)::int as total FROM public.news_sources'),
+         executeSql(`
+-          SELECT EXISTS (
+-            SELECT 1 FROM pg_proc p
+-            JOIN pg_namespace n ON p.pronamespace = n.oid
+-            WHERE n.nspname = 'public' AND p.proname = 'check_and_increment_rate_limit'
+-          ) as function_exists,
+-          EXISTS (
+-            SELECT 1 FROM information_schema.tables
+-            WHERE table_schema = 'internal' AND table_name = 'rate_limit_counters'
+-          ) as table_exists
++          SELECT 
++            EXISTS (
++              SELECT 1 FROM pg_proc p
++              JOIN pg_namespace n ON p.pronamespace = n.oid
++              WHERE n.nspname = 'public' 
++                AND p.proname = 'check_and_increment_rate_limit'
++                AND pg_get_function_identity_arguments(p.oid) = 'text, integer, bigint'
++            ) as function_exists,
++            EXISTS (
++              SELECT 1 FROM information_schema.tables
++              WHERE table_schema = 'internal' AND table_name = 'rate_limit_counters'
++            ) as table_exists
+         `)
+       ]);
+ 
+@@ -79,9 +82,14 @@ export default async function handler(req: any, res: any) {
+       }
+       if (rlRes.status === 'fulfilled') {
+         const rlData = rlRes.value.rows[0];
++        const funcOk = Boolean(rlData?.function_exists);
++        const tblOk = Boolean(rlData?.table_exists);
+         if (dbDiagnostic) {
+-          dbDiagnostic.rateLimiterFunctionExists = Boolean(rlData?.function_exists);
+-          dbDiagnostic.rateLimiterTableExists = Boolean(rlData?.table_exists);
++          dbDiagnostic.rateLimiterFunctionExists = funcOk;
++          dbDiagnostic.rateLimiterTableExists = tblOk;
++          dbDiagnostic.rateLimiterOperational = funcOk && tblOk;
++          dbDiagnostic.rateLimiterStatus = (funcOk && tblOk) ? 'OPERATIONAL' : 'PENDING_MIGRATION';
++          dbDiagnostic.pendingMigration = (funcOk && tblOk) ? null : '20261110000002_fix_distributed_rate_limiter.sql';
+         }
+       }
+     }
+@@ -186,15 +194,15 @@ export default async function handler(req: any, res: any) {
+       databaseEventsCount,
+       databaseArticlesCount,
+       databaseSourcesCount,
+-      pipeline: 'FatosBR News Engine V1.6 (Canonical Schema + Distributed Rate Limiting + Strict TLS + Ingestion Engine)',
++      pipeline: 'FatosBR News Engine V1.7 (Canonical Schema + Distributed Rate Limiting + Strict TLS + Ingestion Engine)',
+       databaseHost: dbDiagnostic?.host || null,
+       databaseName: dbDiagnostic?.database || null,
+       databaseCanonical: dbDiagnostic?.isCanonicalProject || false,
+       databaseConnectionType: dbDiagnostic?.connectionType || 'none',
+       rateLimiter: {
+-        configured: true,
+-        table: 'internal.rate_limit_counters',
+-        rpc: 'public.check_and_increment_rate_limit'
++        codeConfigured: true,
++        operational: Boolean(dbDiagnostic?.rateLimiterOperational),
++        status: dbDiagnostic?.rateLimiterStatus || 'PENDING_MIGRATION'
+       },
+       supportedProviders: ['gnews', 'newsapi', 'worldnews', 'nvidia']
+     },
+diff --git a/api/_lib/rateLimiter.ts b/api/_lib/rateLimiter.ts
+index 36fc757..1c54ff2 100644
+--- a/api/_lib/rateLimiter.ts
++++ b/api/_lib/rateLimiter.ts
+@@ -78,56 +78,20 @@ export async function enforceRateLimit(
+       result = await activeTestStore.checkAndIncrement(key, profile.maxRequests, profile.windowMs);
+     } else if (isPostgresConfigured()) {
+       // 2. Execução prioritária direta via PostgreSQL server-side com casts explícitos de tipos
+-      // Elimina o erro de overload lookup: "function public.check_and_increment_rate_limit(unknown, unknown, unknown) does not exist"
+-      try {
+-        const sqlRes = await executeSql<{ outcome: any }>(
+-          `SELECT public.check_and_increment_rate_limit($1::text, $2::integer, $3::bigint) AS outcome`,
+-          [key, profile.maxRequests, profile.windowMs]
+-        );
+-        const data = sqlRes.rows[0]?.outcome;
+-        if (data) {
+-          result = {
+-            allowed: Boolean(data.allowed),
+-            current: Number(data.current || 1),
+-            limit: Number(data.limit || profile.maxRequests),
+-            retry_after: Number(data.retry_after || 0),
+-            remaining: Number(data.remaining ?? 0)
+-          };
+-        }
+-      } catch (sqlErr: any) {
+-        const errMsg = String(sqlErr?.message || '');
+-        if (errMsg.includes('42883') || errMsg.includes('does not exist') || errMsg.includes('42P01')) {
+-          console.warn(`[Rate Limit] Função ou tabela ausente (${errMsg}), tentando auto-provisionamento defensivo...`);
+-          try {
+-            await executeSql(`
+-              CREATE SCHEMA IF NOT EXISTS internal;
+-              CREATE TABLE IF NOT EXISTS internal.rate_limit_counters (
+-                key TEXT PRIMARY KEY,
+-                tokens INTEGER NOT NULL DEFAULT 1,
+-                window_start TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+-                updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+-              );
+-            `);
+-          } catch {}
+-
+-          // Tenta novamente após provisionamento da estrutura base
+-          const retryRes = await executeSql<{ outcome: any }>(
+-            `SELECT public.check_and_increment_rate_limit($1::text, $2::integer, $3::bigint) AS outcome`,
+-            [key, profile.maxRequests, profile.windowMs]
+-          );
+-          const data = retryRes.rows[0]?.outcome;
+-          if (data) {
+-            result = {
+-              allowed: Boolean(data.allowed),
+-              current: Number(data.current || 1),
+-              limit: Number(data.limit || profile.maxRequests),
+-              retry_after: Number(data.retry_after || 0),
+-              remaining: Number(data.remaining ?? 0)
+-            };
+-          }
+-        } else {
+-          throw sqlErr;
+-        }
++      // Assinatura canônica estrita: public.check_and_increment_rate_limit(text, integer, bigint)
++      const sqlRes = await executeSql<{ outcome: any }>(
++        `SELECT public.check_and_increment_rate_limit($1::text, $2::integer, $3::bigint) AS outcome`,
++        [key, profile.maxRequests, profile.windowMs]
++      );
++      const data = sqlRes.rows[0]?.outcome;
++      if (data) {
++        result = {
++          allowed: Boolean(data.allowed),
++          current: Number(data.current || 1),
++          limit: Number(data.limit || profile.maxRequests),
++          retry_after: Number(data.retry_after || 0),
++          remaining: Number(data.remaining ?? 0)
++        };
+       }
+     } else {
+       // 3. Ausência de conexão PostgreSQL server-side: bloqueio fail-closed para categorias sensíveis
+@@ -143,13 +107,18 @@ export async function enforceRateLimit(
+       return true;
+     }
+   } catch (err: any) {
+-    console.error(`[Rate Limit Store Failure] Falha ao verificar taxa para ${key}:`, err.message);
++    const isMissingFunction = err?.message?.includes('42883') || err?.message?.includes('does not exist');
++    if (isMissingFunction) {
++      console.error(`[Rate Limit Store Unavailable] Função public.check_and_increment_rate_limit ausente no PostgreSQL para ${key}. Aplicação da migração 20261110000002 requerida no Supabase.`);
++    } else {
++      console.error(`[Rate Limit Store Failure] Falha ao verificar taxa para ${key}:`, err?.message);
++    }
+ 
+     // Endpoints de alto risco nunca podem ter acesso liberado quando o limitador falhar
+     if (profile.isHighRisk) {
+       sendJson(res, 503, {
+-        error: 'Falha temporária ao validar cota de requisições. Tente novamente em instantes.',
+-        code: 'RATE_LIMIT_CHECK_FAILED'
++        error: 'Serviço temporariamente indisponível. Medida de segurança ativa para operações sensíveis.',
++        code: isMissingFunction ? 'RATE_LIMIT_STORE_UNAVAILABLE' : 'RATE_LIMIT_CHECK_FAILED'
+       });
+       return false;
+     }
+diff --git a/supabase/migrations/20261110000002_fix_distributed_rate_limiter.sql b/supabase/migrations/20261110000002_fix_distributed_rate_limiter.sql
+new file mode 100644
+index 0000000..5333305
+--- /dev/null
++++ b/supabase/migrations/20261110000002_fix_distributed_rate_limiter.sql
+@@ -0,0 +1,143 @@
++-- ==============================================================================
++-- FATOSBR — MIGRAÇÃO VERSIONADA 20261110000002
++-- CORREÇÃO DEFINITIVA DO RATE LIMITER DISTRIBUÍDO E MODELO DE SEGURANÇA (V1.7)
++-- ==============================================================================
++-- Entregável 1: Migração SQL para aplicação assistida pelo DBA / ChatGPT no Supabase
++-- Projeto Supabase: zopbitgtexefmqfvwgzj
++--
++-- Objetivos da Migração:
++-- 1. Assegurar a existência do schema 'internal' e da tabela 'internal.rate_limit_counters'.
++-- 2. Provisionar índices otimizados para concorrência de alta taxa.
++-- 3. Criar a função canônica 'public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT)'.
++-- 4. Estabelecer o Modelo de Menor Privilégio rigoroso via DCL (REVOKE de PUBLIC/anon/authenticated).
++-- 5. Eliminar checagens frágeis de 'current_user' em função SECURITY DEFINER.
++-- 6. Garantir retorno compatível com o contrato JSONB do SaaS FatosBR.
++-- ==============================================================================
++
++-- ETAPA 1: Garantir Schema de Armazenamento Isolado
++CREATE SCHEMA IF NOT EXISTS internal;
++
++-- ETAPA 2: Tabela de Contadores Persistentes (Não-destrutiva)
++CREATE TABLE IF NOT EXISTS internal.rate_limit_counters (
++  key TEXT PRIMARY KEY,
++  tokens INTEGER NOT NULL DEFAULT 1,
++  window_start TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
++  updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
++);
++
++-- ETAPA 3: Índices de Performance e Expiração
++CREATE INDEX IF NOT EXISTS idx_rate_limit_counters_window_start 
++  ON internal.rate_limit_counters (window_start);
++
++CREATE INDEX IF NOT EXISTS idx_rate_limit_counters_updated_at 
++  ON internal.rate_limit_counters (updated_at);
++
++-- ETAPA 4: Função Canônica Principal de Rate Limiting
++-- Assinatura única canônica requerida pelo backend: (TEXT, INTEGER, BIGINT)
++CREATE OR REPLACE FUNCTION public.check_and_increment_rate_limit(
++  p_key TEXT,
++  p_max_requests INTEGER,
++  p_window_ms BIGINT
++)
++RETURNS JSONB
++LANGUAGE plpgsql
++SECURITY DEFINER
++SET search_path = internal, public, pg_temp
++AS $$
++DECLARE
++  v_now TIMESTAMPTZ := clock_timestamp();
++  v_window_start TIMESTAMPTZ;
++  v_tokens INTEGER;
++  v_elapsed_ms BIGINT;
++  v_allowed BOOLEAN;
++  v_retry_after INTEGER := 0;
++BEGIN
++  -- 1. Validação defensiva de parâmetros de entrada
++  IF p_key IS NULL OR length(trim(p_key)) = 0 THEN
++    RAISE EXCEPTION 'RATE_LIMIT_INVALID_PARAM: p_key não pode ser vazio ou nulo.' 
++      USING ERRCODE = '22023';
++  END IF;
++  IF p_max_requests <= 0 THEN
++    RAISE EXCEPTION 'RATE_LIMIT_INVALID_PARAM: p_max_requests deve ser estritamente positivo (> 0).' 
++      USING ERRCODE = '22023';
++  END IF;
++  IF p_window_ms <= 0 THEN
++    RAISE EXCEPTION 'RATE_LIMIT_INVALID_PARAM: p_window_ms deve ser estritamente positivo (> 0).' 
++      USING ERRCODE = '22023';
++  END IF;
++
++  -- 2. Limpeza oportunista probabilística (1% das requisições) de contadores expirados há mais de 1 hora
++  -- Mantém a tabela leve sem necessidade de cron dedicado de limpeza
++  IF random() < 0.01 THEN
++    DELETE FROM internal.rate_limit_counters 
++    WHERE window_start < (v_now - INTERVAL '1 hour');
++  END IF;
++
++  -- 3. Operação Atômica UPSERT com cálculo de expiração da janela temporal
++  -- Proteção intrínseca contra condições de corrida entre instâncias serverless Vercel
++  INSERT INTO internal.rate_limit_counters (key, tokens, window_start, updated_at)
++  VALUES (p_key, 1, v_now, v_now)
++  ON CONFLICT (key) DO UPDATE
++  SET 
++    tokens = CASE 
++      WHEN EXTRACT(EPOCH FROM (v_now - rate_limit_counters.window_start)) * 1000 >= p_window_ms THEN 1
++      ELSE rate_limit_counters.tokens + 1
++    END,
++    window_start = CASE 
++      WHEN EXTRACT(EPOCH FROM (v_now - rate_limit_counters.window_start)) * 1000 >= p_window_ms THEN v_now
++      ELSE rate_limit_counters.window_start
++    END,
++    updated_at = v_now
++  RETURNING tokens, window_start INTO v_tokens, v_window_start;
++
++  -- 4. Cálculo de tempo decorrido e bloqueio
++  v_elapsed_ms := ROUND(EXTRACT(EPOCH FROM (v_now - v_window_start)) * 1000);
++
++  IF v_tokens > p_max_requests THEN
++    v_allowed := FALSE;
++    v_retry_after := CEIL((p_window_ms - v_elapsed_ms)::NUMERIC / 1000);
++    IF v_retry_after < 1 THEN
++      v_retry_after := 1;
++    END IF;
++  ELSE
++    v_allowed := TRUE;
++    v_retry_after := 0;
++  END IF;
++
++  -- 5. Retorno JSONB no contrato formal esperado pelo SaaS
++  RETURN jsonb_build_object(
++    'allowed', v_allowed,
++    'current', v_tokens,
++    'limit', p_max_requests,
++    'retry_after', v_retry_after,
++    'remaining', GREATEST(0, p_max_requests - v_tokens)
++  );
++END;
++$$;
++
++-- ETAPA 5: Comentário de Metadados
++COMMENT ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) IS 
++  'FatosBR V1.7: Rate Limiter atômico distribuído com menor privilégio e isolamento.';
++
++-- ETAPA 6: Modelo de Menor Privilégio Rigoroso (DCL)
++-- Revogação universal de acesso público ou não autenticado
++REVOKE ALL ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) FROM PUBLIC;
++REVOKE ALL ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) FROM anon;
++REVOKE ALL ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) FROM authenticated;
++
++-- Concessão explícita exclusiva para papéis do backend
++GRANT EXECUTE ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) TO service_role, postgres;
++
++-- Concessão de uso do schema e DML na tabela de contadores
++GRANT USAGE ON SCHEMA internal TO service_role, postgres;
++GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE internal.rate_limit_counters TO service_role, postgres;
++
++-- ETAPA 7: Concessão Condicional para Papel Dedicado (se provisionado)
++DO $$
++BEGIN
++  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'fatosbr_backend') THEN
++    GRANT USAGE ON SCHEMA internal TO fatosbr_backend;
++    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE internal.rate_limit_counters TO fatosbr_backend;
++    GRANT EXECUTE ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) TO fatosbr_backend;
++  END IF;
++END $$;
+diff --git a/supabase/verification/rate_limiter_postflight.sql b/supabase/verification/rate_limiter_postflight.sql
+new file mode 100644
+index 0000000..d660453
+--- /dev/null
++++ b/supabase/verification/rate_limiter_postflight.sql
+@@ -0,0 +1,108 @@
++-- ==============================================================================
++-- FATOSBR — SCRIPT DE PÓS-VALIDAÇÃO (POSTFLIGHT) — RATE LIMITER V1.7
++-- ==============================================================================
++-- Entregável 3: Verificação pós-migração para execução pelo ChatGPT no Supabase.
++-- Executa testes funcionais com chaves isoladas e realiza limpeza automática.
++--
++-- Projeto Supabase: zopbitgtexefmqfvwgzj
++-- ==============================================================================
++
++SELECT '==================================================================' AS etapa,
++       'INÍCIO DOS TESTES POSTFLIGHT: RATE LIMITER V1.7' AS descricao;
++
++-- PARTE 1: VERIFICAÇÃO ESTRUTURAL DE CATÁLOGO (READ-ONLY)
++
++-- 1.1 Confirmação da função no catálogo pg_proc
++SELECT 
++  n.nspname AS schema,
++  p.proname AS funcao,
++  pg_get_function_identity_arguments(p.oid) AS argumentos,
++  pg_get_function_result(p.oid) AS retorno,
++  p.prosecdef AS security_definer
++FROM pg_proc p
++JOIN pg_namespace n ON p.pronamespace = n.oid
++WHERE n.nspname = 'public' 
++  AND p.proname = 'check_and_increment_rate_limit';
++
++-- 1.2 Auditoria estrita de permissões (DCL)
++-- Esperado: anon e authenticated NÃO devem ter 'X' (EXECUTE)
++SELECT 
++  p.proname,
++  CASE 
++    WHEN p.proacl IS NULL THEN 'ALERTA: proacl padrão (verificar permissões)'
++    WHEN p.proacl::TEXT ~* '(anon|authenticated)=X' THEN 'VIOLAÇÃO: anon ou authenticated com EXECUTE'
++    ELSE 'OK: Permissões restritas'
++  END AS status_permissao,
++  p.proacl AS acl_completa
++FROM pg_proc p
++JOIN pg_namespace n ON p.pronamespace = n.oid
++WHERE n.nspname = 'public' 
++  AND p.proname = 'check_and_increment_rate_limit';
++
++-- PARTE 2: TESTES FUNCIONAIS ISOLADOS (COM LIMPEZA AUTOMÁTICA)
++
++DO $$
++DECLARE
++  v_test_key TEXT := 'test:postflight:key_' || floor(extract(epoch from clock_timestamp()))::TEXT;
++  v_res1 JSONB;
++  v_res2 JSONB;
++  v_res3 JSONB;
++  v_res_blocked JSONB;
++  v_err_caught BOOLEAN := FALSE;
++BEGIN
++  RAISE NOTICE '--- Iniciando Bateria Funcional com Chave de Teste: % ---', v_test_key;
++
++  -- Teste 1: Primeira requisição (tokens = 1, allowed = true, remaining = 2)
++  v_res1 := public.check_and_increment_rate_limit(v_test_key, 3, 60000);
++  IF (v_res1 ->> 'allowed')::BOOLEAN IS NOT TRUE OR (v_res1 ->> 'current')::INT <> 1 THEN
++    RAISE EXCEPTION 'TESTE 1 FALHOU: Resposta inesperada na 1a chamada: %', v_res1;
++  END IF;
++  RAISE NOTICE '  ✅ Teste 1 APROVADO: 1a requisicao permitida (tokens: %, remaining: %)', 
++    v_res1 ->> 'current', v_res1 ->> 'remaining';
++
++  -- Teste 2: Segunda requisição (tokens = 2, allowed = true, remaining = 1)
++  v_res2 := public.check_and_increment_rate_limit(v_test_key, 3, 60000);
++  IF (v_res2 ->> 'allowed')::BOOLEAN IS NOT TRUE OR (v_res2 ->> 'current')::INT <> 2 THEN
++    RAISE EXCEPTION 'TESTE 2 FALHOU: Resposta inesperada na 2a chamada: %', v_res2;
++  END IF;
++  RAISE NOTICE '  ✅ Teste 2 APROVADO: 2a requisicao permitida (tokens: %, remaining: %)', 
++    v_res2 ->> 'current', v_res2 ->> 'remaining';
++
++  -- Teste 3: Terceira requisição (tokens = 3, allowed = true, remaining = 0 - no limite)
++  v_res3 := public.check_and_increment_rate_limit(v_test_key, 3, 60000);
++  IF (v_res3 ->> 'allowed')::BOOLEAN IS NOT TRUE OR (v_res3 ->> 'current')::INT <> 3 THEN
++    RAISE EXCEPTION 'TESTE 3 FALHOU: Resposta inesperada na 3a chamada: %', v_res3;
++  END IF;
++  RAISE NOTICE '  ✅ Teste 3 APROVADO: 3a requisicao permitida no limite (tokens: %, remaining: %)', 
++    v_res3 ->> 'current', v_res3 ->> 'remaining';
++
++  -- Teste 4: Quarta requisição (tokens = 4 > limite 3, allowed = false, retry_after > 0)
++  v_res_blocked := public.check_and_increment_rate_limit(v_test_key, 3, 60000);
++  IF (v_res_blocked ->> 'allowed')::BOOLEAN IS NOT FALSE OR (v_res_blocked ->> 'retry_after')::INT <= 0 THEN
++    RAISE EXCEPTION 'TESTE 4 FALHOU: Requisição excedente deveria ser bloqueada: %', v_res_blocked;
++  END IF;
++  RAISE NOTICE '  ✅ Teste 4 APROVADO: 4a requisicao bloqueada corretamente (allowed: %, retry_after: %s)', 
++    v_res_blocked ->> 'allowed', v_res_blocked ->> 'retry_after';
++
++  -- Teste 5: Rejeição defensiva de parâmetros inválidos
++  BEGIN
++    PERFORM public.check_and_increment_rate_limit('', 10, 60000);
++  EXCEPTION WHEN OTHERS THEN
++    v_err_caught := TRUE;
++    RAISE NOTICE '  ✅ Teste 5 APROVADO: Parâmetro chave vazia rejeitado com código SQL %', SQLSTATE;
++  END;
++  IF NOT v_err_caught THEN
++    RAISE EXCEPTION 'TESTE 5 FALHOU: Parâmetro inválido não lançou exceção.';
++  END IF;
++
++  -- LIMPEZA OBRIGATÓRIA DA CHAVE DE TESTE
++  DELETE FROM internal.rate_limit_counters WHERE key LIKE 'test:postflight:%';
++  RAISE NOTICE '🧹 Limpeza pós-teste concluída com sucesso.';
++  RAISE NOTICE '==================================================================';
++  RAISE NOTICE '🎉 TODOS OS TESTES POSTFLIGHT DO RATE LIMITER PASSARAM COM SUCESSO!';
++  RAISE NOTICE '==================================================================';
++EXCEPTION WHEN OTHERS THEN
++  -- Garante limpeza mesmo em caso de falha no bloco
++  DELETE FROM internal.rate_limit_counters WHERE key LIKE 'test:postflight:%';
++  RAISE;
++END $$;
+diff --git a/supabase/verification/rate_limiter_preflight.sql b/supabase/verification/rate_limiter_preflight.sql
+new file mode 100644
+index 0000000..f7148f3
+--- /dev/null
++++ b/supabase/verification/rate_limiter_preflight.sql
+@@ -0,0 +1,96 @@
++-- ==============================================================================
++-- FATOSBR — SCRIPT DE PRÉ-VALIDAÇÃO (PREFLIGHT) — RATE LIMITER V1.7
++-- ==============================================================================
++-- Entregável 2: Auditoria exclusivamente de leitura (READ-ONLY) para execução
++-- pelo ChatGPT conectado ao Supabase antes de aplicar a migração 20261110000002.
++--
++-- NÃO ALTERA NENHUM DADO. NÃO EXECUTA DDL.
++-- Projeto Supabase: zopbitgtexefmqfvwgzj
++-- ==============================================================================
++
++SELECT '==================================================================' AS etapa,
++       'INÍCIO DO DIAGNÓSTICO PREFLIGHT: RATE LIMITER' AS descricao;
++
++-- 1. Verificar existência do schema 'internal'
++SELECT 
++  schema_name,
++  schema_owner
++FROM information_schema.schemata 
++WHERE schema_name = 'internal';
++
++-- 2. Verificar existência e estrutura da tabela 'internal.rate_limit_counters'
++SELECT 
++  table_schema,
++  table_name,
++  table_type
++FROM information_schema.tables 
++WHERE table_schema = 'internal' 
++  AND table_name = 'rate_limit_counters';
++
++-- 3. Inspecionar colunas e tipos de 'internal.rate_limit_counters'
++SELECT 
++  column_name,
++  data_type,
++  is_nullable,
++  column_default
++FROM information_schema.columns 
++WHERE table_schema = 'internal' 
++  AND table_name = 'rate_limit_counters'
++ORDER BY ordinal_position;
++
++-- 4. Inspecionar índices existentes na tabela 'internal.rate_limit_counters'
++SELECT 
++  indexname,
++  indexdef
++FROM pg_indexes 
++WHERE schemaname = 'internal' 
++  AND tablename = 'rate_limit_counters';
++
++-- 5. Inspecionar se a função 'public.check_and_increment_rate_limit' já existe
++SELECT 
++  n.nspname AS schema_name,
++  p.proname AS function_name,
++  pg_get_function_identity_arguments(p.oid) AS arguments,
++  pg_get_function_result(p.oid) AS return_type,
++  p.prosecdef AS is_security_definer,
++  p.proacl AS access_control_list
++FROM pg_proc p
++JOIN pg_namespace n ON p.pronamespace = n.oid
++WHERE n.nspname = 'public' 
++  AND p.proname = 'check_and_increment_rate_limit';
++
++-- 6. Verificar concessões (grants) na tabela 'internal.rate_limit_counters'
++SELECT 
++  grantee,
++  privilege_type,
++  is_grantable
++FROM information_schema.table_privileges 
++WHERE table_schema = 'internal' 
++  AND table_name = 'rate_limit_counters'
++ORDER BY grantee, privilege_type;
++
++-- 7. Verificar se o papel dedicado 'fatosbr_backend' existe no cluster
++SELECT 
++  rolname,
++  rolsuper,
++  rolcreaterole,
++  rolcanlogin,
++  rolconnlimit
++FROM pg_roles 
++WHERE rolname IN ('postgres', 'service_role', 'anon', 'authenticated', 'fatosbr_backend');
++
++-- 8. Verificar migrações já registradas no histórico do Supabase (se aplicável)
++DO $$
++BEGIN
++  IF EXISTS (
++    SELECT 1 FROM information_schema.tables 
++    WHERE table_schema = 'supabase_migrations' 
++      AND table_name = 'schema_migrations'
++  ) THEN
++    RAISE NOTICE 'Tabela supabase_migrations.schema_migrations encontrada. Consultando histórico recente...';
++  END IF;
++END $$;
++
++SELECT * FROM supabase_migrations.schema_migrations 
++ORDER BY version DESC 
++LIMIT 10;
+-- 
+2.34.1
+
+
+From ba043c657b14d7c74d00b5903123db94374f5900 Mon Sep 17 00:00:00 2001
+From: AI Studio Agent <agent@aistudio.google.com>
+Date: Tue, 10 Nov 2026 22:41:47 +0000
+Subject: [PATCH 2/2] docs: atualizar plano de implementacao com a Missao V1.7
+
+---
+ .../implementation_plan.md                    | 73 +++++++++++++++++++
+ 1 file changed, 73 insertions(+)
+
+diff --git a/.aistudio/artifacts/brain/51170ed9-4925-46a0-9574-1ec8b728814c/implementation_plan.md b/.aistudio/artifacts/brain/51170ed9-4925-46a0-9574-1ec8b728814c/implementation_plan.md
+index 177bb42..2ec7c96 100644
+--- a/.aistudio/artifacts/brain/51170ed9-4925-46a0-9574-1ec8b728814c/implementation_plan.md
++++ b/.aistudio/artifacts/brain/51170ed9-4925-46a0-9574-1ec8b728814c/implementation_plan.md
+@@ -83,4 +83,77 @@
+ | `bun run build` | Build do Vite para produção (2752 módulos) | ✅ Concluído em 2.61s |
+ | `compile_applet` & `lint_applet` | Verificação do build system | ✅ Build & Lint Aprovados |
+ 
++---
++
++## 4. Missão P0 — Backend V1.5: Correção da Conexão PostgreSQL e Prevenção de Contaminação
++
++### 4.1 Causa Raiz do erro `database "postgres&supa=base-pooler.x" does not exist`
++A sanitização ingênua com regex `rawStr.replace(/[?&]sslmode=[^&]+/g, '')` removia o delimitador `?` quando o primeiro parâmetro era `sslmode=require`, transformando o restante da query string em `&supa=base-pooler.x` sem interrogação. O parser nativo da URL considerava isso parte do `pathname`, resultando no nome do banco corrompido `"postgres&supa=base-pooler.x"`.
++
++### 4.2 Soluções Implementadas na V1.5
++1. **Parser Canônico com WHATWG URL Nativo**: Criada função `parseDatabaseUrl(rawStr)` em `api/_lib/postgres.ts` que processa a URL original sem mutações prévias de string.
++2. **Isolamento e Validação Estrita do Banco**: O nome do banco é extraído via `rawPath.split(/[?&#=/]/)[0] || 'postgres'` e validado estritamente por regex `/^[a-zA-Z0-9_-]+$/`.
++3. **Priorização Absoluta de `SUPABASE_DATABASE_URL`**: `SUPABASE_DATABASE_URL` tem precedência incondicional sobre qualquer variável legada ou injetada por integrações de terceiros.
++4. **Proteção de TLS Estrito**: Credenciais desmembradas injetadas no pool `pg` com `ssl: { ca: trustedCa, rejectUnauthorized: true, servername: host }` sem passar `connectionString` ao pool.
++5. **Suíte de Testes Unitários Completa**: Criado `tests/database-url-resolver.test.ts` com 10 testes cobrindo todos os cenários de conexão e regressão.
++
++---
++
++## 5. Missão P0 — Backend V1.6: Rate Limiting Distribuído, Cron Seguro e Ingestão Real
++
++### 5.1 Causa Raiz do Erro de Rate Limit
++O erro `function public.check_and_increment_rate_limit(unknown, unknown, unknown) does not exist` ocorria pela combinação de parâmetros sem cast explícito no SQL com ausência da migração aplicada no banco de dados e divergência de assinatura de tipos no PostgreSQL.
++
++### 5.2 Implementações da V1.6
++1. **Migração Versionada `20261110000001_distributed_rate_limiter.sql`**:
++   - Criação garantida de `internal.rate_limit_counters` com índices em `window_start` e `updated_at`.
++   - Função `public.check_and_increment_rate_limit(p_key TEXT, p_max_requests INTEGER, p_window_ms BIGINT) RETURNS JSONB`.
++   - Overloads para assinaturas variantes `(TEXT, INTEGER, INTEGER)` e `(TEXT, BIGINT, BIGINT)`.
++   - Validação defensiva de parâmetros e limpeza oportunista (1%) de registros com mais de 1h.
++   - Suporte estrito a `service_role`, `postgres` e qualquer usuário do Supavisor pooler (`postgres.%`).
++2. **Refatoração em `api/_lib/rateLimiter.ts`**:
++   - Injeção de casts explícitos `$1::text, $2::integer, $3::bigint`.
++   - Tratamento com auto-provisionamento defensivo caso tabela/função inexista em tempo de execução.
++   - Preservação da proteção fail-closed (HTTP 503) em operações sensíveis.
++3. **Correção Léxica em `api/_lib/ingestionEngine.ts`**:
++   - Substituição de substring `includes('ia')` por `/\b(ia|ai)\b/` com word boundary, evitando que termos como "inflação" ou "família" fossem indevidamente categorizados como Tecnologia.
++4. **Proteção e Autorização do CRON_SECRET**:
++   - Validação com `safeCompare` de `Authorization: Bearer <CRON_SECRET>`.
++   - Bloqueio imediato de chamadas não autenticadas e rejeição de bypass `x-vercel-cron`.
++5. **Suítes de Testes Automatizados**:
++   - `tests/rate-limiter-distributed.test.ts`: 8/8 aprovados.
++   - `tests/ingestion-idempotency-pipeline.test.ts`: 5/5 aprovados.
++   - Todas as suítes anteriores (segurança, resolver de URL, canônico, news engine): 100% aprovadas.
++
++---
++
++## 6. Missão P0 — Backend V1.7: Migração Assistida do Rate Limiter e Auditoria DCL
++
++### 6.1 Problemas Diagnosticados na V1.6
++1. **Falha Conceitual em `SECURITY DEFINER`**: Em funções `SECURITY DEFINER`, `current_user` retorna o owner da função (`postgres`), e não o chamador (`session_user`). Verificações condicionais de `current_user` eram inócuas ou distorcidas.
++2. **Auto-provisionamento DDL no Runtime**: O runtime HTTP não deve tentar executar `CREATE SCHEMA` ou `CREATE TABLE` durante requisições de clientes. O esquema deve ser provisionado via migração versionada.
++3. **Status Declarativo vs Real**: O endpoint `/api/proxy/status` declarava `rateLimiter.configured: true` sem checar se a função e tabela realmente existiam com a assinatura correta no catálogo.
++
++### 6.2 Soluções Implementadas na V1.7
++1. **Entregável 1 (`supabase/migrations/20261110000002_fix_distributed_rate_limiter.sql`)**:
++   - Assinatura única canônica `public.check_and_increment_rate_limit(p_key TEXT, p_max_requests INTEGER, p_window_ms BIGINT) RETURNS JSONB`.
++   - `SECURITY DEFINER` com `SET search_path = internal, public, pg_temp`.
++   - Remoção de checagens de `current_user` em favor de controle estrito por privilégios DCL:
++     - `REVOKE ALL FROM PUBLIC, anon, authenticated;`
++     - `GRANT EXECUTE TO service_role, postgres;`
++   - Limpeza oportunista (1%) de contadores com mais de 1h.
++2. **Entregável 2 (`supabase/verification/rate_limiter_preflight.sql`)**:
++   - Auditoria read-only completa do schema `internal`, tabela `internal.rate_limit_counters`, colunas, índices, funções e roles no Supabase.
++3. **Entregável 3 (`supabase/verification/rate_limiter_postflight.sql`)**:
++   - Bateria de testes funcionais com chave isolada `test:postflight:...` e limpeza garantida.
++4. **Remoção de DDL em `api/_lib/rateLimiter.ts`**:
++   - Eliminadas tentativas de DDL no runtime serverless.
++   - Preservado `fail-closed` (503) em endpoints sensíveis e log estruturado informando a pendência de migração.
++5. **Diagnóstico Transparente em `api/_lib/handlers/proxy/status.ts`**:
++   - Checagem dinâmica via `information_schema` e `pg_proc`.
++   - Exposição de `codeConfigured: true`, `operational: boolean`, `status: 'OPERATIONAL' | 'PENDING_MIGRATION'`.
++
++
++
++
+ 
+-- 
+2.34.1
+

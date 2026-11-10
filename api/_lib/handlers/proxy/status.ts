@@ -55,15 +55,18 @@ export default async function handler(req: any, res: any) {
         executeSql('SELECT count(*)::int as total FROM public.articles'),
         executeSql('SELECT count(*)::int as total FROM public.news_sources'),
         executeSql(`
-          SELECT EXISTS (
-            SELECT 1 FROM pg_proc p
-            JOIN pg_namespace n ON p.pronamespace = n.oid
-            WHERE n.nspname = 'public' AND p.proname = 'check_and_increment_rate_limit'
-          ) as function_exists,
-          EXISTS (
-            SELECT 1 FROM information_schema.tables
-            WHERE table_schema = 'internal' AND table_name = 'rate_limit_counters'
-          ) as table_exists
+          SELECT 
+            EXISTS (
+              SELECT 1 FROM pg_proc p
+              JOIN pg_namespace n ON p.pronamespace = n.oid
+              WHERE n.nspname = 'public' 
+                AND p.proname = 'check_and_increment_rate_limit'
+                AND pg_get_function_identity_arguments(p.oid) = 'text, integer, bigint'
+            ) as function_exists,
+            EXISTS (
+              SELECT 1 FROM information_schema.tables
+              WHERE table_schema = 'internal' AND table_name = 'rate_limit_counters'
+            ) as table_exists
         `)
       ]);
 
@@ -79,9 +82,14 @@ export default async function handler(req: any, res: any) {
       }
       if (rlRes.status === 'fulfilled') {
         const rlData = rlRes.value.rows[0];
+        const funcOk = Boolean(rlData?.function_exists);
+        const tblOk = Boolean(rlData?.table_exists);
         if (dbDiagnostic) {
-          dbDiagnostic.rateLimiterFunctionExists = Boolean(rlData?.function_exists);
-          dbDiagnostic.rateLimiterTableExists = Boolean(rlData?.table_exists);
+          dbDiagnostic.rateLimiterFunctionExists = funcOk;
+          dbDiagnostic.rateLimiterTableExists = tblOk;
+          dbDiagnostic.rateLimiterOperational = funcOk && tblOk;
+          dbDiagnostic.rateLimiterStatus = (funcOk && tblOk) ? 'OPERATIONAL' : 'PENDING_MIGRATION';
+          dbDiagnostic.pendingMigration = (funcOk && tblOk) ? null : '20261110000002_fix_distributed_rate_limiter.sql';
         }
       }
     }
@@ -186,15 +194,15 @@ export default async function handler(req: any, res: any) {
       databaseEventsCount,
       databaseArticlesCount,
       databaseSourcesCount,
-      pipeline: 'FatosBR News Engine V1.6 (Canonical Schema + Distributed Rate Limiting + Strict TLS + Ingestion Engine)',
+      pipeline: 'FatosBR News Engine V1.7 (Canonical Schema + Distributed Rate Limiting + Strict TLS + Ingestion Engine)',
       databaseHost: dbDiagnostic?.host || null,
       databaseName: dbDiagnostic?.database || null,
       databaseCanonical: dbDiagnostic?.isCanonicalProject || false,
       databaseConnectionType: dbDiagnostic?.connectionType || 'none',
       rateLimiter: {
-        configured: true,
-        table: 'internal.rate_limit_counters',
-        rpc: 'public.check_and_increment_rate_limit'
+        codeConfigured: true,
+        operational: Boolean(dbDiagnostic?.rateLimiterOperational),
+        status: dbDiagnostic?.rateLimiterStatus || 'PENDING_MIGRATION'
       },
       supportedProviders: ['gnews', 'newsapi', 'worldnews', 'nvidia']
     },
