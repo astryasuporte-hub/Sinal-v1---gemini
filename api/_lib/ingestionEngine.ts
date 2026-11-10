@@ -120,7 +120,7 @@ export function generateSlug(text: string, maxLength = 80): string {
 export function detectCategory(title: string, description: string): { category: string; topicSlug: string } {
   const text = `${title} ${description}`.toLowerCase();
 
-  if (text.includes('ia') || text.includes('inteligencia artificial') || text.includes('tecnologia') ||
+  if (/\b(ia|ai)\b/.test(text) || text.includes('inteligencia artificial') || text.includes('tecnologia') ||
       text.includes('apple') || text.includes('google') || text.includes('software') ||
       text.includes('nvidia') || text.includes('semicondutor') || text.includes('openai') || text.includes('meta')) {
     return { category: 'Tecnologia', topicSlug: 'tecnologia' };

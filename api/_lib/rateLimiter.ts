@@ -77,20 +77,57 @@ export async function enforceRateLimit(
     if (activeTestStore) {
       result = await activeTestStore.checkAndIncrement(key, profile.maxRequests, profile.windowMs);
     } else if (isPostgresConfigured()) {
-      // 2. Execução prioritária direta via PostgreSQL server-side
-      const sqlRes = await executeSql<{ outcome: any }>(
-        `SELECT public.check_and_increment_rate_limit($1, $2, $3) AS outcome`,
-        [key, profile.maxRequests, profile.windowMs]
-      );
-      const data = sqlRes.rows[0]?.outcome;
-      if (data) {
-        result = {
-          allowed: Boolean(data.allowed),
-          current: Number(data.current || 1),
-          limit: Number(data.limit || profile.maxRequests),
-          retry_after: Number(data.retry_after || 0),
-          remaining: Number(data.remaining ?? 0)
-        };
+      // 2. Execução prioritária direta via PostgreSQL server-side com casts explícitos de tipos
+      // Elimina o erro de overload lookup: "function public.check_and_increment_rate_limit(unknown, unknown, unknown) does not exist"
+      try {
+        const sqlRes = await executeSql<{ outcome: any }>(
+          `SELECT public.check_and_increment_rate_limit($1::text, $2::integer, $3::bigint) AS outcome`,
+          [key, profile.maxRequests, profile.windowMs]
+        );
+        const data = sqlRes.rows[0]?.outcome;
+        if (data) {
+          result = {
+            allowed: Boolean(data.allowed),
+            current: Number(data.current || 1),
+            limit: Number(data.limit || profile.maxRequests),
+            retry_after: Number(data.retry_after || 0),
+            remaining: Number(data.remaining ?? 0)
+          };
+        }
+      } catch (sqlErr: any) {
+        const errMsg = String(sqlErr?.message || '');
+        if (errMsg.includes('42883') || errMsg.includes('does not exist') || errMsg.includes('42P01')) {
+          console.warn(`[Rate Limit] Função ou tabela ausente (${errMsg}), tentando auto-provisionamento defensivo...`);
+          try {
+            await executeSql(`
+              CREATE SCHEMA IF NOT EXISTS internal;
+              CREATE TABLE IF NOT EXISTS internal.rate_limit_counters (
+                key TEXT PRIMARY KEY,
+                tokens INTEGER NOT NULL DEFAULT 1,
+                window_start TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+              );
+            `);
+          } catch {}
+
+          // Tenta novamente após provisionamento da estrutura base
+          const retryRes = await executeSql<{ outcome: any }>(
+            `SELECT public.check_and_increment_rate_limit($1::text, $2::integer, $3::bigint) AS outcome`,
+            [key, profile.maxRequests, profile.windowMs]
+          );
+          const data = retryRes.rows[0]?.outcome;
+          if (data) {
+            result = {
+              allowed: Boolean(data.allowed),
+              current: Number(data.current || 1),
+              limit: Number(data.limit || profile.maxRequests),
+              retry_after: Number(data.retry_after || 0),
+              remaining: Number(data.remaining ?? 0)
+            };
+          }
+        } else {
+          throw sqlErr;
+        }
       }
     } else {
       // 3. Ausência de conexão PostgreSQL server-side: bloqueio fail-closed para categorias sensíveis

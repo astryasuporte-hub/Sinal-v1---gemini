@@ -97,5 +97,34 @@ A sanitização ingênua com regex `rawStr.replace(/[?&]sslmode=[^&]+/g, '')` re
 4. **Proteção de TLS Estrito**: Credenciais desmembradas injetadas no pool `pg` com `ssl: { ca: trustedCa, rejectUnauthorized: true, servername: host }` sem passar `connectionString` ao pool.
 5. **Suíte de Testes Unitários Completa**: Criado `tests/database-url-resolver.test.ts` com 10 testes cobrindo todos os cenários de conexão e regressão.
 
+---
+
+## 5. Missão P0 — Backend V1.6: Rate Limiting Distribuído, Cron Seguro e Ingestão Real
+
+### 5.1 Causa Raiz do Erro de Rate Limit
+O erro `function public.check_and_increment_rate_limit(unknown, unknown, unknown) does not exist` ocorria pela combinação de parâmetros sem cast explícito no SQL com ausência da migração aplicada no banco de dados e divergência de assinatura de tipos no PostgreSQL.
+
+### 5.2 Implementações da V1.6
+1. **Migração Versionada `20261110000001_distributed_rate_limiter.sql`**:
+   - Criação garantida de `internal.rate_limit_counters` com índices em `window_start` e `updated_at`.
+   - Função `public.check_and_increment_rate_limit(p_key TEXT, p_max_requests INTEGER, p_window_ms BIGINT) RETURNS JSONB`.
+   - Overloads para assinaturas variantes `(TEXT, INTEGER, INTEGER)` e `(TEXT, BIGINT, BIGINT)`.
+   - Validação defensiva de parâmetros e limpeza oportunista (1%) de registros com mais de 1h.
+   - Suporte estrito a `service_role`, `postgres` e qualquer usuário do Supavisor pooler (`postgres.%`).
+2. **Refatoração em `api/_lib/rateLimiter.ts`**:
+   - Injeção de casts explícitos `$1::text, $2::integer, $3::bigint`.
+   - Tratamento com auto-provisionamento defensivo caso tabela/função inexista em tempo de execução.
+   - Preservação da proteção fail-closed (HTTP 503) em operações sensíveis.
+3. **Correção Léxica em `api/_lib/ingestionEngine.ts`**:
+   - Substituição de substring `includes('ia')` por `/\b(ia|ai)\b/` com word boundary, evitando que termos como "inflação" ou "família" fossem indevidamente categorizados como Tecnologia.
+4. **Proteção e Autorização do CRON_SECRET**:
+   - Validação com `safeCompare` de `Authorization: Bearer <CRON_SECRET>`.
+   - Bloqueio imediato de chamadas não autenticadas e rejeição de bypass `x-vercel-cron`.
+5. **Suítes de Testes Automatizados**:
+   - `tests/rate-limiter-distributed.test.ts`: 8/8 aprovados.
+   - `tests/ingestion-idempotency-pipeline.test.ts`: 5/5 aprovados.
+   - Todas as suítes anteriores (segurança, resolver de URL, canônico, news engine): 100% aprovadas.
+
+
 
 
