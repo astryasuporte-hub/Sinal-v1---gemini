@@ -43,9 +43,12 @@ export default async function handler(req: any, res: any) {
   let databaseEventsCount: number | null = null;
   let databaseArticlesCount: number | null = null;
   let databaseSourcesCount: number | null = null;
+  let dbDiagnostic: any = null;
 
   try {
-    const { isPostgresConfigured, executeSql } = await import('../../postgres.js');
+    const { isPostgresConfigured, executeSql, getDatabaseDiagnosticInfo } = await import('../../postgres.js');
+    dbDiagnostic = getDatabaseDiagnosticInfo();
+
     if (isPostgresConfigured()) {
       const [eventsRes, articlesRes, sourcesRes] = await Promise.allSettled([
         executeSql('SELECT count(*)::int as total FROM public.events'),
@@ -165,11 +168,15 @@ export default async function handler(req: any, res: any) {
       databaseEventsCount,
       databaseArticlesCount,
       databaseSourcesCount,
-      pipeline: 'FatosBR News Engine V1.3 (Canonical Schema + Strict TLS)',
+      pipeline: 'FatosBR News Engine V1.4 (Canonical Schema + Strict Disaggregated TLS)',
+      databaseHost: dbDiagnostic?.host || null,
+      databaseCanonical: dbDiagnostic?.isCanonicalProject || false,
+      databaseConnectionType: dbDiagnostic?.connectionType || 'none',
       supportedProviders: ['gnews', 'newsapi', 'worldnews', 'nvidia']
     },
     providers: providersPublic,
     providerProbes,
+    databaseDiagnostic: isAdmin ? dbDiagnostic : undefined,
     // Specs para compatibilidade de testes existentes
     specs: providersPublic
   });

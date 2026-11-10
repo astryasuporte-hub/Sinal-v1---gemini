@@ -63,20 +63,40 @@ async function runRealPostgresIntegrationSuite() {
     return { executed: false, passed: 0, failed: 0, reason: 'NO_DATABASE_URL' };
   }
 
-  const isCloudHost = connectionString.includes('supabase.co') || connectionString.includes('supabase.com') || connectionString.includes('pooler.supabase.com');
-  const clientConfig: any = { connectionString };
+  const cleanUrl = connectionString
+    .replace(/[?&]sslmode=[^&]+/g, '')
+    .replace(/[?&]ssl=[^&]+/g, '')
+    .replace(/\?$/, '');
+
+  const parsedUrl = new URL(cleanUrl.startsWith('postgres') ? cleanUrl : `postgresql://${cleanUrl}`);
+  const isCloudHost =
+    parsedUrl.hostname.includes('supabase.co') ||
+    parsedUrl.hostname.includes('supabase.com') ||
+    parsedUrl.hostname.includes('pooler.supabase.com') ||
+    connectionString.includes('sslmode=');
+
+  let caCert = process.env.SUPABASE_DB_CA;
+  if (!caCert) {
+    try {
+      const fs = await import('fs');
+      const path = await import('path');
+      caCert = fs.readFileSync(path.resolve('api/_lib/supabase-ca-bundle.crt'), 'utf-8');
+    } catch {}
+  }
+
+  const clientConfig: any = {
+    host: parsedUrl.hostname,
+    port: parsedUrl.port ? parseInt(parsedUrl.port, 10) : 5432,
+    user: parsedUrl.username ? decodeURIComponent(parsedUrl.username) : undefined,
+    password: parsedUrl.password ? decodeURIComponent(parsedUrl.password) : undefined,
+    database: parsedUrl.pathname ? parsedUrl.pathname.replace(/^\//, '') : 'postgres'
+  };
+
   if (isCloudHost) {
-    let caCert = process.env.SUPABASE_DB_CA;
-    if (!caCert) {
-      try {
-        const fs = await import('fs');
-        const path = await import('path');
-        caCert = fs.readFileSync(path.resolve('api/_lib/supabase-ca-bundle.crt'), 'utf-8');
-      } catch {}
-    }
     clientConfig.ssl = {
       ca: caCert,
-      rejectUnauthorized: true
+      rejectUnauthorized: true,
+      servername: parsedUrl.hostname
     };
   }
 

@@ -31,41 +31,43 @@
   - `status`: Definido como `'CONFIRMED'` para acontecimentos com 3 ou mais matérias relacionadas e `'DEVELOPING'` para matérias iniciais.
   - `enrichment_status`: Definido estritamente como `'PENDING'` (aguardando enriquecimento de IA).
 
-### 1.5 Resolução Definitiva de TLS no PostgreSQL (Supabase CA Bundle) - V1.3
-- **Sintoma**: `self-signed certificate in certificate chain` ao conectar ao PostgreSQL (`db.zopbitgtexefmqfvwgzj.supabase.co:5432`) no Node.js 24.
-- **Causa Raiz**: O certificado SSL do servidor Supabase é assinado pela autoridade privada `Supabase Root 2021 CA` (intermediária: `Supabase Intermediate 2021 CA`), que não faz parte do repositório padrão de CAs públicas do Mozilla no Node.js.
-- **Solução Aplicada**:
-  1. Embutido o bundle oficial dos certificados públicos da `Supabase Root 2021 CA` e `Supabase Intermediate 2021 CA` diretamente em `api/_lib/postgres.ts` (`SUPABASE_OFFICIAL_CA_BUNDLE`) e em `api/_lib/supabase-ca-bundle.crt`.
-  2. Configuração do pool `pg` com `ssl: { ca: trustedCa, rejectUnauthorized: true, servername: extractedHost }`.
-  3. Eliminação total de `rejectUnauthorized: false` preservando 100% de segurança contra ataques MITM.
-  4. Adicionada extração do host para configuração explícita de Server Name Indication (SNI).
+### 1.6 Causa Raiz Comprovada no Driver 'pg' e Solução Definitiva V1.4
+- **Sintoma Persistente em Produção**: `self-signed certificate in certificate chain` mesmo após embutir a Root CA da Supabase em `api/_lib/postgres.ts`.
+- **Causa Raiz Empiricamente Provada**:
+  1. A connection string do Supabase na Vercel contém `?sslmode=require` (ou `sslmode=verify-full`).
+  2. No driver `pg` (`node-postgres`), ao instanciar `new Pool({ connectionString, ssl: { ca, rejectUnauthorized: true } })`, o arquivo interno `pg/lib/connection-parameters.js` executa:
+     `config = Object.assign({}, config, parse(config.connectionString))`
+  3. O parser `pg-connection-string` analisa `?sslmode=require` e retorna `ssl: {}` (objeto vazio sem propriedade `ca`).
+  4. Como o segundo argumento de `Object.assign` sobrescreve o primeiro, `parse().ssl` **apaga completamente** o objeto `ssl` configurado pelo desenvolvedor.
+  5. O cliente `PoolClient` recebe `ssl = {}`. Na função `upgradeToSSL`, o Node.js TLS é invocado sem a propriedade `ca`, revertendo para as CAs padrão do Mozilla do sistema operacional e rejeitando o certificado da Supabase com `self-signed certificate in certificate chain`.
+- **Solução Definitiva V1.4**:
+  1. **Dissecação Estrita de Propriedades**: A connection string é sanitizada (removendo `?sslmode=...`) e seus componentes (`host`, `port`, `user`, `password`, `database`) são extraídos individualmente.
+  2. **Eliminação do Parâmetro `connectionString` no Pool**: O objeto `PoolConfig` recebe apenas as propriedades explícitas e o objeto `ssl: { ca: trustedCa, rejectUnauthorized: true, servername: host }`. Nenhum `connectionString` é repassado ao `pg`, impedindo que o `pg-connection-string` sobrescreva o SSL.
+  3. **Resolver Canônico Inteligente**: Prioriza connection strings que contenham o ID canônico `zopbitgtexefmqfvwgzj`, protegendo contra variáveis de terceiros (ex: Vercel Postgres/Neon) no ambiente.
+  4. **Diagnóstico Seguro de Infraestrutura**: Adicionada a função `getDatabaseDiagnosticInfo()` reportando host, status e provedor de forma segura em `/api/proxy/status`.
+  5. **Prova Criptográfica Live**: Teste real `tests/live-tls-verification.ts` conecta diretamente com `db.zopbitgtexefmqfvwgzj.supabase.co:5432`, valida o certificado e atinge o protocolo PostgreSQL com sucesso absoluto.
 
 ---
 
 ## 2. Resumo das Alterações por Arquivo
 
-1. **`vercel.json`**: Adicionada chave `functions` mapeando `api/**/*.ts` para `includeFiles: "api/_lib/**"`, cron diário às 10h UTC.
-2. **`api/proxy/[...action].ts`**: Importações estáticas com extensões `.js` para os 6 submódulos.
-3. **`api/_lib/postgres.ts`**:
-   - Bundle público oficial da Supabase Root CA 2021 embutido com fallback seguro.
-   - SNI dinâmico (`servername: extractedHost`).
-   - Validação estrita obrigatória (`rejectUnauthorized: true`).
-4. **`api/_lib/supabase-ca-bundle.crt`**: Arquivo independente com a cadeia completa de certificados da Supabase.
-5. **`api/_lib/handlers/proxy/status.ts`**:
-   - Probe real de `newsapi` para diagnóstico de integridade.
-   - Atualização do status para `FatosBR News Engine V1.3 (Canonical Schema + Strict TLS)`.
-6. **`api/_lib/ingestionEngine.ts`**:
-   - Correção dos imports com extensões `.js`.
-   - Implementação de UUID v5 em tópicos e relacionamento `event_topics`.
-   - Correção do `ON CONFLICT (canonical_url)` em `articles`.
-   - Alinhamento estrito dos status `'DEVELOPING'`, `'CONFIRMED'`, `'UPDATED'` e `'PENDING'` em `events`.
-7. **`api/_lib/handlers/proxy/events.ts`**:
-   - Extensões `.js` em todos os imports.
-   - Autenticação com `safeCompare` para `CRON_SECRET` (GET) e `ADMIN_SECRET` (POST).
-   - Retorno seguro HTTP 200 com array vazio e zero código 500 para base em inicialização.
-8. **Todos os demais módulos de `api/`**:
-   - 100% dos imports relativos normalizados com extensão `.js`.
-   - Consolidação em apenas 8 funções serverless (limite Hobby <= 12).
+1. **`api/_lib/postgres.ts`**:
+   - Dissecação completa da connection string em campos individuais (`host`, `port`, `user`, `password`, `database`).
+   - Remoção de `connectionString` do `PoolConfig` para blindar o objeto `ssl` contra sobrescrita com `{}`.
+   - Bundle oficial `SUPABASE_OFFICIAL_CA_BUNDLE` injetado diretamente em `ssl.ca` com `rejectUnauthorized: true`.
+   - Resolver inteligente com prioridade para o Project ID canônico `zopbitgtexefmqfvwgzj`.
+   - Diagnóstico seguro `getDatabaseDiagnosticInfo()`.
+2. **`api/_lib/handlers/proxy/status.ts`**:
+   - Pipeline atualizado para `FatosBR News Engine V1.4 (Canonical Schema + Strict Disaggregated TLS)`.
+   - Exposição segura do host e conformidade canônica em `newsEngine`.
+3. **`tests/canonical-events-validation.ts`**:
+   - Asserções de prevenção de sobrescrita e presença do resolver canônico.
+4. **`tests/postgres-real-integration.ts`**:
+   - Atualizado para o modelo dissecado sem colisão de `sslmode`.
+5. **`tests/live-tls-verification.ts`**:
+   - Teste de prova de conexão real TLS contra `db.zopbitgtexefmqfvwgzj.supabase.co:5432`.
+6. **`fatosbr-backend-v1-4.patch`**:
+   - Patch unificado para distribuição e deploy.
 
 ---
 
@@ -74,9 +76,11 @@
 | Teste | Escopo | Resultado |
 |---|---|---|
 | `bunx --bun tsc --noEmit` | Compilação TypeScript de todo o backend e frontend | ✅ 0 erros |
+| `bun ./tests/live-tls-verification.ts` | Handshake TLS real contra db.zopbitgtexefmqfvwgzj.supabase.co:5432 | ✅ 100% Aprovado |
 | `bun ./tests/canonical-events-validation.ts` | UUID v5 RFC 4122, TLS estrito, resiliência do feed, auth Bearer do cron e status | ✅ 100% Aprovado |
 | `bun ./tests/news-engine-validation.ts` | Auditoria contra dados mockados, SWR cache, observabilidade e limite de 8 funções serverless | ✅ 9/9 Aprovados |
 | `bun ./tests/security-validation.ts` | Rate limit distribuído, ZynPay HMAC, transações atômicas, anti-tampering, roteadores consolidados | ✅ 59/59 Aprovados |
-| `bun run build` | Build do Vite para produção (2752 módulos) | ✅ Concluído em 2.30s |
+| `bun run build` | Build do Vite para produção (2752 módulos) | ✅ Concluído em 2.61s |
 | `compile_applet` & `lint_applet` | Verificação do build system | ✅ Build & Lint Aprovados |
+
 
