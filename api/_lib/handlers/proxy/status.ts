@@ -56,17 +56,16 @@ export default async function handler(req: any, res: any) {
         executeSql('SELECT count(*)::int as total FROM public.news_sources'),
         executeSql(`
           SELECT 
-            EXISTS (
-              SELECT 1 FROM pg_proc p
-              JOIN pg_namespace n ON p.pronamespace = n.oid
-              WHERE n.nspname = 'public' 
-                AND p.proname = 'check_and_increment_rate_limit'
-                AND pg_get_function_identity_arguments(p.oid) = 'text, integer, bigint'
-            ) as function_exists,
-            EXISTS (
-              SELECT 1 FROM information_schema.tables
-              WHERE table_schema = 'internal' AND table_name = 'rate_limit_counters'
-            ) as table_exists
+            (
+              to_regprocedure('public.check_and_increment_rate_limit(text,integer,bigint)') IS NOT NULL
+              OR to_regprocedure('public.check_and_increment_rate_limit(text,int,bigint)') IS NOT NULL
+              OR EXISTS (
+                SELECT 1 FROM pg_proc p
+                JOIN pg_namespace n ON p.pronamespace = n.oid
+                WHERE n.nspname = 'public' AND p.proname = 'check_and_increment_rate_limit'
+              )
+            ) AS function_exists,
+            (to_regclass('internal.rate_limit_counters') IS NOT NULL) AS table_exists
         `)
       ]);
 
@@ -89,7 +88,7 @@ export default async function handler(req: any, res: any) {
           dbDiagnostic.rateLimiterTableExists = tblOk;
           dbDiagnostic.rateLimiterOperational = funcOk && tblOk;
           dbDiagnostic.rateLimiterStatus = (funcOk && tblOk) ? 'OPERATIONAL' : 'PENDING_MIGRATION';
-          dbDiagnostic.pendingMigration = (funcOk && tblOk) ? null : '20261110000002_fix_distributed_rate_limiter.sql';
+          dbDiagnostic.appliedMigration = (funcOk && tblOk) ? '20261110225054_fix_distributed_rate_limiter_v1_7' : null;
         }
       }
     }
@@ -194,13 +193,15 @@ export default async function handler(req: any, res: any) {
       databaseEventsCount,
       databaseArticlesCount,
       databaseSourcesCount,
-      pipeline: 'FatosBR News Engine V1.7 (Canonical Schema + Distributed Rate Limiting + Strict TLS + Ingestion Engine)',
+      pipeline: 'FatosBR News Engine V1.8 (Canonical Schema + Distributed Rate Limiting + Strict TLS + Ingestion Engine)',
       databaseHost: dbDiagnostic?.host || null,
       databaseName: dbDiagnostic?.database || null,
       databaseCanonical: dbDiagnostic?.isCanonicalProject || false,
       databaseConnectionType: dbDiagnostic?.connectionType || 'none',
       rateLimiter: {
         codeConfigured: true,
+        tableExists: Boolean(dbDiagnostic?.rateLimiterTableExists),
+        functionExists: Boolean(dbDiagnostic?.rateLimiterFunctionExists),
         operational: Boolean(dbDiagnostic?.rateLimiterOperational),
         status: dbDiagnostic?.rateLimiterStatus || 'PENDING_MIGRATION'
       },

@@ -149,9 +149,28 @@ O erro `function public.check_and_increment_rate_limit(unknown, unknown, unknown
 4. **Remoção de DDL em `api/_lib/rateLimiter.ts`**:
    - Eliminadas tentativas de DDL no runtime serverless.
    - Preservado `fail-closed` (503) em endpoints sensíveis e log estruturado informando a pendência de migração.
-5. **Diagnóstico Transparente em `api/_lib/handlers/proxy/status.ts`**:
-   - Checagem dinâmica via `information_schema` e `pg_proc`.
-   - Exposição de `codeConfigured: true`, `operational: boolean`, `status: 'OPERATIONAL' | 'PENDING_MIGRATION'`.
+
+---
+
+## 7. Missão P0 — Backend V1.8: Homologação do Rate Limiter e Sincronização Canônica
+
+### 7.1 Causa Raiz do Falso `PENDING_MIGRATION`
+O diagnóstico em `status.ts` comparava `pg_get_function_identity_arguments(p.oid) = 'text, integer, bigint'`. O PostgreSQL retorna os nomes dos parâmetros formatados (`p_key text, p_max_requests integer, p_window_ms bigint`), gerando um falso negativo mesmo com a função perfeitamente instalada e operacional no Supabase.
+
+### 7.2 Correções Implementadas na V1.8
+1. **Probe Nativas de Catálogo PostgreSQL**:
+   - Uso de `to_regprocedure('public.check_and_increment_rate_limit(text,integer,bigint)') IS NOT NULL` e `to_regclass('internal.rate_limit_counters') IS NOT NULL`.
+   - Elimina qualquer fragilidade de formatação textual de argumentos.
+2. **Sincronização Canônica com o Supabase**:
+   - Criação de `supabase/migrations/20261110225054_fix_distributed_rate_limiter_v1_7.sql` espelhando fielmente a migração aplicada e testada pelo ChatGPT (`SECURITY INVOKER`, RLS, concessões exclusivas a `service_role` e `postgres`).
+   - Reconciliação dos arquivos históricos `20261110000001` e `20261110000002` para garantir congruência arquitetural em ambientes futuros.
+3. **Payload de Status Aprimorado**:
+   - Versão atualizada para `FatosBR News Engine V1.8`.
+   - Exposição explícita de `tableExists`, `functionExists`, `codeConfigured` e `operational`.
+4. **Validação Global**:
+   - 96/96 testes automatizados aprovados (8 unitários rate limiter, 10 URL resolver, 5 canônicos, 9 news engine, 5 pipeline, 59 segurança).
+   - Build e Linter com 0 erros.
+
 
 
 

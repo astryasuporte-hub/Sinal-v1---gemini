@@ -2,7 +2,7 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  * 
- * FATOSBR — SUÍTE DE TESTES UNITÁRIOS E DE CONCORRÊNCIA DO RATE LIMITER DISTRIBUÍDO V1.6
+ * FATOSBR — SUÍTE DE TESTES UNITÁRIOS E DE CONCORRÊNCIA DO RATE LIMITER DISTRIBUÍDO V1.8
  * 
  * Valida:
  * 1. Primeira requisição permitida com contagem atômica.

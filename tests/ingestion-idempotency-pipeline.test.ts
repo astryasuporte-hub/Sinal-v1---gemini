@@ -2,7 +2,7 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  * 
- * FATOSBR — SUÍTE DE TESTES: PIPELINE DE INGESTÃO, DEDUPLICAÇÃO E IDEMPOTÊNCIA V1.6
+ * FATOSBR — SUÍTE DE TESTES: PIPELINE DE INGESTÃO, DEDUPLICAÇÃO E IDEMPOTÊNCIA V1.8
  * 
  * Valida:
  * 1. Canonicalização de URLs (eliminação de UTMs, tracking parameters, hashes e trailing slashes).

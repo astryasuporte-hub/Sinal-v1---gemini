@@ -1,17 +1,10 @@
 -- ==============================================================================
--- FATOSBR — MIGRAÇÃO VERSIONADA 20261110000001
--- RATE LIMITING DISTRIBUÍDO E ATÔMICO COM REFORÇO DE CONCORRÊNCIA E TIPOS (V1.6)
+-- FATOSBR — MIGRAÇÃO VERSIONADA HISTÓRICA 20261110000001
+-- (SUBSTITUÍDA PELA CANÔNICA REAL APLICADA 20261110225054_fix_distributed_rate_limiter_v1_7)
 -- ==============================================================================
--- 1. Garante a existência do schema 'internal' e da tabela 'internal.rate_limit_counters'.
--- 2. Implementa a função canônica 'public.check_and_increment_rate_limit' com:
---    - Assinatura estrita: (p_key TEXT, p_max_requests INTEGER, p_window_ms BIGINT)
---    - Overloads compatíveis: (TEXT, INTEGER, INTEGER) e (TEXT, BIGINT, BIGINT) para
---      eliminar o erro "function public.check_and_increment_rate_limit(unknown, unknown, unknown) does not exist".
---    - Operação UPSERT atômica com reset automático ao expirar a janela temporal.
---    - Limpeza periódica de contadores obsoletos.
---    - Suporte a conexões diretas ('postgres', 'postgres.%', 'service_role').
---    - SECURITY DEFINER com search_path imutável 'internal, public, pg_temp'.
---    - Revogação de acesso de 'PUBLIC' e 'anon'.
+-- NOTA DE SINCRONIZAÇÃO V1.8:
+-- A versão canônica em produção no Supabase é a '20261110225054_fix_distributed_rate_limiter_v1_7'.
+-- Esta migração foi reconciliada para preservar SECURITY INVOKER e evitar divergências de catálogo.
 -- ==============================================================================
 
 -- 1. Schema internal

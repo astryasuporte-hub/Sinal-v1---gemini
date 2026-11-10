@@ -41,7 +41,7 @@ CREATE OR REPLACE FUNCTION public.check_and_increment_rate_limit(
 )
 RETURNS JSONB
 LANGUAGE plpgsql
-SECURITY DEFINER
+SECURITY INVOKER
 SET search_path = internal, public, pg_temp
 AS $$
 DECLARE
