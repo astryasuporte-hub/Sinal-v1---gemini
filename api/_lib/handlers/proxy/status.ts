@@ -168,8 +168,9 @@ export default async function handler(req: any, res: any) {
       databaseEventsCount,
       databaseArticlesCount,
       databaseSourcesCount,
-      pipeline: 'FatosBR News Engine V1.4 (Canonical Schema + Strict Disaggregated TLS)',
+      pipeline: 'FatosBR News Engine V1.5 (Canonical Schema + Strict Disaggregated TLS)',
       databaseHost: dbDiagnostic?.host || null,
+      databaseName: dbDiagnostic?.database || null,
       databaseCanonical: dbDiagnostic?.isCanonicalProject || false,
       databaseConnectionType: dbDiagnostic?.connectionType || 'none',
       supportedProviders: ['gnews', 'newsapi', 'worldnews', 'nvidia']

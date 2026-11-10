@@ -1,0 +1,493 @@
+From 9a0ef228051bf210f3226e0427025198f62d258a Mon Sep 17 00:00:00 2001
+From: AI Studio Agent <agent@aistudio.google.com>
+Date: Tue, 10 Nov 2026 21:36:50 +0000
+Subject: [PATCH] fix(postgres): resolver definitivo da connection string e
+ prevencao de contaminacao de banco V1.5
+
+---
+ api/_lib/handlers/proxy/status.ts   |   3 +-
+ api/_lib/postgres.ts                | 217 ++++++++++++++++++----------
+ tests/database-url-resolver.test.ts | 131 +++++++++++++++++
+ tests/postgres-real-integration.ts  |  26 ++--
+ 4 files changed, 283 insertions(+), 94 deletions(-)
+ create mode 100644 tests/database-url-resolver.test.ts
+
+diff --git a/api/_lib/handlers/proxy/status.ts b/api/_lib/handlers/proxy/status.ts
+index d3b46a1..295e485 100644
+--- a/api/_lib/handlers/proxy/status.ts
++++ b/api/_lib/handlers/proxy/status.ts
+@@ -168,8 +168,9 @@ export default async function handler(req: any, res: any) {
+       databaseEventsCount,
+       databaseArticlesCount,
+       databaseSourcesCount,
+-      pipeline: 'FatosBR News Engine V1.4 (Canonical Schema + Strict Disaggregated TLS)',
++      pipeline: 'FatosBR News Engine V1.5 (Canonical Schema + Strict Disaggregated TLS)',
+       databaseHost: dbDiagnostic?.host || null,
++      databaseName: dbDiagnostic?.database || null,
+       databaseCanonical: dbDiagnostic?.isCanonicalProject || false,
+       databaseConnectionType: dbDiagnostic?.connectionType || 'none',
+       supportedProviders: ['gnews', 'newsapi', 'worldnews', 'nvidia']
+diff --git a/api/_lib/postgres.ts b/api/_lib/postgres.ts
+index aa56f13..34edc06 100644
+--- a/api/_lib/postgres.ts
++++ b/api/_lib/postgres.ts
+@@ -80,7 +80,7 @@ export interface DatabaseDiagnostic {
+   caSource: 'environment_variable' | 'official_embedded_bundle' | 'none';
+ }
+ 
+-interface ParsedDbConfig {
++export interface ParsedDbConfig {
+   host: string;
+   port: number;
+   user?: string;
+@@ -95,45 +95,125 @@ interface ParsedDbConfig {
+ }
+ 
+ /**
+- * Inspeciona as variáveis de ambiente em ordem prioritária e resolve a conexão canônica.
+- * Proteção contra conflitos de variáveis do Vercel Postgres / Neon quando Supabase for o banco alvo.
++ * Parser estrito e seguro de URLs de banco de dados PostgreSQL.
++ * Utiliza a API nativa WHATWG URL para decompor e validar os componentes sem manipulação frágil de strings.
++ * Elimina vazamento de parâmetros de query (ex: &supa=base-pooler.x) para o nome do banco.
+  */
+-function resolveCanonicalDbConfig(): ParsedDbConfig | null {
++export function parseDatabaseUrl(rawStr: string): {
++  host: string;
++  port: number;
++  user?: string;
++  password?: string;
++  database: string;
++} {
++  const trimmed = rawStr.trim();
++  if (!trimmed) {
++    throw new Error('EMPTY_URL: String de conexão vazia.');
++  }
++
++  let urlStr = trimmed;
++  if (!urlStr.startsWith('postgres://') && !urlStr.startsWith('postgresql://')) {
++    if (urlStr.includes('://')) {
++      throw new Error(`INVALID_PROTOCOL: Protocolo de conexão inválido. Esperado "postgresql:" ou "postgres:".`);
++    }
++    urlStr = 'postgresql://' + urlStr;
++  }
++
++  let url: URL;
++  try {
++    url = new URL(urlStr);
++  } catch {
++    const afterAt = urlStr.includes('@') ? urlStr.split('@')[1] : urlStr;
++    const portMatch = afterAt.match(/:([^/@?#:]+)(\/|$|\?)/);
++    if (portMatch) {
++      const p = parseInt(portMatch[1], 10);
++      if (isNaN(p) || p < 1 || p > 65535) {
++        throw new Error(`INVALID_PORT: Porta "${portMatch[1]}" fora do intervalo válido (1-65535).`);
++      }
++    }
++    throw new Error(`INVALID_HOST: URL ou Hostname inválido na string de conexão PostgreSQL.`);
++  }
++  if (url.protocol !== 'postgres:' && url.protocol !== 'postgresql:') {
++    throw new Error(`INVALID_PROTOCOL: Protocolo "${url.protocol}" inválido. Esperado "postgresql:" ou "postgres:".`);
++  }
++
++  const host = url.hostname.trim();
++  if (!host || host.length < 3 || host.includes(' ') || !host.includes('.')) {
++    throw new Error(`INVALID_HOST: Hostname "${host}" inválido para conexão PostgreSQL.`);
++  }
++
++  const isPooler = host.includes('pooler.supabase.com');
++  const defaultPort = isPooler ? 6543 : 5432;
++  let port = url.port ? parseInt(url.port, 10) : defaultPort;
++  if (isNaN(port) || port < 1 || port > 65535) {
++    throw new Error(`INVALID_PORT: Porta "${url.port}" fora do intervalo válido (1-65535).`);
++  }
++
++  const user = url.username ? decodeURIComponent(url.username) : undefined;
++  const password = url.password ? decodeURIComponent(url.password) : undefined;
++
++  // Extração estrita e limpa do nome do banco de dados a partir do pathname
++  const rawPath = decodeURIComponent(url.pathname).replace(/^\/+/, '').trim();
++  // Se a URL contiver parâmetros malformados sem '?' (ex: /postgres&supa=...), isola antes de qualquer delimitador
++  let database = rawPath.split(/[?&#=/]/)[0] || 'postgres';
++
++  if (!database || !/^[a-zA-Z0-9_-]+$/.test(database)) {
++    throw new Error(`INVALID_DATABASE: Nome de banco de dados inválido ou corrompido: "${database}". O nome padrão da Supabase é "postgres".`);
++  }
++
++  return { host, port, user, password, database };
++}
++
++/**
++ * Inspeciona as variáveis de ambiente em ordem prioritária canônica e resolve a conexão oficial.
++ * SUPABASE_DATABASE_URL possui prioridade máxima e explícita quando configurada.
++ */
++export function resolveCanonicalDbConfig(): ParsedDbConfig | null {
+   const candidateVars = [
+     'SUPABASE_DATABASE_URL',
++    'SUPABASE_DB_URL',
+     'DATABASE_URL',
+     'POSTGRES_URL',
+     'POSTGRES_PRISMA_URL',
+-    'POSTGRES_URL_NON_POOLING',
+-    'SUPABASE_DB_URL'
++    'POSTGRES_URL_NON_POOLING'
+   ];
+ 
+   let chosenVar: string | null = null;
+   let rawStr: string = '';
+ 
+-  // 1. Prioriza explicitamente variáveis que apontem para o projeto canônico zopbitgtexefmqfvwgzj
+-  for (const v of candidateVars) {
+-    const val = process.env[v]?.trim();
+-    if (val && val.includes(CANONICAL_SUPABASE_PROJECT_ID)) {
+-      chosenVar = v;
+-      rawStr = val;
+-      break;
+-    }
+-  }
+-
+-  // 2. Se nenhuma apontar explicitamente para o Project ID, segue a ordem canônica padrão
+-  if (!rawStr) {
++  // 1. SUPABASE_DATABASE_URL possui prioridade absoluta e inequívoca
++  if (process.env.SUPABASE_DATABASE_URL?.trim()) {
++    chosenVar = 'SUPABASE_DATABASE_URL';
++    rawStr = process.env.SUPABASE_DATABASE_URL.trim();
++  } else if (process.env.SUPABASE_DB_URL?.trim()) {
++    chosenVar = 'SUPABASE_DB_URL';
++    rawStr = process.env.SUPABASE_DB_URL.trim();
++  } else {
++    // 2. Se nenhuma variável dedicada Supabase estiver definida,
++    // verifica se alguma outra aponta para o projeto canônico zopbitgtexefmqfvwgzj
+     for (const v of candidateVars) {
+       const val = process.env[v]?.trim();
+-      if (val) {
++      if (val && val.includes(CANONICAL_SUPABASE_PROJECT_ID)) {
+         chosenVar = v;
+         rawStr = val;
+         break;
+       }
+     }
++
++    // 3. Se nenhuma apontar explicitamente para o Project ID, segue a ordem padrão
++    if (!rawStr) {
++      for (const v of candidateVars) {
++        const val = process.env[v]?.trim();
++        if (val) {
++          chosenVar = v;
++          rawStr = val;
++          break;
++        }
++      }
++    }
+   }
+ 
+-  // 3. Fallback para variáveis individuais desmembradas (POSTGRES_HOST, etc.)
++  // 4. Fallback para variáveis individuais desmembradas (POSTGRES_HOST, etc.)
+   if (!rawStr && process.env.POSTGRES_HOST) {
+     chosenVar = 'POSTGRES_HOST';
+     const host = process.env.POSTGRES_HOST.trim();
+@@ -142,7 +222,7 @@ function resolveCanonicalDbConfig(): ParsedDbConfig | null {
+     const password = process.env.POSTGRES_PASSWORD?.trim();
+     const database = process.env.POSTGRES_DATABASE?.trim() || 'postgres';
+     const isCloudHost = host.includes('supabase.co') || host.includes('supabase.com') || host.includes('pooler.supabase.com');
+-    const isCanonical = host.includes(CANONICAL_SUPABASE_PROJECT_ID);
++    const isCanonical = host.includes(CANONICAL_SUPABASE_PROJECT_ID) || user.includes(CANONICAL_SUPABASE_PROJECT_ID);
+     const trustedCa = process.env.SUPABASE_DB_CA?.trim() || SUPABASE_OFFICIAL_CA_BUNDLE;
+ 
+     return {
+@@ -164,67 +244,48 @@ function resolveCanonicalDbConfig(): ParsedDbConfig | null {
+     return null;
+   }
+ 
+-  // 4. Sanitiza a connection string removendo parâmetros conflitantes como ?sslmode=...
+-  // Causa Raiz Descoberta: o driver pg/lib/connection-parameters sobrescreve config.ssl com {}
+-  // quando connectionString possui ?sslmode=require, destruindo a CA embutida e causando
+-  // o erro "self-signed certificate in certificate chain".
+-  const cleanUrl = rawStr
+-    .replace(/[?&]sslmode=[^&]+/g, '')
+-    .replace(/[?&]ssl=[^&]+/g, '')
+-    .replace(/\?$/, '');
+-
+-  let host = 'localhost';
+-  let port = 5432;
+-  let user: string | undefined = undefined;
+-  let password: string | undefined = undefined;
+-  let database = 'postgres';
+-
+   try {
+-    const url = new URL(cleanUrl.startsWith('postgres') ? cleanUrl : `postgresql://${cleanUrl}`);
+-    host = url.hostname;
+-    port = url.port ? parseInt(url.port, 10) : (host.includes('pooler.supabase.com') && url.port === '6543' ? 6543 : 5432);
+-    user = url.username ? decodeURIComponent(url.username) : undefined;
+-    password = url.password ? decodeURIComponent(url.password) : undefined;
+-    database = url.pathname ? url.pathname.replace(/^\//, '') : 'postgres';
++    const parsed = parseDatabaseUrl(rawStr);
++    const isCloudHost =
++      parsed.host.includes('supabase.co') ||
++      parsed.host.includes('supabase.com') ||
++      parsed.host.includes('pooler.supabase.com') ||
++      parsed.host.includes('neon.tech') ||
++      parsed.host.includes('postgres.vercel-storage.com') ||
++      rawStr.includes('sslmode=');
++
++    const isCanonical =
++      parsed.host.includes(CANONICAL_SUPABASE_PROJECT_ID) ||
++      (parsed.user ? parsed.user.includes(CANONICAL_SUPABASE_PROJECT_ID) : false);
++
++    let connectionType: DatabaseDiagnostic['connectionType'] = 'local';
++    if (parsed.host.includes('pooler.supabase.com')) {
++      connectionType = 'pooler_supabase';
++    } else if (parsed.host.includes('supabase.co') || parsed.host.includes('supabase.com')) {
++      connectionType = 'direct_supabase';
++    } else if (isCloudHost) {
++      connectionType = 'external_cloud';
++    }
++
++    const trustedCa = process.env.SUPABASE_DB_CA?.trim() || SUPABASE_OFFICIAL_CA_BUNDLE;
++
++    return {
++      host: parsed.host,
++      port: parsed.port,
++      user: parsed.user,
++      password: parsed.password,
++      database: parsed.database,
++      sourceVariable: chosenVar,
++      isCloudHost,
++      isCanonicalProject: isCanonical,
++      connectionType,
++      trustedCa,
++      caSource: process.env.SUPABASE_DB_CA ? 'environment_variable' : 'official_embedded_bundle'
++    };
+   } catch (err: any) {
+-    console.error('[Postgres Config Resolver] Erro ao analisar URL limpa:', err?.message);
++    console.error(`[Postgres Config Resolver] Erro ao analisar variável ${chosenVar}:`, err?.message);
+     return null;
+   }
+-
+-  const isCloudHost =
+-    host.includes('supabase.co') ||
+-    host.includes('supabase.com') ||
+-    host.includes('pooler.supabase.com') ||
+-    host.includes('neon.tech') ||
+-    host.includes('postgres.vercel-storage.com') ||
+-    rawStr.includes('sslmode=');
+-
+-  const isCanonical = host.includes(CANONICAL_SUPABASE_PROJECT_ID) || (user ? user.includes(CANONICAL_SUPABASE_PROJECT_ID) : false);
+-
+-  let connectionType: DatabaseDiagnostic['connectionType'] = 'local';
+-  if (host.includes('pooler.supabase.com')) {
+-    connectionType = 'pooler_supabase';
+-  } else if (host.includes('supabase.co') || host.includes('supabase.com')) {
+-    connectionType = 'direct_supabase';
+-  } else if (isCloudHost) {
+-    connectionType = 'external_cloud';
+-  }
+-
+-  const trustedCa = process.env.SUPABASE_DB_CA?.trim() || SUPABASE_OFFICIAL_CA_BUNDLE;
+-
+-  return {
+-    host,
+-    port,
+-    user,
+-    password,
+-    database,
+-    sourceVariable: chosenVar,
+-    isCloudHost,
+-    isCanonicalProject: isCanonical,
+-    connectionType,
+-    trustedCa,
+-    caSource: process.env.SUPABASE_DB_CA ? 'environment_variable' : 'official_embedded_bundle'
+-  };
+ }
+ 
+ /**
+diff --git a/tests/database-url-resolver.test.ts b/tests/database-url-resolver.test.ts
+new file mode 100644
+index 0000000..27afa95
+--- /dev/null
++++ b/tests/database-url-resolver.test.ts
+@@ -0,0 +1,131 @@
++/**
++ * @license
++ * SPDX-License-Identifier: Apache-2.0
++ * 
++ * FATOSBR — SUITE DE TESTES UNITÁRIOS DO PARSER E RESOLVER POSTGRESQL V1.5
++ * 
++ * Cobertura Obrigatória:
++ * 1. URL PostgreSQL válida.
++ * 2. URL com parâmetros SSL (?sslmode=require).
++ * 3. URL com múltiplos parâmetros (?sslmode=require&supa=base-pooler.x).
++ * 4. Senha com caracteres especiais percent-encoded.
++ * 5. Nome de banco correto ("postgres") sem contaminação por query params.
++ * 6. Teste de regressão específico contra o bug "postgres&supa=base-pooler.x".
++ * 7. URL malformada (rejeição com erro explícito).
++ * 8. Host inesperado / inválido.
++ * 9. Porta inválida (fora de 1-65535).
++ * 10. Priorização estrita de SUPABASE_DATABASE_URL sobre variáveis conflitantes.
++ */
++
++import assert from 'assert';
++import { parseDatabaseUrl, resolveCanonicalDbConfig, getDatabaseDiagnosticInfo } from '../api/_lib/postgres';
++
++function runResolverTests() {
++  console.log('======================================================================');
++  console.log('🧪 FATOSBR — SUITE DE TESTES UNITÁRIOS: PARSER & RESOLVER POSTGRESQL');
++  console.log('======================================================================\n');
++
++  // 1. URL PostgreSQL válida padrão
++  console.log('--- 1. URL PostgreSQL Válida Padrão ---');
++  const valid1 = parseDatabaseUrl('postgresql://postgres:secret123@db.zopbitgtexefmqfvwgzj.supabase.co:5432/postgres');
++  assert.strictEqual(valid1.host, 'db.zopbitgtexefmqfvwgzj.supabase.co');
++  assert.strictEqual(valid1.port, 5432);
++  assert.strictEqual(valid1.user, 'postgres');
++  assert.strictEqual(valid1.password, 'secret123');
++  assert.strictEqual(valid1.database, 'postgres');
++  console.log('  ✅ [PASS] URL padrão decomposta com sucesso');
++
++  // 2. URL com parâmetros SSL (?sslmode=require)
++  console.log('\n--- 2. URL com Parâmetros SSL (?sslmode=require) ---');
++  const validSsl = parseDatabaseUrl('postgresql://postgres.zopbitgtexefmqfvwgzj:Pass123@aws-0-sa-east-1.pooler.supabase.com:6543/postgres?sslmode=require');
++  assert.strictEqual(validSsl.host, 'aws-0-sa-east-1.pooler.supabase.com');
++  assert.strictEqual(validSsl.port, 6543);
++  assert.strictEqual(validSsl.user, 'postgres.zopbitgtexefmqfvwgzj');
++  assert.strictEqual(validSsl.password, 'Pass123');
++  assert.strictEqual(validSsl.database, 'postgres');
++  console.log('  ✅ [PASS] Parâmetro sslmode=require isolado sem corromper o nome do banco');
++
++  // 3. URL com múltiplos parâmetros (?sslmode=require&supa=base-pooler.x)
++  console.log('\n--- 3. URL com Múltiplos Parâmetros (?sslmode=require&supa=base-pooler.x) ---');
++  const multiParams = parseDatabaseUrl('postgresql://postgres.zopbitgtexefmqfvwgzj:Pass123@aws-0-sa-east-1.pooler.supabase.com:6543/postgres?sslmode=require&supa=base-pooler.x');
++  assert.strictEqual(multiParams.database, 'postgres', `Esperado "postgres", recebido "${multiParams.database}"`);
++  assert.strictEqual(multiParams.port, 6543);
++  assert.strictEqual(multiParams.user, 'postgres.zopbitgtexefmqfvwgzj');
++  console.log('  ✅ [PASS] Múltiplos parâmetros de query mantidos fora do nome do banco');
++
++  // 4. Teste de Regressão Específico: "postgres&supa=base-pooler.x"
++  console.log('\n--- 4. TESTE DE REGRESSÃO: Prevenção do erro "postgres&supa=base-pooler.x" ---');
++  // Se a URL contiver parâmetros malformados colados diretamente ao path
++  const corruptedPathUrl = 'postgresql://postgres.zopbitgtexefmqfvwgzj:Pass123@aws-0-sa-east-1.pooler.supabase.com:6543/postgres&supa=base-pooler.x';
++  const regressionResult = parseDatabaseUrl(corruptedPathUrl);
++  assert.strictEqual(regressionResult.database, 'postgres', 'O parser deve isolar "postgres" e nunca retornar "postgres&supa=base-pooler.x"');
++  assert(!regressionResult.database.includes('&'), 'Nome do banco não pode conter caractere "&"');
++  assert(!regressionResult.database.includes('='), 'Nome do banco não pode conter caractere "="');
++  console.log('  ✅ [PASS] Regressão validada: banco extraído rigorosamente como "postgres"');
++
++  // 5. Senha com caracteres percent-encoded (@, #, :, /, etc.)
++  console.log('\n--- 5. Senha com Caracteres Especiais Percent-Encoded ---');
++  const encodedPassUrl = 'postgresql://postgres.zopbitgtexefmqfvwgzj:MyP%40ssw%23rd%21@db.zopbitgtexefmqfvwgzj.supabase.co:5432/postgres';
++  const encodedResult = parseDatabaseUrl(encodedPassUrl);
++  assert.strictEqual(encodedResult.password, 'MyP@ssw#rd!');
++  console.log('  ✅ [PASS] Senha decodificada com integridade ("MyP@ssw#rd!")');
++
++  // 6. Protocolo "postgres:" vs "postgresql:"
++  console.log('\n--- 6. Suporte aos Esquemas "postgres:" e "postgresql:" ---');
++  const schemaPg = parseDatabaseUrl('postgres://user:pass@host.supabase.co:5432/my_db');
++  assert.strictEqual(schemaPg.database, 'my_db');
++  assert.strictEqual(schemaPg.host, 'host.supabase.co');
++  console.log('  ✅ [PASS] Ambos os esquemas postgres: e postgresql: suportados');
++
++  // 7. Rejeição de URLs Malformadas / Protocolos Inválidos
++  console.log('\n--- 7. Falha Fechada para URLs Malformadas ---');
++  assert.throws(() => parseDatabaseUrl('http://invalido.com/postgres'), /INVALID_PROTOCOL/);
++  assert.throws(() => parseDatabaseUrl('mysql://root:pass@localhost:3306/db'), /INVALID_PROTOCOL/);
++  assert.throws(() => parseDatabaseUrl(''), /EMPTY_URL/);
++  console.log('  ✅ [PASS] Protocolos inválidos ou URLs vazias rejeitados com falha fechada');
++
++  // 8. Rejeição de Hostname Inválido
++  console.log('\n--- 8. Rejeição de Hostname Inválido ---');
++  assert.throws(() => parseDatabaseUrl('postgresql://user:pass@localhost space:5432/db'), /INVALID_HOST/);
++  assert.throws(() => parseDatabaseUrl('postgresql://user:pass@invalid/db'), /INVALID_HOST/);
++  console.log('  ✅ [PASS] Hostnames inválidos rejeitados com erro explícito');
++
++  // 9. Rejeição de Porta Inválida
++  console.log('\n--- 9. Rejeição de Porta Inválida ---');
++  assert.throws(() => parseDatabaseUrl('postgresql://user:pass@db.supabase.co:99999/db'), /INVALID_PORT/);
++  assert.throws(() => parseDatabaseUrl('postgresql://user:pass@db.supabase.co:0/db'), /INVALID_PORT/);
++  assert.throws(() => parseDatabaseUrl('postgresql://user:pass@db.supabase.co:abc/db'), /INVALID_PORT/);
++  console.log('  ✅ [PASS] Portas fora do intervalo 1-65535 rejeitadas com erro explícito');
++
++  // 10. Priorização Absoluta de SUPABASE_DATABASE_URL
++  console.log('\n--- 10. Priorização Absoluta de SUPABASE_DATABASE_URL ---');
++  const originalEnv = { ...process.env };
++  try {
++    process.env.POSTGRES_URL = 'postgresql://default:pass@ep-other-neon.us-east-1.aws.neon.tech:5432/verceldb';
++    process.env.DATABASE_URL = 'postgresql://default:pass@ep-other-neon.us-east-1.aws.neon.tech:5432/verceldb';
++    process.env.SUPABASE_DATABASE_URL = 'postgresql://postgres.zopbitgtexefmqfvwgzj:RealSecret@aws-0-sa-east-1.pooler.supabase.com:6543/postgres?sslmode=require&supa=base-pooler.x';
++
++    const resolved = resolveCanonicalDbConfig();
++    assert(resolved !== null, 'Configuração canônica deve ser resolvida');
++    assert.strictEqual(resolved.sourceVariable, 'SUPABASE_DATABASE_URL', 'SUPABASE_DATABASE_URL deve ter prioridade máxima absoluta');
++    assert.strictEqual(resolved.host, 'aws-0-sa-east-1.pooler.supabase.com');
++    assert.strictEqual(resolved.port, 6543);
++    assert.strictEqual(resolved.database, 'postgres');
++    assert.strictEqual(resolved.isCanonicalProject, true);
++    assert.strictEqual(resolved.connectionType, 'pooler_supabase');
++
++    const diag = getDatabaseDiagnosticInfo();
++    assert.strictEqual(diag.selectedVariable, 'SUPABASE_DATABASE_URL');
++    assert.strictEqual(diag.database, 'postgres');
++    assert.strictEqual(diag.host, 'aws-0-sa-east-1.pooler.supabase.com');
++  } finally {
++    process.env = originalEnv;
++  }
++  console.log('  ✅ [PASS] SUPABASE_DATABASE_URL priorizada com sucesso sobre variáveis de terceiros');
++
++  console.log('\n======================================================================');
++  console.log('🎉 TODOS OS 10 TESTES UNITÁRIOS DO RESOLVER PASSARAM COM SUCESSO!');
++  console.log('======================================================================\n');
++}
++
++runResolverTests();
+diff --git a/tests/postgres-real-integration.ts b/tests/postgres-real-integration.ts
+index 24ed5e5..c114032 100644
+--- a/tests/postgres-real-integration.ts
++++ b/tests/postgres-real-integration.ts
+@@ -63,16 +63,12 @@ async function runRealPostgresIntegrationSuite() {
+     return { executed: false, passed: 0, failed: 0, reason: 'NO_DATABASE_URL' };
+   }
+ 
+-  const cleanUrl = connectionString
+-    .replace(/[?&]sslmode=[^&]+/g, '')
+-    .replace(/[?&]ssl=[^&]+/g, '')
+-    .replace(/\?$/, '');
+-
+-  const parsedUrl = new URL(cleanUrl.startsWith('postgres') ? cleanUrl : `postgresql://${cleanUrl}`);
++  const { parseDatabaseUrl } = await import('../api/_lib/postgres.js');
++  const parsed = parseDatabaseUrl(connectionString);
+   const isCloudHost =
+-    parsedUrl.hostname.includes('supabase.co') ||
+-    parsedUrl.hostname.includes('supabase.com') ||
+-    parsedUrl.hostname.includes('pooler.supabase.com') ||
++    parsed.host.includes('supabase.co') ||
++    parsed.host.includes('supabase.com') ||
++    parsed.host.includes('pooler.supabase.com') ||
+     connectionString.includes('sslmode=');
+ 
+   let caCert = process.env.SUPABASE_DB_CA;
+@@ -85,18 +81,18 @@ async function runRealPostgresIntegrationSuite() {
+   }
+ 
+   const clientConfig: any = {
+-    host: parsedUrl.hostname,
+-    port: parsedUrl.port ? parseInt(parsedUrl.port, 10) : 5432,
+-    user: parsedUrl.username ? decodeURIComponent(parsedUrl.username) : undefined,
+-    password: parsedUrl.password ? decodeURIComponent(parsedUrl.password) : undefined,
+-    database: parsedUrl.pathname ? parsedUrl.pathname.replace(/^\//, '') : 'postgres'
++    host: parsed.host,
++    port: parsed.port,
++    user: parsed.user,
++    password: parsed.password,
++    database: parsed.database
+   };
+ 
+   if (isCloudHost) {
+     clientConfig.ssl = {
+       ca: caCert,
+       rejectUnauthorized: true,
+-      servername: parsedUrl.hostname
++      servername: parsed.host
+     };
+   }
+ 
+-- 
+2.34.1
+

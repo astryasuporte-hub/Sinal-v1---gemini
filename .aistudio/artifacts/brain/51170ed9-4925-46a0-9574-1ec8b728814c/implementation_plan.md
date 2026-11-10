@@ -83,4 +83,19 @@
 | `bun run build` | Build do Vite para produção (2752 módulos) | ✅ Concluído em 2.61s |
 | `compile_applet` & `lint_applet` | Verificação do build system | ✅ Build & Lint Aprovados |
 
+---
+
+## 4. Missão P0 — Backend V1.5: Correção da Conexão PostgreSQL e Prevenção de Contaminação
+
+### 4.1 Causa Raiz do erro `database "postgres&supa=base-pooler.x" does not exist`
+A sanitização ingênua com regex `rawStr.replace(/[?&]sslmode=[^&]+/g, '')` removia o delimitador `?` quando o primeiro parâmetro era `sslmode=require`, transformando o restante da query string em `&supa=base-pooler.x` sem interrogação. O parser nativo da URL considerava isso parte do `pathname`, resultando no nome do banco corrompido `"postgres&supa=base-pooler.x"`.
+
+### 4.2 Soluções Implementadas na V1.5
+1. **Parser Canônico com WHATWG URL Nativo**: Criada função `parseDatabaseUrl(rawStr)` em `api/_lib/postgres.ts` que processa a URL original sem mutações prévias de string.
+2. **Isolamento e Validação Estrita do Banco**: O nome do banco é extraído via `rawPath.split(/[?&#=/]/)[0] || 'postgres'` e validado estritamente por regex `/^[a-zA-Z0-9_-]+$/`.
+3. **Priorização Absoluta de `SUPABASE_DATABASE_URL`**: `SUPABASE_DATABASE_URL` tem precedência incondicional sobre qualquer variável legada ou injetada por integrações de terceiros.
+4. **Proteção de TLS Estrito**: Credenciais desmembradas injetadas no pool `pg` com `ssl: { ca: trustedCa, rejectUnauthorized: true, servername: host }` sem passar `connectionString` ao pool.
+5. **Suíte de Testes Unitários Completa**: Criado `tests/database-url-resolver.test.ts` com 10 testes cobrindo todos os cenários de conexão e regressão.
+
+
 

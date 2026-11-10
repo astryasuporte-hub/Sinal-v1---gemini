@@ -63,16 +63,12 @@ async function runRealPostgresIntegrationSuite() {
     return { executed: false, passed: 0, failed: 0, reason: 'NO_DATABASE_URL' };
   }
 
-  const cleanUrl = connectionString
-    .replace(/[?&]sslmode=[^&]+/g, '')
-    .replace(/[?&]ssl=[^&]+/g, '')
-    .replace(/\?$/, '');
-
-  const parsedUrl = new URL(cleanUrl.startsWith('postgres') ? cleanUrl : `postgresql://${cleanUrl}`);
+  const { parseDatabaseUrl } = await import('../api/_lib/postgres.js');
+  const parsed = parseDatabaseUrl(connectionString);
   const isCloudHost =
-    parsedUrl.hostname.includes('supabase.co') ||
-    parsedUrl.hostname.includes('supabase.com') ||
-    parsedUrl.hostname.includes('pooler.supabase.com') ||
+    parsed.host.includes('supabase.co') ||
+    parsed.host.includes('supabase.com') ||
+    parsed.host.includes('pooler.supabase.com') ||
     connectionString.includes('sslmode=');
 
   let caCert = process.env.SUPABASE_DB_CA;
@@ -85,18 +81,18 @@ async function runRealPostgresIntegrationSuite() {
   }
 
   const clientConfig: any = {
-    host: parsedUrl.hostname,
-    port: parsedUrl.port ? parseInt(parsedUrl.port, 10) : 5432,
-    user: parsedUrl.username ? decodeURIComponent(parsedUrl.username) : undefined,
-    password: parsedUrl.password ? decodeURIComponent(parsedUrl.password) : undefined,
-    database: parsedUrl.pathname ? parsedUrl.pathname.replace(/^\//, '') : 'postgres'
+    host: parsed.host,
+    port: parsed.port,
+    user: parsed.user,
+    password: parsed.password,
+    database: parsed.database
   };
 
   if (isCloudHost) {
     clientConfig.ssl = {
       ca: caCert,
       rejectUnauthorized: true,
-      servername: parsedUrl.hostname
+      servername: parsed.host
     };
   }
 

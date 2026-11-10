@@ -80,7 +80,7 @@ export interface DatabaseDiagnostic {
   caSource: 'environment_variable' | 'official_embedded_bundle' | 'none';
 }
 
-interface ParsedDbConfig {
+export interface ParsedDbConfig {
   host: string;
   port: number;
   user?: string;
@@ -95,45 +95,125 @@ interface ParsedDbConfig {
 }
 
 /**
- * Inspeciona as variáveis de ambiente em ordem prioritária e resolve a conexão canônica.
- * Proteção contra conflitos de variáveis do Vercel Postgres / Neon quando Supabase for o banco alvo.
+ * Parser estrito e seguro de URLs de banco de dados PostgreSQL.
+ * Utiliza a API nativa WHATWG URL para decompor e validar os componentes sem manipulação frágil de strings.
+ * Elimina vazamento de parâmetros de query (ex: &supa=base-pooler.x) para o nome do banco.
  */
-function resolveCanonicalDbConfig(): ParsedDbConfig | null {
+export function parseDatabaseUrl(rawStr: string): {
+  host: string;
+  port: number;
+  user?: string;
+  password?: string;
+  database: string;
+} {
+  const trimmed = rawStr.trim();
+  if (!trimmed) {
+    throw new Error('EMPTY_URL: String de conexão vazia.');
+  }
+
+  let urlStr = trimmed;
+  if (!urlStr.startsWith('postgres://') && !urlStr.startsWith('postgresql://')) {
+    if (urlStr.includes('://')) {
+      throw new Error(`INVALID_PROTOCOL: Protocolo de conexão inválido. Esperado "postgresql:" ou "postgres:".`);
+    }
+    urlStr = 'postgresql://' + urlStr;
+  }
+
+  let url: URL;
+  try {
+    url = new URL(urlStr);
+  } catch {
+    const afterAt = urlStr.includes('@') ? urlStr.split('@')[1] : urlStr;
+    const portMatch = afterAt.match(/:([^/@?#:]+)(\/|$|\?)/);
+    if (portMatch) {
+      const p = parseInt(portMatch[1], 10);
+      if (isNaN(p) || p < 1 || p > 65535) {
+        throw new Error(`INVALID_PORT: Porta "${portMatch[1]}" fora do intervalo válido (1-65535).`);
+      }
+    }
+    throw new Error(`INVALID_HOST: URL ou Hostname inválido na string de conexão PostgreSQL.`);
+  }
+  if (url.protocol !== 'postgres:' && url.protocol !== 'postgresql:') {
+    throw new Error(`INVALID_PROTOCOL: Protocolo "${url.protocol}" inválido. Esperado "postgresql:" ou "postgres:".`);
+  }
+
+  const host = url.hostname.trim();
+  if (!host || host.length < 3 || host.includes(' ') || !host.includes('.')) {
+    throw new Error(`INVALID_HOST: Hostname "${host}" inválido para conexão PostgreSQL.`);
+  }
+
+  const isPooler = host.includes('pooler.supabase.com');
+  const defaultPort = isPooler ? 6543 : 5432;
+  let port = url.port ? parseInt(url.port, 10) : defaultPort;
+  if (isNaN(port) || port < 1 || port > 65535) {
+    throw new Error(`INVALID_PORT: Porta "${url.port}" fora do intervalo válido (1-65535).`);
+  }
+
+  const user = url.username ? decodeURIComponent(url.username) : undefined;
+  const password = url.password ? decodeURIComponent(url.password) : undefined;
+
+  // Extração estrita e limpa do nome do banco de dados a partir do pathname
+  const rawPath = decodeURIComponent(url.pathname).replace(/^\/+/, '').trim();
+  // Se a URL contiver parâmetros malformados sem '?' (ex: /postgres&supa=...), isola antes de qualquer delimitador
+  let database = rawPath.split(/[?&#=/]/)[0] || 'postgres';
+
+  if (!database || !/^[a-zA-Z0-9_-]+$/.test(database)) {
+    throw new Error(`INVALID_DATABASE: Nome de banco de dados inválido ou corrompido: "${database}". O nome padrão da Supabase é "postgres".`);
+  }
+
+  return { host, port, user, password, database };
+}
+
+/**
+ * Inspeciona as variáveis de ambiente em ordem prioritária canônica e resolve a conexão oficial.
+ * SUPABASE_DATABASE_URL possui prioridade máxima e explícita quando configurada.
+ */
+export function resolveCanonicalDbConfig(): ParsedDbConfig | null {
   const candidateVars = [
     'SUPABASE_DATABASE_URL',
+    'SUPABASE_DB_URL',
     'DATABASE_URL',
     'POSTGRES_URL',
     'POSTGRES_PRISMA_URL',
-    'POSTGRES_URL_NON_POOLING',
-    'SUPABASE_DB_URL'
+    'POSTGRES_URL_NON_POOLING'
   ];
 
   let chosenVar: string | null = null;
   let rawStr: string = '';
 
-  // 1. Prioriza explicitamente variáveis que apontem para o projeto canônico zopbitgtexefmqfvwgzj
-  for (const v of candidateVars) {
-    const val = process.env[v]?.trim();
-    if (val && val.includes(CANONICAL_SUPABASE_PROJECT_ID)) {
-      chosenVar = v;
-      rawStr = val;
-      break;
-    }
-  }
-
-  // 2. Se nenhuma apontar explicitamente para o Project ID, segue a ordem canônica padrão
-  if (!rawStr) {
+  // 1. SUPABASE_DATABASE_URL possui prioridade absoluta e inequívoca
+  if (process.env.SUPABASE_DATABASE_URL?.trim()) {
+    chosenVar = 'SUPABASE_DATABASE_URL';
+    rawStr = process.env.SUPABASE_DATABASE_URL.trim();
+  } else if (process.env.SUPABASE_DB_URL?.trim()) {
+    chosenVar = 'SUPABASE_DB_URL';
+    rawStr = process.env.SUPABASE_DB_URL.trim();
+  } else {
+    // 2. Se nenhuma variável dedicada Supabase estiver definida,
+    // verifica se alguma outra aponta para o projeto canônico zopbitgtexefmqfvwgzj
     for (const v of candidateVars) {
       const val = process.env[v]?.trim();
-      if (val) {
+      if (val && val.includes(CANONICAL_SUPABASE_PROJECT_ID)) {
         chosenVar = v;
         rawStr = val;
         break;
       }
     }
+
+    // 3. Se nenhuma apontar explicitamente para o Project ID, segue a ordem padrão
+    if (!rawStr) {
+      for (const v of candidateVars) {
+        const val = process.env[v]?.trim();
+        if (val) {
+          chosenVar = v;
+          rawStr = val;
+          break;
+        }
+      }
+    }
   }
 
-  // 3. Fallback para variáveis individuais desmembradas (POSTGRES_HOST, etc.)
+  // 4. Fallback para variáveis individuais desmembradas (POSTGRES_HOST, etc.)
   if (!rawStr && process.env.POSTGRES_HOST) {
     chosenVar = 'POSTGRES_HOST';
     const host = process.env.POSTGRES_HOST.trim();
@@ -142,7 +222,7 @@ function resolveCanonicalDbConfig(): ParsedDbConfig | null {
     const password = process.env.POSTGRES_PASSWORD?.trim();
     const database = process.env.POSTGRES_DATABASE?.trim() || 'postgres';
     const isCloudHost = host.includes('supabase.co') || host.includes('supabase.com') || host.includes('pooler.supabase.com');
-    const isCanonical = host.includes(CANONICAL_SUPABASE_PROJECT_ID);
+    const isCanonical = host.includes(CANONICAL_SUPABASE_PROJECT_ID) || user.includes(CANONICAL_SUPABASE_PROJECT_ID);
     const trustedCa = process.env.SUPABASE_DB_CA?.trim() || SUPABASE_OFFICIAL_CA_BUNDLE;
 
     return {
@@ -164,67 +244,48 @@ function resolveCanonicalDbConfig(): ParsedDbConfig | null {
     return null;
   }
 
-  // 4. Sanitiza a connection string removendo parâmetros conflitantes como ?sslmode=...
-  // Causa Raiz Descoberta: o driver pg/lib/connection-parameters sobrescreve config.ssl com {}
-  // quando connectionString possui ?sslmode=require, destruindo a CA embutida e causando
-  // o erro "self-signed certificate in certificate chain".
-  const cleanUrl = rawStr
-    .replace(/[?&]sslmode=[^&]+/g, '')
-    .replace(/[?&]ssl=[^&]+/g, '')
-    .replace(/\?$/, '');
-
-  let host = 'localhost';
-  let port = 5432;
-  let user: string | undefined = undefined;
-  let password: string | undefined = undefined;
-  let database = 'postgres';
-
   try {
-    const url = new URL(cleanUrl.startsWith('postgres') ? cleanUrl : `postgresql://${cleanUrl}`);
-    host = url.hostname;
-    port = url.port ? parseInt(url.port, 10) : (host.includes('pooler.supabase.com') && url.port === '6543' ? 6543 : 5432);
-    user = url.username ? decodeURIComponent(url.username) : undefined;
-    password = url.password ? decodeURIComponent(url.password) : undefined;
-    database = url.pathname ? url.pathname.replace(/^\//, '') : 'postgres';
+    const parsed = parseDatabaseUrl(rawStr);
+    const isCloudHost =
+      parsed.host.includes('supabase.co') ||
+      parsed.host.includes('supabase.com') ||
+      parsed.host.includes('pooler.supabase.com') ||
+      parsed.host.includes('neon.tech') ||
+      parsed.host.includes('postgres.vercel-storage.com') ||
+      rawStr.includes('sslmode=');
+
+    const isCanonical =
+      parsed.host.includes(CANONICAL_SUPABASE_PROJECT_ID) ||
+      (parsed.user ? parsed.user.includes(CANONICAL_SUPABASE_PROJECT_ID) : false);
+
+    let connectionType: DatabaseDiagnostic['connectionType'] = 'local';
+    if (parsed.host.includes('pooler.supabase.com')) {
+      connectionType = 'pooler_supabase';
+    } else if (parsed.host.includes('supabase.co') || parsed.host.includes('supabase.com')) {
+      connectionType = 'direct_supabase';
+    } else if (isCloudHost) {
+      connectionType = 'external_cloud';
+    }
+
+    const trustedCa = process.env.SUPABASE_DB_CA?.trim() || SUPABASE_OFFICIAL_CA_BUNDLE;
+
+    return {
+      host: parsed.host,
+      port: parsed.port,
+      user: parsed.user,
+      password: parsed.password,
+      database: parsed.database,
+      sourceVariable: chosenVar,
+      isCloudHost,
+      isCanonicalProject: isCanonical,
+      connectionType,
+      trustedCa,
+      caSource: process.env.SUPABASE_DB_CA ? 'environment_variable' : 'official_embedded_bundle'
+    };
   } catch (err: any) {
-    console.error('[Postgres Config Resolver] Erro ao analisar URL limpa:', err?.message);
+    console.error(`[Postgres Config Resolver] Erro ao analisar variável ${chosenVar}:`, err?.message);
     return null;
   }
-
-  const isCloudHost =
-    host.includes('supabase.co') ||
-    host.includes('supabase.com') ||
-    host.includes('pooler.supabase.com') ||
-    host.includes('neon.tech') ||
-    host.includes('postgres.vercel-storage.com') ||
-    rawStr.includes('sslmode=');
-
-  const isCanonical = host.includes(CANONICAL_SUPABASE_PROJECT_ID) || (user ? user.includes(CANONICAL_SUPABASE_PROJECT_ID) : false);
-
-  let connectionType: DatabaseDiagnostic['connectionType'] = 'local';
-  if (host.includes('pooler.supabase.com')) {
-    connectionType = 'pooler_supabase';
-  } else if (host.includes('supabase.co') || host.includes('supabase.com')) {
-    connectionType = 'direct_supabase';
-  } else if (isCloudHost) {
-    connectionType = 'external_cloud';
-  }
-
-  const trustedCa = process.env.SUPABASE_DB_CA?.trim() || SUPABASE_OFFICIAL_CA_BUNDLE;
-
-  return {
-    host,
-    port,
-    user,
-    password,
-    database,
-    sourceVariable: chosenVar,
-    isCloudHost,
-    isCanonicalProject: isCanonical,
-    connectionType,
-    trustedCa,
-    caSource: process.env.SUPABASE_DB_CA ? 'environment_variable' : 'official_embedded_bundle'
-  };
 }
 
 /**
