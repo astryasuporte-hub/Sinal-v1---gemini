@@ -8,9 +8,12 @@
 -- Características Arquiteturais de Produção:
 -- 1. Schema isolado 'internal' e tabela 'internal.rate_limit_counters'.
 -- 2. Row Level Security (RLS) habilitada com bloqueio universal de anon/authenticated.
--- 3. Função 'public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT)' com SECURITY INVOKER.
--- 4. Modelo de Menor Privilégio via DCL: EXECUTE restrito a service_role e postgres.
--- 5. Atomicidade e idempotência testadas e aprovadas em produção.
+-- 3. Função 'public.check_and_increment_rate_limit(p_key text, p_max_requests integer, p_window_ms bigint)' com SECURITY INVOKER.
+-- 4. search_path = pg_catalog, pg_temp estrito prevenindo search-path hijacking.
+-- 5. Validação defensiva rigorosa com SQLSTATE 22023 (1..512 chars, 1..1M reqs, 1..86.4M ms).
+-- 6. Sem limpeza probabilística durante chamadas para evitar deadlocks/latência.
+-- 7. Modelo de Menor Privilégio via DCL: EXECUTE restrito a service_role e postgres.
+-- 8. Atomicidade e idempotência testadas e aprovadas em produção.
 -- ==============================================================================
 
 -- 1. Schema internal
@@ -49,7 +52,7 @@ CREATE OR REPLACE FUNCTION public.check_and_increment_rate_limit(
 RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY INVOKER
-SET search_path = internal, public, pg_temp
+SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
   v_now TIMESTAMPTZ := clock_timestamp();
@@ -59,43 +62,38 @@ DECLARE
   v_allowed BOOLEAN;
   v_retry_after INTEGER := 0;
 BEGIN
-  -- 1. Validação defensiva de parâmetros
-  IF p_key IS NULL OR length(trim(p_key)) = 0 THEN
-    RAISE EXCEPTION 'RATE_LIMIT_INVALID_PARAM: p_key não pode ser vazio ou nulo.' 
+  -- 1. Validação defensiva rigorosa de parâmetros (Fail-Closed com SQLSTATE 22023)
+  IF p_key IS NULL OR length(trim(p_key)) < 1 OR length(trim(p_key)) > 512 THEN
+    RAISE EXCEPTION 'RATE_LIMIT_INVALID_PARAM: p_key deve ter entre 1 e 512 caracteres.' 
       USING ERRCODE = '22023';
   END IF;
-  IF p_max_requests <= 0 THEN
-    RAISE EXCEPTION 'RATE_LIMIT_INVALID_PARAM: p_max_requests deve ser positivo (> 0).' 
+  IF p_max_requests IS NULL OR p_max_requests < 1 OR p_max_requests > 1000000 THEN
+    RAISE EXCEPTION 'RATE_LIMIT_INVALID_PARAM: p_max_requests deve estar entre 1 e 1.000.000.' 
       USING ERRCODE = '22023';
   END IF;
-  IF p_window_ms <= 0 THEN
-    RAISE EXCEPTION 'RATE_LIMIT_INVALID_PARAM: p_window_ms deve ser positivo (> 0).' 
+  IF p_window_ms IS NULL OR p_window_ms < 1 OR p_window_ms > 86400000 THEN
+    RAISE EXCEPTION 'RATE_LIMIT_INVALID_PARAM: p_window_ms deve estar entre 1 e 86.400.000 (1 dia).' 
       USING ERRCODE = '22023';
   END IF;
 
-  -- 2. Limpeza oportunista probabilística (1% das requisições) de contadores com mais de 1 hora
-  IF random() < 0.01 THEN
-    DELETE FROM internal.rate_limit_counters 
-    WHERE window_start < (v_now - INTERVAL '1 hour');
-  END IF;
-
-  -- 3. Operação Atômica UPSERT com cálculo de expiração da janela (protege contra race condition)
+  -- 2. Operação Atômica UPSERT com cálculo de expiração da janela (protege contra race condition)
+  -- Nota de Produção: Sem limpeza probabilística durante chamadas de alta taxa para evitar contenção de locks.
   INSERT INTO internal.rate_limit_counters (key, tokens, window_start, updated_at)
   VALUES (p_key, 1, v_now, v_now)
   ON CONFLICT (key) DO UPDATE
   SET 
     tokens = CASE 
-      WHEN EXTRACT(EPOCH FROM (v_now - rate_limit_counters.window_start)) * 1000 >= p_window_ms THEN 1
-      ELSE rate_limit_counters.tokens + 1
+      WHEN EXTRACT(EPOCH FROM (v_now - internal.rate_limit_counters.window_start)) * 1000 >= p_window_ms THEN 1
+      ELSE internal.rate_limit_counters.tokens + 1
     END,
     window_start = CASE 
-      WHEN EXTRACT(EPOCH FROM (v_now - rate_limit_counters.window_start)) * 1000 >= p_window_ms THEN v_now
-      ELSE rate_limit_counters.window_start
+      WHEN EXTRACT(EPOCH FROM (v_now - internal.rate_limit_counters.window_start)) * 1000 >= p_window_ms THEN v_now
+      ELSE internal.rate_limit_counters.window_start
     END,
     updated_at = v_now
   RETURNING tokens, window_start INTO v_tokens, v_window_start;
 
-  -- 4. Cálculo de tempo decorrido e bloqueio
+  -- 3. Cálculo de tempo decorrido e bloqueio
   v_elapsed_ms := ROUND(EXTRACT(EPOCH FROM (v_now - v_window_start)) * 1000);
 
   IF v_tokens > p_max_requests THEN
@@ -109,7 +107,7 @@ BEGIN
     v_retry_after := 0;
   END IF;
 
-  -- 5. Retorno JSONB no contrato esperado pelo SaaS FatosBR
+  -- 4. Retorno JSONB no contrato esperado pelo SaaS FatosBR
   RETURN jsonb_build_object(
     'allowed', v_allowed,
     'current', v_tokens,
@@ -122,7 +120,7 @@ $$;
 
 -- 6. Comentário Canônico
 COMMENT ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) IS 
-  'FatosBR: Rate Limiter atômico distribuído com SECURITY INVOKER e menor privilégio (Migração 20261110225054).';
+  'FatosBR: Rate Limiter atômico distribuído com SECURITY INVOKER e menor privilégio (Migração Canônica Oficial 20261110225054).';
 
 -- 7. Modelo de Menor Privilégio Rigoroso (DCL)
 REVOKE ALL ON FUNCTION public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT) FROM PUBLIC;

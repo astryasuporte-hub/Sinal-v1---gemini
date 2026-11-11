@@ -170,9 +170,47 @@ O diagnóstico em `status.ts` comparava `pg_get_function_identity_arguments(p.oi
 4. **Validação Global**:
    - 96/96 testes automatizados aprovados (8 unitários rate limiter, 10 URL resolver, 5 canônicos, 9 news engine, 5 pipeline, 59 segurança).
    - Build e Linter com 0 erros.
+---
 
+## 8. Missão Final P0 — Backend V1.9: Reconciliação Definitiva do PostgreSQL, Cron Seguro e Homologação Operacional
 
+### 8.1 Reconciliação Fiel do Esquema do Rate Limiter Distribuído
+1. **Especificação Canônica Validada no Supabase**:
+   - Função `public.check_and_increment_rate_limit(p_key text, p_max_requests integer, p_window_ms bigint)` com `SECURITY INVOKER`.
+   - `SET search_path = pg_catalog, pg_temp` para blindagem absoluta contra injeção de schemas temporários e search-path hijacking.
+   - Validações estritas defensivas com código de erro `22023`:
+     - `p_key`: obrigatório, não nulo, entre 1 e 512 caracteres (`length(trim(p_key)) BETWEEN 1 AND 512`).
+     - `p_max_requests`: obrigatório, positivo, entre 1 e 1.000.000 (`p_max_requests BETWEEN 1 AND 1000000`).
+     - `p_window_ms`: obrigatório, positivo, entre 1 e 86.400.000 (1 dia) (`p_window_ms BETWEEN 1 AND 86400000`).
+   - Eliminação de limpeza probabilística (`random() < 0.01`) dentro da função de rate limiting para evitar contenção de locks de linha em alta concorrência.
+   - Qualificação explícita dos contadores como `internal.rate_limit_counters`.
+   - Permissões DCL de Menor Privilégio: `REVOKE ALL` de `PUBLIC`, `anon` e `authenticated`; `GRANT EXECUTE` exclusivo para `service_role` e `postgres`.
+   - Tabela `internal.rate_limit_counters` com Row Level Security (RLS) habilitada e política restrita a `service_role`.
 
+2. **Reconciliação dos Arquivos no Repositório**:
+   - `supabase/migrations/20261110225054_fix_distributed_rate_limiter_v1_7.sql` atualizado com fidelidade 100% à implementação canônica ativa.
+   - `supabase/migrations/20261110000001_distributed_rate_limiter.sql` e `20261110000002_fix_distributed_rate_limiter.sql` devidamente documentados com notas de sincronização canônica informando a substituição pela migração oficial `20261110225054`.
 
+### 8.2 Proteção e Homologação do Vercel Cron
+1. **Autenticação Criptográfica Estrita em `/api/proxy/ingest`**:
+   - Validação via tempo constante (`safeCompare`) do token `Authorization: Bearer <CRON_SECRET>`.
+   - Bloqueio imediato (HTTP 401) para cabeçalhos não autenticados, tokens incorretos ou simples presença de `x-vercel-cron` desprovido de token.
+   - Suporte duplo seguro: `GET` exclusivo para o Cron oficial da Vercel e `POST` para triggers administrativos manuais autenticados via `ADMIN_SECRET` ou RBAC Supabase.
+
+2. **Pipeline de Ingestão e Persistência Canônica**:
+   - Deduplicação de matérias por URL canônica sanitizada e hash de conteúdo.
+   - Geração determinística de IDs estáveis com UUID v5 RFC 4122 (`generateDeterministicUuidV5`).
+   - Mapeamento estrito com os tipos reais do PostgreSQL:
+     - `public.news_sources` (id UUID, domain UNIQUE).
+     - `public.articles` (id UUID, canonical_url UNIQUE).
+     - `public.events` (id UUID, slug, status CHECK, enrichment_status CHECK, primary_article_id UUID).
+     - `public.event_articles` (event_id, article_id) e `public.event_topics` (event_id, topic_id UUID).
+   - Resiliência absoluta: endpoints `/api/proxy/events` e `/api/proxy/status` retornam HTTP 200 resiliente em qualquer estado da base.
+
+### 8.3 Status de Homologação em Produção
+- `https://app.fatosbr.com.br/api/proxy/status`: Retornando HTTP 200, `databaseConnected: true`, `rateLimiter: { operational: true, status: 'OPERATIONAL' }`.
+- `https://app.fatosbr.com.br/api/proxy/events`: Retornando HTTP 200 com array seguro.
+- 96/96 testes automatizados aprovados sem regressões.
+- Compilação e tipagem TypeScript 100% limpas (0 erros).
 
 

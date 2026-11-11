@@ -1,10 +1,10 @@
 -- ==============================================================================
 -- FATOSBR — MIGRAÇÃO VERSIONADA HISTÓRICA 20261110000001
--- (SUBSTITUÍDA PELA CANÔNICA REAL APLICADA 20261110225054_fix_distributed_rate_limiter_v1_7)
+-- (SUBSTITUÍDA FORMALMENTE PELA CANÔNICA REAL APLICADA 20261110225054_fix_distributed_rate_limiter_v1_7)
 -- ==============================================================================
--- NOTA DE SINCRONIZAÇÃO V1.8:
--- A versão canônica em produção no Supabase é a '20261110225054_fix_distributed_rate_limiter_v1_7'.
--- Esta migração foi reconciliada para preservar SECURITY INVOKER e evitar divergências de catálogo.
+-- NOTA DE SINCRONIZAÇÃO V1.9:
+-- A versão canônica oficial e ativa em produção no Supabase é a '20261110225054_fix_distributed_rate_limiter_v1_7'.
+-- Esta migração histórica inicial foi formalmente substituída e preservada apenas para rastreabilidade de histórico.
 -- ==============================================================================
 
 -- 1. Schema internal

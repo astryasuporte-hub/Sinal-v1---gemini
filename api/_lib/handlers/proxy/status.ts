@@ -193,7 +193,7 @@ export default async function handler(req: any, res: any) {
       databaseEventsCount,
       databaseArticlesCount,
       databaseSourcesCount,
-      pipeline: 'FatosBR News Engine V1.8 (Canonical Schema + Distributed Rate Limiting + Strict TLS + Ingestion Engine)',
+      pipeline: 'FatosBR News Engine V1.9 (Canonical Schema + Distributed Rate Limiting + Strict TLS + Ingestion Engine)',
       databaseHost: dbDiagnostic?.host || null,
       databaseName: dbDiagnostic?.database || null,
       databaseCanonical: dbDiagnostic?.isCanonicalProject || false,

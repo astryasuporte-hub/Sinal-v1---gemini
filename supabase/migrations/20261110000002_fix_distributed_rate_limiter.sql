@@ -1,17 +1,10 @@
 -- ==============================================================================
--- FATOSBR — MIGRAÇÃO VERSIONADA 20261110000002
--- CORREÇÃO DEFINITIVA DO RATE LIMITER DISTRIBUÍDO E MODELO DE SEGURANÇA (V1.7)
+-- FATOSBR — MIGRAÇÃO VERSIONADA HISTÓRICA 20261110000002
+-- (SUBSTITUÍDA PELA CANÔNICA REAL OFICIAL APLICADA 20261110225054_fix_distributed_rate_limiter_v1_7)
 -- ==============================================================================
--- Entregável 1: Migração SQL para aplicação assistida pelo DBA / ChatGPT no Supabase
--- Projeto Supabase: zopbitgtexefmqfvwgzj
---
--- Objetivos da Migração:
--- 1. Assegurar a existência do schema 'internal' e da tabela 'internal.rate_limit_counters'.
--- 2. Provisionar índices otimizados para concorrência de alta taxa.
--- 3. Criar a função canônica 'public.check_and_increment_rate_limit(TEXT, INTEGER, BIGINT)'.
--- 4. Estabelecer o Modelo de Menor Privilégio rigoroso via DCL (REVOKE de PUBLIC/anon/authenticated).
--- 5. Eliminar checagens frágeis de 'current_user' em função SECURITY DEFINER.
--- 6. Garantir retorno compatível com o contrato JSONB do SaaS FatosBR.
+-- NOTA DE SINCRONIZAÇÃO V1.9:
+-- A versão canônica oficial e ativa no Supabase é '20261110225054_fix_distributed_rate_limiter_v1_7'.
+-- Esta migração serviu de rascunho preparatório intermediário na rodada V1.7.
 -- ==============================================================================
 
 -- ETAPA 1: Garantir Schema de Armazenamento Isolado
