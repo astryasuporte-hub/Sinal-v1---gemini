@@ -43,7 +43,11 @@ CREATE INDEX IF NOT EXISTS idx_rate_limit_counters_window_start
 CREATE INDEX IF NOT EXISTS idx_rate_limit_counters_updated_at 
   ON internal.rate_limit_counters (updated_at);
 
--- 5. Função Canônica Principal de Rate Limiting (SECURITY INVOKER)
+-- 5. Eliminação de Overloads Legados Potencialmente Inseguros ou Ambíguos
+DROP FUNCTION IF EXISTS public.check_and_increment_rate_limit(TEXT, INTEGER, INTEGER);
+DROP FUNCTION IF EXISTS public.check_and_increment_rate_limit(TEXT, BIGINT, BIGINT);
+
+-- 6. Função Canônica Principal de Rate Limiting (SECURITY INVOKER)
 CREATE OR REPLACE FUNCTION public.check_and_increment_rate_limit(
   p_key TEXT,
   p_max_requests INTEGER,

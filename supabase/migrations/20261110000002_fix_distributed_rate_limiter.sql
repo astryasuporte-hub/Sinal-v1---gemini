@@ -35,7 +35,7 @@ CREATE OR REPLACE FUNCTION public.check_and_increment_rate_limit(
 RETURNS JSONB
 LANGUAGE plpgsql
 SECURITY INVOKER
-SET search_path = internal, public, pg_temp
+SET search_path = pg_catalog, pg_temp
 AS $$
 DECLARE
   v_now TIMESTAMPTZ := clock_timestamp();
@@ -59,26 +59,18 @@ BEGIN
       USING ERRCODE = '22023';
   END IF;
 
-  -- 2. Limpeza oportunista probabilística (1% das requisições) de contadores expirados há mais de 1 hora
-  -- Mantém a tabela leve sem necessidade de cron dedicado de limpeza
-  IF random() < 0.01 THEN
-    DELETE FROM internal.rate_limit_counters 
-    WHERE window_start < (v_now - INTERVAL '1 hour');
-  END IF;
-
-  -- 3. Operação Atômica UPSERT com cálculo de expiração da janela temporal
-  -- Proteção intrínseca contra condições de corrida entre instâncias serverless Vercel
+  -- 2. Operação Atômica UPSERT com cálculo de expiração da janela temporal
   INSERT INTO internal.rate_limit_counters (key, tokens, window_start, updated_at)
   VALUES (p_key, 1, v_now, v_now)
   ON CONFLICT (key) DO UPDATE
   SET 
     tokens = CASE 
-      WHEN EXTRACT(EPOCH FROM (v_now - rate_limit_counters.window_start)) * 1000 >= p_window_ms THEN 1
-      ELSE rate_limit_counters.tokens + 1
+      WHEN EXTRACT(EPOCH FROM (v_now - internal.rate_limit_counters.window_start)) * 1000 >= p_window_ms THEN 1
+      ELSE internal.rate_limit_counters.tokens + 1
     END,
     window_start = CASE 
-      WHEN EXTRACT(EPOCH FROM (v_now - rate_limit_counters.window_start)) * 1000 >= p_window_ms THEN v_now
-      ELSE rate_limit_counters.window_start
+      WHEN EXTRACT(EPOCH FROM (v_now - internal.rate_limit_counters.window_start)) * 1000 >= p_window_ms THEN v_now
+      ELSE internal.rate_limit_counters.window_start
     END,
     updated_at = v_now
   RETURNING tokens, window_start INTO v_tokens, v_window_start;

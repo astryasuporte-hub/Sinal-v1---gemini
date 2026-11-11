@@ -35,6 +35,7 @@ export interface UpstreamArticle {
 }
 
 export interface IngestionResult {
+  executionId: string;
   success: boolean;
   articlesFetched: number;
   deduplicatedCount: number;
@@ -323,9 +324,14 @@ export async function runServerSideIngestion(options?: {
   keywords?: string[];
 }): Promise<IngestionResult> {
   const startTime = Date.now();
+  const executionId = `ingest-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`;
+
+  console.log(`[Ingest Engine ${executionId}] Início da ingestão: ${new Date().toISOString()}`);
 
   if (!isPostgresConfigured()) {
+    console.error(`[Ingest Engine ${executionId}] Falha: PostgreSQL não configurado no ambiente server-side.`);
     return {
+      executionId,
       success: false,
       articlesFetched: 0,
       deduplicatedCount: 0,
@@ -341,7 +347,13 @@ export async function runServerSideIngestion(options?: {
 
   try {
     // 1. Coleta das matérias reais
+    console.log(`[Ingest Engine ${executionId}] Consultando provedores de notícias...`);
     const { articles: rawArticles, providers } = await fetchAllUpstreamArticles(options?.keywords);
+
+    const providerSummary = Object.entries(providers)
+      .map(([name, stat]) => `${name}: ${stat.count} artigos (configurado: ${stat.configured}${stat.error ? `, erro: ${stat.error}` : ''})`)
+      .join(' | ');
+    console.log(`[Ingest Engine ${executionId}] Coleta finalizada: ${rawArticles.length} matérias recebidas [${providerSummary}]`);
 
     // 2. Deduplicação em memória por canonicalUrl e hash normalizado de título
     const seenUrls = new Set<string>();
@@ -358,8 +370,12 @@ export async function runServerSideIngestion(options?: {
       deduplicatedArticles.push(art);
     }
 
+    console.log(`[Ingest Engine ${executionId}] Deduplicação concluída: ${rawArticles.length} -> ${deduplicatedArticles.length} matérias únicas.`);
+
     if (deduplicatedArticles.length === 0) {
+      console.warn(`[Ingest Engine ${executionId}] Nenhuma matéria nova para persistir após deduplicação.`);
       return {
+        executionId,
         success: true,
         articlesFetched: rawArticles.length,
         deduplicatedCount: 0,
@@ -619,7 +635,12 @@ export async function runServerSideIngestion(options?: {
       }
     });
 
+    console.log(`[Ingest Engine ${executionId}] Persistência concluída com sucesso em ${Date.now() - startTime}ms: ` +
+      `${articlesPersisted} matérias persistidas, ${sourcesUpserted} fontes atualizadas, ` +
+      `${eventsCreated} eventos criados, ${eventsUpdated} eventos atualizados.`);
+
     return {
+      executionId,
       success: true,
       articlesFetched: rawArticles.length,
       deduplicatedCount: deduplicatedArticles.length,
@@ -631,8 +652,10 @@ export async function runServerSideIngestion(options?: {
       providers
     };
   } catch (err: any) {
-    console.error('[Canonical Ingestion Error]', err);
+    const durationMs = Date.now() - startTime;
+    console.error(`[Ingest Engine ${executionId}] Falha crítica na transação de persistência (${durationMs}ms):`, err?.message || err);
     return {
+      executionId,
       success: false,
       articlesFetched: 0,
       deduplicatedCount: 0,
@@ -640,7 +663,7 @@ export async function runServerSideIngestion(options?: {
       eventsCreated: 0,
       eventsUpdated: 0,
       sourcesUpserted: 0,
-      durationMs: Date.now() - startTime,
+      durationMs,
       providers: {},
       error: err?.message || 'Falha no ciclo canônico de ingestão'
     };

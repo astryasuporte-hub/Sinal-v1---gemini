@@ -48,9 +48,6 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    const rateLimitAllowed = await enforceRateLimit(req, res, 'general');
-    if (!rateLimitAllowed) return;
-
     // 1. Extração segura de credenciais do cabeçalho Authorization
     const authHeader = String(req.headers['authorization'] || '').trim();
     const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
@@ -84,9 +81,12 @@ export default async function handler(req: any, res: any) {
       } catch {}
     }
 
-    // Bloqueio rigoroso: falha fechada se não autenticado
+    // Bloqueio rigoroso: falha fechada se não autenticado (com rate limiting preventivo contra brute-force)
     // A presença isolada do cabeçalho 'x-vercel-cron' SEM token válido é expressamente rejeitada!
     if (!isAuthorized) {
+      const rateLimitAllowed = await enforceRateLimit(req, res, 'general');
+      if (!rateLimitAllowed) return;
+
       return sendJson(res, 401, {
         error: 'UNAUTHORIZED_CRON',
         code: 'UNAUTHORIZED_CRON',
@@ -111,6 +111,7 @@ export default async function handler(req: any, res: any) {
       return sendJson(res, 200, {
         success: result.success,
         ingestion: {
+          executionId: result.executionId,
           articlesFetched: result.articlesFetched,
           deduplicatedCount: result.deduplicatedCount,
           articlesPersisted: result.articlesPersisted,

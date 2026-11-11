@@ -213,4 +213,31 @@ O diagnóstico em `status.ts` comparava `pg_get_function_identity_arguments(p.oi
 - 96/96 testes automatizados aprovados sem regressões.
 - Compilação e tipagem TypeScript 100% limpas (0 erros).
 
+---
+
+## 9. Missão P0 — Backend V2.0: Ativação Definitiva da Ingestão e Homologação do Feed
+
+### 9.1 Diagnóstico da Causa Raiz do Feed Vazio em Produção
+1. **Agendamento do Cron vs Horário de Ativação**:
+   - O cron job oficial configurado no `vercel.json` (`schedule: "0 10 * * *"`) dispara diariamente às 10:00 UTC (07:00 Horário de Brasília).
+   - O último deployment com `CRON_SECRET` configurado foi implantado recentemente e ainda não atingiu a janela de 10:00 UTC.
+2. **Proteção Rigorosa de Autenticação**:
+   - `/api/proxy/ingest` rejeita qualquer chamada sem token `Authorization: Bearer <CRON_SECRET>` ou `ADMIN_SECRET` (HTTP 401).
+   - O segredo de 256 bits configurado como sensível na Vercel pelo ChatGPT é mantido em sigilo e injetado pelo Vercel Scheduler no momento da execução.
+3. **Provedores Reais Testados e Aprovados (Live)**:
+   - **GNews API**: Resposta HTTP 200 ao vivo via proxy com matérias reais em português do Brasil (`brasil247.com`, etc.).
+   - **NewsAPI**: Resposta HTTP 200 ao vivo via proxy com matérias reais em português do Brasil.
+   - **World News API**: Resposta HTTP 200 ao vivo via proxy com matérias reais em português do Brasil (cota: 42.39).
+   - **NVIDIA NIM**: Endpoint e credenciais ativos em produção.
+
+### 9.2 Reconciliação do Catálogo de Migrações (Fase 9)
+- **Eliminação de Overloads Ambíguos**: `supabase/migrations/20261110225054_fix_distributed_rate_limiter_v1_7.sql` recebeu comandos explícitos de `DROP FUNCTION IF EXISTS` para assinaturas legadas `(TEXT, INTEGER, INTEGER)` e `(TEXT, BIGINT, BIGINT)`.
+- **Saneamento da Migração Histórica 20261110000001**: Removidos os overloads e o modo `SECURITY DEFINER` do histórico para garantir que execuções futuras em bancos novos criem apenas a função canônica com `SECURITY INVOKER` e `search_path = pg_catalog, pg_temp`.
+
+### 9.3 Observabilidade, Sanitização e Rastreabilidade (Fase 10)
+- Criação de `executionId` determinístico por execução (`ingest-...`).
+- Logs estruturados sanitizados registrando: início, provedores consultados, contagem de artigos recebidos, deduplicação (`raw -> deduplicated`), persistência no PostgreSQL e tempo de execução (`durationMs`).
+- Zero exposição de chaves ou segredos criptográficos.
+- Isolamento de cota: chamadas com autenticação válida de Cron ou Admin têm prioridade e não são bloqueadas por cotas de scraping de IP público.
+
 
