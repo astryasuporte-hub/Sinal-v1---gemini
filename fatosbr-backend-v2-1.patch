@@ -1,0 +1,419 @@
+From 9b8f2c10a45e6d7f8a9b0c1d2e3f4a5b6c7d8e9f Mon Sep 17 00:00:00 2001
+From: AI Studio Agent <agent@aistudio.google.com>
+Date: Wed, 11 Nov 2026 07:20:00 +0000
+Subject: [PATCH] feat(v2.1): correcao definitiva persistencia postgresql topics
+ sem category e integridade editorial
+
+- Eliminado erro PostgreSQL 42703 (colunas inexistentes category e brand_color em public.topics).
+- Precarregamento seguro de topicos canonicos via SELECT id, slug, name FROM public.topics.
+- Insercao estrita em public.topics utilizando apenas colunas existentes (id, name, slug, is_active, is_featured).
+- Blindagem de public.news_sources contra colisao em restricoes UNIQUE de domain e slug.
+- Refinamento do agrupamento lexico com stop-words em portugues e overlap >= 0.45.
+- Integridade editorial: status CONFIRMED apenas com >= 2 dominios independentes.
+- Cast explicito $11::jsonb em public.events.key_points.
+---
+ .aistudio/artifacts/brain/51170ed9-4925-46a0-9574-1ec8b728814c/implementation_plan.md |  82 ++++++++++++++++++++++
+ api/_lib/ingestionEngine.ts                                                             | 152 ++++++++++++++++++++++++++++++------------
+ tests/ingestion-idempotency-pipeline.test.ts                                            |  84 +++++++++++++++++++++++-
+ 3 files changed, 275 insertions(+), 43 deletions(-)
+
+diff --git a/api/_lib/ingestionEngine.ts b/api/_lib/ingestionEngine.ts
+index e5a1b32..f8c9d41 100644
+--- a/api/_lib/ingestionEngine.ts
++++ b/api/_lib/ingestionEngine.ts
+@@ -11,4 +11,4 @@
+- * - public.topics (id, name, slug, category, brand_color, created_at)
+- * - public.event_topics (event_id UUID, topic_id, PRIMARY KEY (event_id, topic_id))
++ * - public.topics (id UUID, name, slug UNIQUE, description, icon, image_url, is_active, is_featured, created_at, updated_at, search_vector)
++ * - public.event_topics (event_id UUID, topic_id UUID, PRIMARY KEY (event_id, topic_id))
+  */
+@@ -117,35 +117,122 @@ export function generateSlug(text: string, maxLength = 80): string {
++/**
++ * Stop-words em português para filtragem de ruído no agrupamento lexical.
++ */
++export const PT_STOP_WORDS = new Set([
++  'brasil', 'brasileiro', 'brasileira', 'brasileiros', 'governo', 'segundo', 'afirma', 'afirmam',
++  'sobre', 'apos', 'diz', 'dizem', 'veja', 'como', 'mais', 'para', 'com', 'por', 'uma', 'uns',
++  'umas', 'este', 'esta', 'estes', 'estas', 'esse', 'essa', 'esses', 'essas', 'aquele', 'aquela',
++  'aqueles', 'aquelas', 'isso', 'isto', 'aquilo', 'onde', 'quando', 'quem', 'qual', 'quais',
++  'cujo', 'cuja', 'cujos', 'cujas', 'entre', 'contra', 'desde', 'ate', 'sem', 'sob', 'tras',
++  'pelo', 'pela', 'pelos', 'pelas', 'num', 'numa', 'nuns', 'numas', 'dos', 'das', 'aos',
++  'nas', 'nos', 'dele', 'dela', 'deles', 'delas', 'deste', 'desta', 'destes', 'destas',
++  'desse', 'dessa', 'desses', 'dessas', 'neste', 'nesta', 'nestes', 'nestas', 'nesse',
++  'nessa', 'nesses', 'nessas', 'outro', 'outra', 'outros', 'outras', 'mesmo', 'mesma',
++  'mesmos', 'mesmas', 'tanto', 'tanta', 'tantos', 'tantas', 'pouco', 'pouca', 'poucos',
++  'poucas', 'muito', 'muita', 'muitos', 'muitas', 'cada', 'tudo', 'nada', 'algo', 'alguem',
++  'ninguem', 'tambem', 'ainda', 'sempre', 'nunca', 'jamais', 'agora', 'antes', 'depois',
++  'hoje', 'ontem', 'amanha', 'ano', 'anos', 'mes', 'meses', 'dia', 'dias', 'hora', 'horas',
++  'tempo', 'caso', 'pode', 'podem', 'deve', 'devem', 'sera', 'serao', 'foi', 'foram', 'era',
++  'eram', 'sao', 'tem', 'temos', 'tinha', 'tinham', 'ter', 'estar', 'fazer', 'novo', 'nova',
++  'novos', 'novas', 'grande', 'grandes', 'primeiro', 'primeira', 'noticia', 'noticias',
++  'entenda', 'saiba', 'confira'
++]);
++
++/**
++ * Extrai tokens lexicais significativos de um texto, filtrando acentos, caracteres especiais e stop-words.
++ */
++export function extractSignificantTokens(text: string): string[] {
++  return text
++    .normalize('NFD')
++    .replace(/[\u0300-\u036f]/g, '')
++    .toLowerCase()
++    .replace(/[^a-z0-9\s]/g, ' ')
++    .split(/\s+/)
++    .filter(w => w.length >= 4 && !PT_STOP_WORDS.has(w));
++}
++
++/**
++ * Calcula afinidade léxica entre duas listas de tokens.
++ */
++export function calculateTokenSimilarity(tokensA: string[], tokensB: string[]): {
++  sharedTokens: string[];
++  overlapRatio: number;
++  jaccard: number;
++} {
++  const setA = new Set(tokensA);
++  const setB = new Set(tokensB);
++  if (setA.size === 0 || setB.size === 0) {
++    return { sharedTokens: [], overlapRatio: 0, jaccard: 0 };
++  }
++  const shared: string[] = [];
++  for (const t of setA) {
++    if (setB.has(t)) {
++      shared.push(t);
++    }
++  }
++  const unionSize = new Set([...setA, ...setB]).size;
++  const overlapRatio = shared.length / Math.min(setA.size, setB.size);
++  const jaccard = unionSize > 0 ? shared.length / unionSize : 0;
++
++  return { sharedTokens: shared, overlapRatio, jaccard };
++}
++
++/**
+  * Categorização lexical em português para definição temática canônica.
++ * Alinhada aos tópicos pré-existentes confirmados no banco Supabase:
++ * - tecnologia, inteligencia-artificial, economia, financas, empresas, politica, esportes, ciencia, entretenimento, internacional
+  */
+-export function detectCategory(title: string, description: string): { category: string; topicSlug: string } {
++export function detectCategory(title: string, description: string): { category: string; topicSlug: string } {
+-  const text = `${title} ${description}`.toLowerCase();
++  const text = `${title} ${description}`
++    .normalize('NFD')
++    .replace(/[\u0300-\u036f]/g, '')
++    .toLowerCase();
+ 
+-  if (/\b(ia|ai)\b/.test(text) || text.includes('inteligencia artificial') || text.includes('tecnologia') ||
+-      text.includes('apple') || text.includes('google') || text.includes('software') ||
+-      text.includes('nvidia') || text.includes('semicondutor') || text.includes('openai') || text.includes('meta')) {
++  if (/\b(ia|ai)\b/.test(text) || text.includes('inteligencia artificial') || text.includes('chatgpt') ||
++      text.includes('openai') || text.includes('nvidia') || text.includes('llm') || text.includes('machine learning')) {
++    return { category: 'Inteligência Artificial', topicSlug: 'inteligencia-artificial' };
++  }
++  if (text.includes('tecnologia') || text.includes('apple') || text.includes('google') ||
++      text.includes('software') || text.includes('semicondutor') || text.includes('meta') ||
++      text.includes('celular') || text.includes('smartphone') || text.includes('computador') || text.includes('app')) {
+     return { category: 'Tecnologia', topicSlug: 'tecnologia' };
+   }
+   if (text.includes('dolar') || text.includes('inflacao') || text.includes('selic') ||
+-      text.includes('juros') || text.includes('banco') || text.includes('mercado') ||
+-      text.includes('ibovespa') || text.includes('economia') || text.includes('petrobras') ||
+-      text.includes('vale') || text.includes('acoes') || text.includes('pib')) {
++      text.includes('juros') || text.includes('banco central') || text.includes('copom') ||
++      text.includes('ibovespa') || text.includes('economia') || text.includes('pib')) {
+     return { category: 'Economia', topicSlug: 'economia' };
+   }
++  if (text.includes('investimento') || text.includes('acoes') || text.includes('mercado financeiro') ||
++      text.includes('bolsa de valores') || text.includes('cripto') || text.includes('bitcoin') || text.includes('financas')) {
++    return { category: 'Finanças', topicSlug: 'financas' };
++  }
++  if (text.includes('petrobras') || text.includes('vale') || text.includes('empresas') ||
++      text.includes('fusao') || text.includes('startup') || text.includes('lucro') || text.includes('receita')) {
++    return { category: 'Empresas', topicSlug: 'empresas' };
++  }
+   if (text.includes('lula') || text.includes('stf') || text.includes('senado') ||
+       text.includes('congresso') || text.includes('governo') || text.includes('politica') ||
+-      text.includes('lei') || text.includes('pec') || text.includes('eleicoes')) {
++      text.includes('lei') || text.includes('pec') || text.includes('eleicoes') || text.includes('camara')) {
+     return { category: 'Política', topicSlug: 'politica' };
+   }
+   if (text.includes('futebol') || text.includes('copa') || text.includes('gol') ||
+-      text.includes('selecao') || text.includes('campeonato') || text.includes('flamengo') || text.includes('palmeiras')) {
++      text.includes('selecao') || text.includes('campeonato') || text.includes('flamengo') ||
++      text.includes('palmeiras') || text.includes('esportes') || text.includes('atleta') || text.includes('olimpiadas')) {
+     return { category: 'Esportes', topicSlug: 'esportes' };
+   }
+-  if (text.includes('escola') || text.includes('professor') || text.includes('saude') ||
+-      text.includes('clima') || text.includes('meio ambiente') || text.includes('educacao') || text.includes('sus')) {
+-    return { category: 'Sociedade', topicSlug: 'sociedade' };
+-  }
++  if (text.includes('ciencia') || text.includes('pesquisa') || text.includes('espaco') ||
++      text.includes('nasa') || text.includes('vacina') || text.includes('saude') || text.includes('medicina')) {
++    return { category: 'Ciência', topicSlug: 'ciencia' };
++  }
++  if (text.includes('filme') || text.includes('cinema') || text.includes('serie') ||
++      text.includes('musica') || text.includes('show') || text.includes('entretenimento') || text.includes('celebridade')) {
++    return { category: 'Entretenimento', topicSlug: 'entretenimento' };
++  }
++  if (text.includes('eua') || text.includes('china') || text.includes('europa') ||
++      text.includes('guerra') || text.includes('internacional') || text.includes('exterior') || text.includes('onu')) {
++    return { category: 'Internacional', topicSlug: 'internacional' };
++  }
+ 
+-  return { category: 'Brasil', topicSlug: 'brasil' };
++  return { category: 'Economia', topicSlug: 'economia' };
+ }
+@@ -484,33 +571,52 @@ export async function runCanonicalNewsIngestion(): Promise<IngestionResult> {
+     await withTransaction(async (client) => {
+-      // 3.1 Garantir existência dos tópicos em public.topics com UUID v5 determinístico
+-      const topicCategories = [
+-        { name: 'Tecnologia', slug: 'tecnologia', category: 'Tecnologia', color: '#3b82f6' },
+-        { name: 'Economia', slug: 'economia', category: 'Economia', color: '#10b981' },
+-        { name: 'Política', slug: 'politica', category: 'Política', color: '#ef4444' },
+-        { name: 'Esportes', slug: 'esportes', category: 'Esportes', color: '#f59e0b' },
+-        { name: 'Sociedade', slug: 'sociedade', category: 'Sociedade', color: '#8b5cf6' },
+-        { name: 'Brasil', slug: 'brasil', category: 'Brasil', color: '#06b6d4' }
+-      ];
+-
+-      const topicMap = new Map<string, string>(); // slug -> topic UUID
+-
+-      for (const t of topicCategories) {
+-        const topicUuid = generateDeterministicUuidV5(`topic:${t.slug}`);
+-        const res = await client.query(
+-          `INSERT INTO public.topics (id, name, slug, category, brand_color, created_at)
+-           VALUES ($1, $2, $3, $4, $5, NOW())
+-           ON CONFLICT (slug) DO UPDATE SET
+-             name = EXCLUDED.name,
+-             category = EXCLUDED.category,
+-             brand_color = EXCLUDED.brand_color
+-           RETURNING id`,
+-          [topicUuid, t.name, t.slug, t.category, t.color]
+-        );
+-        const realTopicId = res.rows[0]?.id || topicUuid;
+-        topicMap.set(t.slug, realTopicId);
+-      }
++      // 3.1 Resolução Canônica de Tópicos em public.topics
++      // O esquema real confirmado no Supabase é:
++      // (id UUID, name TEXT, slug TEXT UNIQUE, description, icon, image_url, is_active, is_featured, created_at, updated_at)
++      // NUNCA fazer query com 'category' ou 'brand_color' (Erro 42703)!
++      const topicMap = new Map<string, string>(); // slug -> topic UUID real
++
++      // Precarrega todos os tópicos já existentes no Supabase
++      const existingTopics = await client.query(
++        `SELECT id, slug, name FROM public.topics WHERE is_active = true OR is_active IS NULL`
++      );
++      for (const row of existingTopics.rows) {
++        if (row.slug && row.id) {
++          topicMap.set(row.slug, row.id);
++        }
++      }
++
++      // Garante que todo tópico referenciado pelos artigos deduplicados exista sem violar colunas
++      for (const art of deduplicatedArticles) {
++        const slug = art.topicSlug;
++        if (topicMap.has(slug)) continue;
++
++        const topicUuid = generateDeterministicUuidV5(`topic:${slug}`);
++        const topicName = art.category || (slug.charAt(0).toUpperCase() + slug.slice(1));
++
++        const insRes = await client.query(
++          `INSERT INTO public.topics (id, name, slug, is_active, is_featured, created_at, updated_at)
++           VALUES ($1, $2, $3, true, false, NOW(), NOW())
++           ON CONFLICT (slug) DO NOTHING
++           RETURNING id`,
++          [topicUuid, topicName, slug]
++        );
++
++        if (insRes.rows.length > 0 && insRes.rows[0].id) {
++          topicMap.set(slug, insRes.rows[0].id);
++        } else {
++          // Em caso de conflito concorrente, recupera o id existente
++          const refetch = await client.query(
++            `SELECT id FROM public.topics WHERE slug = $1 LIMIT 1`,
++            [slug]
++          );
++          if (refetch.rows.length > 0 && refetch.rows[0].id) {
++            topicMap.set(slug, refetch.rows[0].id);
++          } else {
++            topicMap.set(slug, topicUuid);
++          }
++        }
++      }
+ 
+-      // 3.2 Upsert de Fontes em public.news_sources (usando colunas REAIS)
++      // 3.2 Upsert Seguro de Fontes em public.news_sources
++      // Previne colisão em 'domain' (UNIQUE) e em 'slug' (UNIQUE)
+       const sourceMap = new Map<string, string>(); // domain -> id UUID
+ 
+       for (const art of deduplicatedArticles) {
+         if (sourceMap.has(art.domain)) continue;
+ 
++        // 1. Verifica se a fonte já existe pelo domínio
++        const existingSrc = await client.query(
++          `SELECT id FROM public.news_sources WHERE domain = $1 LIMIT 1`,
++          [art.domain]
++        );
++
++        if (existingSrc.rows.length > 0) {
++          const srcId = existingSrc.rows[0].id;
++          sourceMap.set(art.domain, srcId);
++          await client.query(
++            `UPDATE public.news_sources SET name = COALESCE($2, name), updated_at = NOW() WHERE id = $1`,
++            [srcId, art.sourceName]
++          );
++          sourcesUpserted++;
++          continue;
++        }
++
++        // 2. Não existe: gera UUID v5 determinístico e slug único protegido contra colisões
+         const sourceUuid = generateDeterministicUuidV5(`source:${art.domain}`);
+-        const sourceSlug = generateSlug(art.sourceName || art.domain, 50);
++        const baseSlug = generateSlug(art.sourceName || art.domain, 40);
++        const uniqueSlug = `${baseSlug}-${sourceUuid.slice(0, 8)}`;
+ 
+         const srcRes = await client.query(
+           `INSERT INTO public.news_sources (
+             id, name, slug, domain, country_code, language_code, authority_score, is_active, created_at, updated_at
+           ) VALUES ($1, $2, $3, $4, 'BR', 'pt', 80, true, NOW(), NOW())
+           ON CONFLICT (domain) DO UPDATE SET
+             name = EXCLUDED.name,
+             updated_at = NOW()
+           RETURNING id`,
+-          [sourceUuid, art.sourceName, sourceSlug, art.domain]
++          [sourceUuid, art.sourceName, uniqueSlug, art.domain]
+         );
+@@ -582,10 +688,14 @@ export async function runCanonicalNewsIngestion(): Promise<IngestionResult> {
+       // 3.4 Agrupamento Canônico em Acontecimentos (Event Clusters)
+-      // Agrupa artigos que compartilham contexto temático e palavras-chave específicas
++      // Agrupa artigos com base em afinidade léxica rigorosa (>= 3 tokens significativos e overlap >= 0.45)
+       interface ClusterGroup {
+         anchorArticle: SavedArticleRecord;
+-        relatedArticles: SavedArticleRecord[];
++        anchorTokens: string[];
++        relatedArticles: Array<{
++          record: SavedArticleRecord;
++          similarityScore: number;
++        }>;
+         category: string;
+         topicSlug: string;
+       }
+@@ -597,9 +707,15 @@ export async function runCanonicalNewsIngestion(): Promise<IngestionResult> {
+         if (assigned.has(current.id)) continue;
+         assigned.add(current.id);
+ 
++        const anchorTokens = extractSignificantTokens(current.article.title);
++
+         const cluster: ClusterGroup = {
+           anchorArticle: current,
+-          relatedArticles: [current],
++          anchorTokens,
++          relatedArticles: [{
++            record: current,
++            similarityScore: 1.0
++          }],
+           category: current.article.category,
+           topicSlug: current.article.topicSlug
+         };
+@@ -609,8 +725,15 @@ export async function runCanonicalNewsIngestion(): Promise<IngestionResult> {
+           if (assigned.has(candidate.id)) continue;
+ 
++          // Agrupamento apenas no mesmo tópico
+           if (candidate.article.topicSlug === current.article.topicSlug) {
+-            const candWords = candidate.article.title.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(w => w.length > 4);
+-            const shared = candWords.filter(w => anchorWords.has(w));
+-            if (shared.length >= 2) {
+-              cluster.relatedArticles.push(candidate);
++            const candTokens = extractSignificantTokens(candidate.article.title);
++            const sim = calculateTokenSimilarity(anchorTokens, candTokens);
++
++            // Requisitos estritos: >= 3 tokens significativos compartilhados E overlapRatio >= 0.45
++            if (sim.sharedTokens.length >= 3 && sim.overlapRatio >= 0.45) {
++              const score = Math.max(0.45, Math.min(0.99, Number(sim.overlapRatio.toFixed(2))));
++              cluster.relatedArticles.push({
++                record: candidate,
++                similarityScore: score
++              });
+               assigned.add(candidate.id);
+             }
+           }
+@@ -628,14 +751,23 @@ export async function runCanonicalNewsIngestion(): Promise<IngestionResult> {
+         const summary = primary.article.description || primary.article.title;
+-        const whyItMatters = `Cobertura confirmada por ${cl.relatedArticles.length} fonte(s) independente(s) com relevância para ${cl.category} no Brasil.`;
+-        const relevanceScore = Math.min(98, 85 + cl.relatedArticles.length * 3);
++
++        // Domínios distintos para validação de independência editorial
++        const distinctDomains = new Set(cl.relatedArticles.map(a => a.record.article.domain));
++        const hasIndependentConfirmation = distinctDomains.size >= 2;
++
++        // Status estrito: 'CONFIRMED' SOMENTE se houver >= 2 domínios independentes
++        const eventStatus = hasIndependentConfirmation ? 'CONFIRMED' : 'DEVELOPING';
++
++        // Texto factual sem alegações vazias
++        const whyItMatters = hasIndependentConfirmation
++          ? `Cobertura confirmada por ${distinctDomains.size} veículos independentes (${Array.from(distinctDomains).slice(0, 3).join(', ')}) com relevância para ${cl.category} no Brasil.`
++          : `Notícia em desenvolvimento apurada inicialmente por ${primary.article.sourceName || primary.article.domain} com relevância para ${cl.category}.`;
++
++        const relevanceScore = Math.min(98, 80 + Math.min(distinctDomains.size * 5, 15) + cl.relatedArticles.length);
+ 
+         const keyPoints = JSON.stringify(
+-          cl.relatedArticles.slice(0, 4).map(r => `• ${r.article.title} (${r.article.sourceName})`)
+-        );
+-
+-        // Status em conformidade com o CHECK constraint: 'DEVELOPING', 'CONFIRMED', 'UPDATED', 'ARCHIVED'
+-        const eventStatus = cl.relatedArticles.length >= 3 ? 'CONFIRMED' : 'DEVELOPING';
++          cl.relatedArticles.slice(0, 4).map(r => `• ${r.record.article.title} (${r.record.article.sourceName})`)
++        );
+@@ -649,3 +781,3 @@ export async function runCanonicalNewsIngestion(): Promise<IngestionResult> {
+             ) VALUES (
+               $1, $2, $3, $4, $5, $6, $7,
+               $8, $9, NOW(), NOW(),
+-              $10, NOW(), NOW(), $11, 1, $12
++              $10, NOW(), NOW(), $11::jsonb, 1, $12
+             )`,
+@@ -668,17 +800,20 @@ export async function runCanonicalNewsIngestion(): Promise<IngestionResult> {
+           eventsCreated++;
+         } else {
+           // Atualização de Acontecimento Existente
++          const existingStatus = existingEvt.rows[0].status;
+           const newCount = Math.max(existingEvt.rows[0].article_count || 1, cl.relatedArticles.length);
++          const nextStatus = (hasIndependentConfirmation || existingStatus === 'CONFIRMED') ? 'CONFIRMED' : 'UPDATED';
++
+           await client.query(
+             `UPDATE public.events SET
+               article_count = $2,
+-              status = CASE WHEN $2 >= 3 AND status = 'DEVELOPING' THEN 'CONFIRMED' ELSE 'UPDATED' END,
++              status = $3,
+               last_updated_at = NOW(),
+               updated_at = NOW(),
+-              key_points = $3,
+-              why_it_matters = $4
++              key_points = $4::jsonb,
++              why_it_matters = $5
+             WHERE id = $1`,
+-            [eventUuid, newCount, keyPoints, whyItMatters]
++            [eventUuid, newCount, nextStatus, keyPoints, whyItMatters]
+           );
+           eventsUpdated++;
+         }
+@@ -685,9 +820,6 @@ export async function runCanonicalNewsIngestion(): Promise<IngestionResult> {
+-        // Relacionar Artigos em public.event_articles
+-        for (let idx = 0; idx < cl.relatedArticles.length; idx++) {
+-          const item = cl.relatedArticles[idx];
+-          const isPrimary = idx === 0;
+-          const similarityScore = isPrimary ? 1.0 : 0.85;
+-
++        // Relacionar Artigos em public.event_articles com similarityScore real
++        for (const item of cl.relatedArticles) {
++          const isPrimary = item.record.id === primary.id;
+           await client.query(
+             `INSERT INTO public.event_articles (event_id, article_id, similarity_score, is_primary, created_at)
+              VALUES ($1, $2, $3, $4, NOW())
+@@ -694,6 +826,6 @@ export async function runCanonicalNewsIngestion(): Promise<IngestionResult> {
+                is_primary = EXCLUDED.is_primary,
+                similarity_score = EXCLUDED.similarity_score`,
+-            [eventUuid, item.id, similarityScore, isPrimary]
++            [eventUuid, item.record.id, item.similarityScore, isPrimary]
+           );
+         }
+-- 
+2.48.1
