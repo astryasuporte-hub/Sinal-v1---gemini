@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="100%" height="100%">
+  <rect width="120" height="120" rx="24" fill="#002b49"/>
+  <path fill="#ffffff" d="M25 68 C45 42, 75 42, 95 68 C80 62, 50 62, 25 68 Z"/>
+  <polygon points="60,34 68,54 52,54" fill="#00a3e0"/>
+  <text x="60" y="90" font-family="Arial, sans-serif" font-weight="800" font-size="14" fill="#ffffff" text-anchor="middle" letter-spacing="1">EMBRAER</text>
+</svg>

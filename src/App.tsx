@@ -27,6 +27,7 @@ import { FatosBrLogo } from './components/FatosBrLogo';
 import { OnboardingModal } from './components/OnboardingModal';
 import { AuthModal } from './components/AuthModal';
 import { BriefingView } from './components/BriefingView';
+import { QuickSearchModal } from './components/QuickSearchModal';
 import { LandingPage } from './components/LandingPage';
 import { AdminPanel } from './components/AdminPanel';
 import { SavedHistoryView, HistoryItem } from './components/SavedHistoryView';
@@ -669,6 +670,7 @@ export default function App() {
   const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [isLegalModalOpen, setIsLegalModalOpen] = useState(false);
+  const [isQuickSearchOpen, setIsQuickSearchOpen] = useState(false);
   const [legalModalTab, setLegalModalTab] = useState<'terms' | 'lgpd' | 'cdc' | 'owner-rights' | 'dpo'>('terms');
 
   const handleOpenLegal = (tab: 'terms' | 'lgpd' | 'cdc' | 'owner-rights' | 'dpo' = 'terms') => {
@@ -1386,8 +1388,9 @@ export default function App() {
               <div
                 onClick={() => setCurrentNav('home')}
                 className="flex items-center space-x-2.5 cursor-pointer py-1"
+                title="FatosBR • Início"
               >
-                <FatosBrLogo size="md" glow={true} />
+                <FatosBrLogo size="md" variant="compact" glow={false} />
               </div>
             </div>
 
@@ -1589,55 +1592,42 @@ export default function App() {
           </div>
         </aside>
 
-        {/* ================= 2. CABEÇALHO MOBILE (390px/430px MOCKUP) ================= */}
-        <header className="md:hidden sticky top-0 z-40 backdrop-blur-md border-b px-4 py-3 flex items-center justify-between bg-[#08090b]/95 border-[#1a1c22]">
-          {/* Logo FatosBR */}
+        {/* ================= 2. CABEÇALHO MOBILE COMPARTILHADO E CONSISTENTE (V2.2) ================= */}
+        <header className="md:hidden sticky top-0 z-40 backdrop-blur-md border-b px-4 py-2.5 flex items-center justify-between bg-[#08090b]/95 border-[#1a1c22]">
+          {/* Logo Oficial FatosBR (Símbolo + Wordmark) */}
           <div
-            onClick={() => setCurrentNav('home')}
-            className="flex items-center space-x-2 cursor-pointer py-0.5"
+            onClick={() => {
+              setCurrentNav('home');
+              window.scrollTo({ top: 0, behavior: 'smooth' });
+            }}
+            className="flex items-center cursor-pointer py-1 active:opacity-80 transition"
+            title="Voltar ao início"
           >
-            <FatosBrLogo size="sm" glow={true} />
+            <FatosBrLogo size="md" variant="compact" glow={false} />
           </div>
 
-          {/* Botões de Ação no Topo Mobile */}
-          <div className="flex items-center space-x-1.5">
-            {currentNav === 'profile' ? (
-              <button
-                onClick={() => {}}
-                className="p-2 rounded-full transition cursor-pointer text-zinc-300 hover:text-white min-h-[44px] min-w-[44px] flex items-center justify-center"
-                title="Configurações"
-              >
-                <Settings className="w-5 h-5" />
-              </button>
-            ) : currentNav === 'explore' || currentNav === 'following' || currentNav === 'notifications' || currentNav === 'saved' || currentNav === 'history' ? (
-              <button
-                onClick={() => {}}
-                className="p-2 rounded-full transition cursor-pointer text-zinc-300 hover:text-white min-h-[44px] min-w-[44px] flex items-center justify-center"
-                title="Buscar"
-              >
-                <Search className="w-5 h-5" />
-              </button>
-            ) : (
-              <>
-                <button
-                  onClick={() => setCurrentNav('explore')}
-                  className="p-2 text-zinc-300 hover:text-white rounded-full transition cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center"
-                  title="Explorar e Buscar"
-                >
-                  <Search className="w-5 h-5" />
-                </button>
-                <button
-                  onClick={() => setCurrentNav('notifications')}
-                  className="relative p-2 text-zinc-300 hover:text-white rounded-full transition cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center"
-                  title="Notificações"
-                >
-                  <Bell className="w-5 h-5" />
-                  {unreadCount > 0 && (
-                    <span className="absolute top-2 right-2 w-2 h-2 rounded-full bg-white" />
-                  )}
-                </button>
-              </>
-            )}
+          {/* Botões de Ação no Topo Mobile (Busca Rápida + Notificações em Todas as Abas) */}
+          <div className="flex items-center space-x-1">
+            <button
+              onClick={() => setIsQuickSearchOpen(true)}
+              className="p-2 text-zinc-300 hover:text-white rounded-full transition cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center active:scale-95"
+              title="Buscar acontecimentos, empresas e temas"
+              aria-label="Abrir busca"
+            >
+              <Search className="w-5 h-5" />
+            </button>
+
+            <button
+              onClick={() => setCurrentNav('notifications')}
+              className="relative p-2 text-zinc-300 hover:text-white rounded-full transition cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center active:scale-95"
+              title="Notificações"
+              aria-label="Abrir notificações"
+            >
+              <Bell className="w-5 h-5" />
+              {unreadCount > 0 && (
+                <span className="absolute top-2.5 right-2.5 w-2 h-2 rounded-full bg-white ring-2 ring-[#08090b]" />
+              )}
+            </button>
           </div>
         </header>
 
@@ -2571,6 +2561,20 @@ export default function App() {
       <KeyboardShortcutsModal
         isOpen={isShortcutsModalOpen}
         onClose={() => setIsShortcutsModalOpen(false)}
+      />
+
+      {/* ================= 8.1 MODAL DE BUSCA RÁPIDA UNIFICADA (V2.2) ================= */}
+      <QuickSearchModal
+        isOpen={isQuickSearchOpen}
+        onClose={() => setIsQuickSearchOpen(false)}
+        events={events}
+        entities={entities}
+        onSelectEvent={(ev) => setActiveEventModal(ev)}
+        onSelectEntity={(ent) => setActiveEntityModal(ent)}
+        onSelectCategory={(cat) => {
+          setHomeCategoryFilter(cat.toLowerCase());
+          setCurrentNav('home');
+        }}
       />
 
       {/* ================= 9.1 MODAL DE RECALIBRAÇÃO DE INTERESSES DO LEITOR ================= */}

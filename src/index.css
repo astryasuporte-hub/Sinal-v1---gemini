@@ -78,3 +78,17 @@
     transform: none !important;
   }
 }
+
+/* Supressão de scrollbar para abas e filtros horizontais (eliminando a barra defeituosa) */
+.no-scrollbar::-webkit-scrollbar {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none !important; /* IE e Edge */
+  scrollbar-width: none !important; /* Firefox */
+  -webkit-overflow-scrolling: touch; /* iOS Momentum Scrolling */
+}
+

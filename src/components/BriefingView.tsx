@@ -83,12 +83,22 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
   const [eveningTime, setEveningTime] = useState('20:00');
   const [emailAddress, setEmailAddress] = useState('astryasuporte@gmail.com');
   const [isSendingTest, setIsSendingTest] = useState(false);
+  const [testCooldown, setTestCooldown] = useState(0);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
   const showToast = (msg: string) => {
     setToastMsg(msg);
     setTimeout(() => setToastMsg(null), 3500);
   };
+
+  // Cooldown timer de 30s para o botão de teste de e-mail
+  useEffect(() => {
+    if (testCooldown <= 0) return;
+    const interval = setInterval(() => {
+      setTestCooldown((prev) => (prev > 0 ? prev - 1 : 0));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [testCooldown]);
 
   // Pré-carregamento agressivo e hidratação imediata de preferências (0ms)
   useEffect(() => {
@@ -227,22 +237,31 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
   const yesterdayItems = filteredBriefings.filter((b) => b.groupDate === 'Ontem');
   const pastDateItems = filteredBriefings.filter((b) => b.groupDate !== 'Hoje' && b.groupDate !== 'Ontem');
 
-  // Envio de teste de e-mail via Resend
+  // Envio de teste de e-mail (com cooldown de 30s e validação de e-mail)
   const handleSendTest = async () => {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailAddress || !emailRegex.test(emailAddress.trim())) {
+      showToast('Por favor, informe um e-mail válido antes de testar.');
+      return;
+    }
+
     setIsSendingTest(true);
     try {
+      const cleanEmail = emailAddress.trim();
       const res = await resendService.sendBriefing(
-        emailAddress,
+        cleanEmail,
         'FatosBR • Demonstração do Briefing Matinal',
         'Os principais acontecimentos das últimas horas, organizados e resumidos para você.'
       );
       if (res.success) {
-        showToast(`Briefing enviado com sucesso para ${emailAddress}!`);
+        setTestCooldown(30);
+        showToast(`E-mail de teste enviado para ${cleanEmail}!`);
       } else {
-        showToast(res.message || 'Falha no disparo do e-mail.');
+        // Se a API externa não estiver configurada no ambiente atual, informa graciosamente sem crash
+        showToast(res.message || res.error || 'Não foi possível disparar o teste no momento.');
       }
     } catch {
-      showToast('Erro ao conectar com o serviço de e-mail.');
+      showToast('Serviço de e-mail temporariamente indisponível.');
     } finally {
       setIsSendingTest(false);
     }
@@ -646,101 +665,193 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
         </div>
       )}
 
-      {/* ================= MODAL: CONFIGURAÇÃO DE PREFERÊNCIAS & RESEND ================= */}
+      {/* ================= MODAL: CONFIGURAÇÃO DE PREFERÊNCIAS DE BRIEFINGS (V2.2) ================= */}
       {isPreferencesOpen && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in">
-          <div className="bg-[#0f1117] border border-zinc-800 rounded-2xl max-w-lg w-full p-6 space-y-5 shadow-2xl">
-            <div className="flex items-center justify-between border-b border-zinc-800 pb-4">
-              <div className="flex items-center gap-2.5">
-                <Settings className="w-5 h-5 text-zinc-300" />
-                <h3 className="text-base font-bold text-white">Preferências de Briefings</h3>
+        <div
+          className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 sm:p-6 animate-fade-in"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setIsPreferencesOpen(false);
+          }}
+        >
+          <div
+            className="bg-[#090a0d] border border-zinc-800/90 rounded-2xl max-w-md w-full max-h-[85vh] overflow-y-auto no-scrollbar p-5 sm:p-6 shadow-2xl flex flex-col space-y-5 text-zinc-100"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="briefing-prefs-title"
+          >
+            {/* Cabeçalho do Modal */}
+            <div className="flex items-start justify-between border-b border-zinc-800/80 pb-4">
+              <div>
+                <h3 id="briefing-prefs-title" className="text-base sm:text-lg font-bold text-white tracking-tight">
+                  Preferências de briefings
+                </h3>
+                <p className="text-xs sm:text-sm text-zinc-400 mt-1 leading-relaxed">
+                  Escolha quando deseja receber seu resumo de notícias.
+                </p>
               </div>
               <button
+                type="button"
                 onClick={() => setIsPreferencesOpen(false)}
-                className="p-1 rounded-lg hover:bg-zinc-800 text-zinc-400 hover:text-white cursor-pointer"
+                className="p-2 -mr-1 rounded-xl text-zinc-400 hover:text-white hover:bg-zinc-800/60 transition cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center"
+                aria-label="Fechar"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            {/* E-mail de Destino */}
-            <div className="space-y-1.5">
-              <label className="text-xs font-medium text-zinc-300">E-mail para recebimento diário</label>
+            {/* Campo E-mail de Recebimento */}
+            <div className="space-y-2">
+              <label htmlFor="briefing-email" className="block text-xs font-semibold text-zinc-300">
+                E-mail de recebimento
+              </label>
               <div className="relative">
-                <Mail className="w-4 h-4 text-zinc-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                <Mail className="w-4 h-4 text-zinc-500 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                 <input
+                  id="briefing-email"
                   type="email"
                   value={emailAddress}
                   onChange={(e) => setEmailAddress(e.target.value)}
-                  className="w-full bg-[#161822] border border-zinc-800 rounded-xl pl-9 pr-3 py-2 text-xs text-white outline-none focus:border-zinc-500"
+                  className="w-full bg-[#121318] border border-zinc-800 focus:border-zinc-500 rounded-xl pl-10 pr-3.5 py-3 text-sm text-white placeholder-zinc-500 outline-none transition min-h-[44px]"
                   placeholder="seuemail@exemplo.com"
+                  autoComplete="email"
                 />
               </div>
             </div>
 
-            {/* Horários */}
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1">
-                <label className="text-xs font-medium text-zinc-300 flex items-center gap-1.5">
-                  <Sun className="w-3.5 h-3.5 text-zinc-300" />
-                  <span>Horário Matinal</span>
-                </label>
-                <input
-                  type="time"
-                  value={morningTime}
-                  onChange={(e) => setMorningTime(e.target.value)}
-                  className="w-full bg-[#161822] border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white outline-none"
-                />
+            {/* Configuração dos Horários dos Briefings */}
+            <div className="space-y-3 pt-1">
+              {/* Briefing da manhã */}
+              <div className="p-3.5 rounded-xl bg-[#111317] border border-zinc-800/80 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2.5">
+                    <Sun className="w-4 h-4 text-zinc-300" />
+                    <div>
+                      <h4 className="text-xs sm:text-sm font-semibold text-white">Briefing da manhã</h4>
+                      <p className="text-[11px] text-zinc-400">Destaques para iniciar o dia</p>
+                    </div>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer min-h-[44px] min-w-[44px] justify-center">
+                    <input
+                      type="checkbox"
+                      checked={morningEnabled}
+                      onChange={(e) => setMorningEnabled(e.target.checked)}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-black after:content-[''] after:absolute after:top-[12px] after:left-[4px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-white peer-checked:after:bg-black" />
+                  </label>
+                </div>
+                <div className="flex items-center justify-between pt-1 border-t border-zinc-800/60">
+                  <span className="text-xs text-zinc-400 font-medium">Horário de entrega</span>
+                  <input
+                    type="time"
+                    value={morningTime}
+                    disabled={!morningEnabled}
+                    onChange={(e) => setMorningTime(e.target.value)}
+                    className="bg-[#181a22] border border-zinc-800 rounded-lg px-3 py-1.5 text-xs font-mono text-white outline-none focus:border-zinc-500 disabled:opacity-40 disabled:cursor-not-allowed min-h-[36px]"
+                  />
+                </div>
               </div>
 
-              <div className="space-y-1">
-                <label className="text-xs font-medium text-zinc-300 flex items-center gap-1.5">
-                  <Moon className="w-3.5 h-3.5 text-zinc-400" />
-                  <span>Horário Noturno</span>
-                </label>
-                <input
-                  type="time"
-                  value={eveningTime}
-                  onChange={(e) => setEveningTime(e.target.value)}
-                  className="w-full bg-[#161822] border border-zinc-800 rounded-xl px-3 py-2 text-xs text-white outline-none"
-                />
+              {/* Briefing da noite */}
+              <div className="p-3.5 rounded-xl bg-[#111317] border border-zinc-800/80 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2.5">
+                    <Moon className="w-4 h-4 text-zinc-400" />
+                    <div>
+                      <h4 className="text-xs sm:text-sm font-semibold text-white">Briefing da noite</h4>
+                      <p className="text-[11px] text-zinc-400">Consolidação e fechamento dos mercados</p>
+                    </div>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer min-h-[44px] min-w-[44px] justify-center">
+                    <input
+                      type="checkbox"
+                      checked={eveningEnabled}
+                      onChange={(e) => setEveningEnabled(e.target.checked)}
+                      className="sr-only peer"
+                    />
+                    <div className="w-11 h-6 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-black after:content-[''] after:absolute after:top-[12px] after:left-[4px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-white peer-checked:after:bg-black" />
+                  </label>
+                </div>
+                <div className="flex items-center justify-between pt-1 border-t border-zinc-800/60">
+                  <span className="text-xs text-zinc-400 font-medium">Horário de entrega</span>
+                  <input
+                    type="time"
+                    value={eveningTime}
+                    disabled={!eveningEnabled}
+                    onChange={(e) => setEveningTime(e.target.value)}
+                    className="bg-[#181a22] border border-zinc-800 rounded-lg px-3 py-1.5 text-xs font-mono text-white outline-none focus:border-zinc-500 disabled:opacity-40 disabled:cursor-not-allowed min-h-[36px]"
+                  />
+                </div>
               </div>
             </div>
 
-            {/* Teste Imediato com Resend API */}
-            <div className="p-4 rounded-xl bg-zinc-950/70 border border-zinc-800/80 space-y-3">
-              <div className="flex items-center gap-2 text-xs font-bold text-white">
-                <Sparkles className="w-4 h-4 text-zinc-300" />
-                <span>Testar entrega imediata na sua caixa postal</span>
+            {/* Seção Secundária: Enviar e-mail de teste */}
+            <div className="p-4 rounded-xl bg-[#111317] border border-zinc-800/80 space-y-3">
+              <div>
+                <h4 className="text-xs sm:text-sm font-semibold text-white">
+                  Enviar e-mail de teste
+                </h4>
+                <p className="text-xs text-zinc-400 mt-0.5 leading-relaxed">
+                  Receba uma prévia para conferir como seu briefing chegará.
+                </p>
               </div>
-              <p className="text-[11px] text-zinc-400 leading-relaxed">
-                Dispara uma cópia de teste formatada do briefing para o e-mail informado utilizando a API do Resend.
-              </p>
+
               <button
                 type="button"
                 onClick={handleSendTest}
-                disabled={isSendingTest}
-                className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-white hover:bg-zinc-200 text-black text-xs font-bold transition cursor-pointer disabled:opacity-50 min-h-[44px]"
+                disabled={isSendingTest || testCooldown > 0}
+                className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-zinc-700/80 hover:border-zinc-500 bg-[#161820] hover:bg-[#1c1e27] text-white text-xs font-semibold transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed min-h-[44px]"
               >
                 {isSendingTest ? (
-                  <span>Enviando pelo Resend...</span>
+                  <span>Enviando teste...</span>
+                ) : testCooldown > 0 ? (
+                  <span>Aguarde {testCooldown}s para reenviar</span>
                 ) : (
                   <>
-                    <Send className="w-3.5 h-3.5" />
-                    <span>Disparar teste de e-mail agora</span>
+                    <Send className="w-3.5 h-3.5 text-zinc-300" />
+                    <span>Enviar teste</span>
                   </>
                 )}
               </button>
             </div>
 
-            <div className="pt-2 flex justify-end">
+            {/* Rodapé: Salvar Preferências */}
+            <div className="pt-2 flex items-center justify-end gap-3 border-t border-zinc-800/70">
+              <button
+                type="button"
+                onClick={() => setIsPreferencesOpen(false)}
+                className="px-4 py-2.5 rounded-xl text-xs font-medium text-zinc-400 hover:text-white hover:bg-zinc-850 transition cursor-pointer min-h-[44px]"
+              >
+                Cancelar
+              </button>
               <button
                 type="button"
                 onClick={() => {
-                  setIsPreferencesOpen(false);
-                  showToast('Preferências salvas com sucesso!');
+                  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+                  if (!emailAddress || !emailRegex.test(emailAddress.trim())) {
+                    showToast('Por favor, informe um endereço de e-mail válido.');
+                    return;
+                  }
+                  try {
+                    const cleanEmail = emailAddress.trim();
+                    const prefs = {
+                      emailAddress: cleanEmail,
+                      morningEnabled,
+                      eveningEnabled,
+                      morningTime,
+                      eveningTime,
+                      updatedAt: new Date().toISOString()
+                    };
+                    localStorage.setItem('fatosbr_briefing_prefs', JSON.stringify(prefs));
+                    resendService.setStoredSubscriberEmail(cleanEmail);
+                    window.dispatchEvent(new CustomEvent('fatosbr_briefing_prefs_updated'));
+                    setIsPreferencesOpen(false);
+                    showToast('Preferências salvas com sucesso!');
+                  } catch {
+                    showToast('Erro ao salvar preferências localmente.');
+                  }
                 }}
-                className="px-5 py-2.5 bg-white hover:bg-zinc-200 text-black font-bold text-xs rounded-xl transition cursor-pointer min-h-[44px]"
+                className="px-5 py-2.5 bg-white hover:bg-zinc-200 text-black font-bold text-xs rounded-xl transition cursor-pointer min-h-[44px] shadow-sm active:scale-95"
               >
                 Salvar preferências
               </button>

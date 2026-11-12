@@ -23,6 +23,7 @@ import {
   AlertTriangle
 } from 'lucide-react';
 import { CompanyLogoBadge } from './CompanyLogoBadge';
+import { HorizontalFilterTabs } from './HorizontalFilterTabs';
 
 interface FollowingViewProps {
   entities: Entity[];
@@ -261,74 +262,20 @@ export const FollowingView: React.FC<FollowingViewProps> = ({
         )}
       </div>
 
-      {/* 3. Filtros por Tipo (Pills com Contadores Reais Conforme Mockup) */}
-      <div className="flex items-center space-x-2 overflow-x-auto pb-1 no-scrollbar">
-        <button
-          onClick={() => setActiveTypeFilter('all')}
-          className={`px-4 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition cursor-pointer shrink-0 ${
-            activeTypeFilter === 'all'
-              ? 'bg-white text-black shadow-sm'
-              : 'bg-[#111215] text-zinc-400 hover:text-white border border-[#1e2026]'
-          }`}
-        >
-          Todos {countAll}
-        </button>
-
-        <button
-          onClick={() => setActiveTypeFilter('topics')}
-          className={`px-4 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition cursor-pointer shrink-0 ${
-            activeTypeFilter === 'topics'
-              ? 'bg-white text-black shadow-sm'
-              : 'bg-[#111215] text-zinc-400 hover:text-white border border-[#1e2026]'
-          }`}
-        >
-          Temas {countTopics}
-        </button>
-
-        <button
-          onClick={() => setActiveTypeFilter('companies')}
-          className={`px-4 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition cursor-pointer shrink-0 ${
-            activeTypeFilter === 'companies'
-              ? 'bg-white text-black shadow-sm'
-              : 'bg-[#111215] text-zinc-400 hover:text-white border border-[#1e2026]'
-          }`}
-        >
-          Empresas {countCompanies}
-        </button>
-
-        <button
-          onClick={() => setActiveTypeFilter('people')}
-          className={`px-4 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition cursor-pointer shrink-0 ${
-            activeTypeFilter === 'people'
-              ? 'bg-white text-black shadow-sm'
-              : 'bg-[#111215] text-zinc-400 hover:text-white border border-[#1e2026]'
-          }`}
-        >
-          Pessoas {countPeople}
-        </button>
-
-        <button
-          onClick={() => setActiveTypeFilter('organizations')}
-          className={`px-4 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition cursor-pointer shrink-0 ${
-            activeTypeFilter === 'organizations'
-              ? 'bg-white text-black shadow-sm'
-              : 'bg-[#111215] text-zinc-400 hover:text-white border border-[#1e2026]'
-          }`}
-        >
-          Organizações {countOrganizations}
-        </button>
-
-        <button
-          onClick={() => setActiveTypeFilter('sources')}
-          className={`px-4 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition cursor-pointer shrink-0 ${
-            activeTypeFilter === 'sources'
-              ? 'bg-white text-black shadow-sm'
-              : 'bg-[#111215] text-zinc-400 hover:text-white border border-[#1e2026]'
-          }`}
-        >
-          Fontes {countSources}
-        </button>
-      </div>
+      {/* 3. Filtros por Tipo (HorizontalFilterTabs padronizado sem scrollbar defeituosa) */}
+      <HorizontalFilterTabs
+        tabs={[
+          { id: 'all', label: 'Todos', count: countAll },
+          { id: 'topics', label: 'Temas', count: countTopics },
+          { id: 'companies', label: 'Empresas', count: countCompanies },
+          { id: 'people', label: 'Pessoas', count: countPeople },
+          { id: 'organizations', label: 'Organizações', count: countOrganizations },
+          { id: 'sources', label: 'Fontes', count: countSources }
+        ]}
+        activeTabId={activeTypeFilter}
+        onSelectTab={(id) => setActiveTypeFilter(id as any)}
+        ariaLabel="Filtros por tipo de item seguido"
+      />
 
       {/* 4. Resumo de Contadores Desktop (6 Cards Estatísticos no Mockup 02) */}
       <div className="hidden sm:grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">

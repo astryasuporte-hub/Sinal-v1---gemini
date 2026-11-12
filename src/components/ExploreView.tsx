@@ -10,6 +10,7 @@ import {
   EXPLORE_TRENDING_ITEMS
 } from '../data/mockData';
 import { CompanyLogoBadge } from './CompanyLogoBadge';
+import { HorizontalFilterTabs } from './HorizontalFilterTabs';
 import {
   Search,
   Check,
@@ -207,25 +208,13 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
         )}
       </div>
 
-      {/* 3. Pills de Categorias (Horizontal Scroll) */}
-      <div className="flex items-center space-x-2 overflow-x-auto pb-1 no-scrollbar">
-        {pillCategories.map((cat) => {
-          const isActive = selectedPillCategory === cat.id;
-          return (
-            <button
-              key={cat.id}
-              onClick={() => setSelectedPillCategory(cat.id)}
-              className={`px-4 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition cursor-pointer shrink-0 ${
-                isActive
-                  ? 'bg-white text-black shadow-sm'
-                  : 'bg-[#111215] text-zinc-400 hover:text-white border border-[#1e2026]'
-              }`}
-            >
-              {cat.label}
-            </button>
-          );
-        })}
-      </div>
+      {/* 3. Pills de Categorias (HorizontalFilterTabs padronizado sem scrollbar defeituosa) */}
+      <HorizontalFilterTabs
+        tabs={pillCategories}
+        activeTabId={selectedPillCategory}
+        onSelectTab={setSelectedPillCategory}
+        ariaLabel="Categorias do explorar"
+      />
 
       {/* ================= SEÇÃO: RESULTADOS DA BUSCA (SE DIGITADO) ================= */}
       {searchResults !== null ? (
@@ -547,58 +536,18 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
           {/* 6. SEÇÃO: SUBTABS (Empresas, Pessoas, Organizações, Fontes, Temas) - Painel 02 */}
           <section className="space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#1a1c22] pb-3">
-              <div className="flex items-center space-x-1.5 overflow-x-auto pb-1 no-scrollbar">
-                <button
-                  onClick={() => setSelectedSubTab('companies')}
-                  className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition cursor-pointer shrink-0 ${
-                    selectedSubTab === 'companies'
-                      ? 'bg-white text-black shadow-sm'
-                      : 'bg-transparent text-zinc-400 hover:text-white'
-                  }`}
-                >
-                  Empresas
-                </button>
-                <button
-                  onClick={() => setSelectedSubTab('people')}
-                  className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition cursor-pointer shrink-0 ${
-                    selectedSubTab === 'people'
-                      ? 'bg-white text-black shadow-sm'
-                      : 'bg-transparent text-zinc-400 hover:text-white'
-                  }`}
-                >
-                  Pessoas
-                </button>
-                <button
-                  onClick={() => setSelectedSubTab('organizations')}
-                  className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition cursor-pointer shrink-0 ${
-                    selectedSubTab === 'organizations'
-                      ? 'bg-white text-black shadow-sm'
-                      : 'bg-transparent text-zinc-400 hover:text-white'
-                  }`}
-                >
-                  Organizações
-                </button>
-                <button
-                  onClick={() => setSelectedSubTab('fontes' as any)}
-                  className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition cursor-pointer shrink-0 ${
-                    selectedSubTab === ('fontes' as any)
-                      ? 'bg-white text-black shadow-sm'
-                      : 'bg-transparent text-zinc-400 hover:text-white'
-                  }`}
-                >
-                  Fontes
-                </button>
-                <button
-                  onClick={() => setSelectedSubTab('topics')}
-                  className={`px-3.5 py-1.5 rounded-full text-xs font-semibold transition cursor-pointer shrink-0 ${
-                    selectedSubTab === 'topics'
-                      ? 'bg-white text-black shadow-sm'
-                      : 'bg-transparent text-zinc-400 hover:text-white'
-                  }`}
-                >
-                  Temas
-                </button>
-              </div>
+              <HorizontalFilterTabs
+                tabs={[
+                  { id: 'companies', label: 'Empresas' },
+                  { id: 'people', label: 'Pessoas' },
+                  { id: 'organizations', label: 'Organizações' },
+                  { id: 'fontes', label: 'Fontes' },
+                  { id: 'topics', label: 'Temas' }
+                ]}
+                activeTabId={selectedSubTab}
+                onSelectTab={(id) => setSelectedSubTab(id as any)}
+                ariaLabel="Tipos de entidades no explorar"
+              />
 
               <span className="text-xs text-zinc-500 font-mono self-end sm:self-auto">
                 {selectedSubTab === 'companies' && `${companies.length} empresas`}
