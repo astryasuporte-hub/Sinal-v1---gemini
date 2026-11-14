@@ -59,6 +59,9 @@ export interface Database {
           email_breaking_alerts: boolean;
           weekend_edition: boolean;
           briefing_email: string | null;
+          morning_time: string | null;
+          evening_time: string | null;
+          timezone: string | null;
           created_at: string;
           updated_at: string;
         };
@@ -69,6 +72,9 @@ export interface Database {
           email_breaking_alerts?: boolean;
           weekend_edition?: boolean;
           briefing_email?: string | null;
+          morning_time?: string | null;
+          evening_time?: string | null;
+          timezone?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -78,6 +84,9 @@ export interface Database {
           email_breaking_alerts?: boolean;
           weekend_edition?: boolean;
           briefing_email?: string | null;
+          morning_time?: string | null;
+          evening_time?: string | null;
+          timezone?: string | null;
           updated_at?: string;
         };
       };
@@ -267,6 +276,94 @@ export interface Database {
         };
         Update: {
           followed_at?: string;
+        };
+      };
+      notifications: {
+        Row: {
+          id: string;
+          user_id: string;
+          title: string;
+          subtitle: string | null;
+          category: string;
+          read: boolean;
+          event_id: string | null;
+          entity_id: string | null;
+          metadata: Record<string, any>;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          title: string;
+          subtitle?: string | null;
+          category?: string;
+          read?: boolean;
+          event_id?: string | null;
+          entity_id?: string | null;
+          metadata?: Record<string, any>;
+          created_at?: string;
+        };
+        Update: {
+          title?: string;
+          subtitle?: string | null;
+          category?: string;
+          read?: boolean;
+          event_id?: string | null;
+          entity_id?: string | null;
+          metadata?: Record<string, any>;
+        };
+      };
+      briefings: {
+        Row: {
+          id: string;
+          user_id: string;
+          type: 'morning' | 'evening';
+          title: string;
+          description: string | null;
+          status: 'PENDING' | 'PROCESSING' | 'READY' | 'SENT' | 'FAILED';
+          scheduled_for: string;
+          sent_at: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          type: 'morning' | 'evening';
+          title: string;
+          description?: string | null;
+          status?: 'PENDING' | 'PROCESSING' | 'READY' | 'SENT' | 'FAILED';
+          scheduled_for?: string;
+          sent_at?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          title?: string;
+          description?: string | null;
+          status?: 'PENDING' | 'PROCESSING' | 'READY' | 'SENT' | 'FAILED';
+          scheduled_for?: string;
+          sent_at?: string | null;
+          updated_at?: string;
+        };
+      };
+      briefing_items: {
+        Row: {
+          id: string;
+          briefing_id: string;
+          event_id: string;
+          order_index: number;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          briefing_id: string;
+          event_id: string;
+          order_index?: number;
+          created_at?: string;
+        };
+        Update: {
+          order_index?: number;
         };
       };
     };

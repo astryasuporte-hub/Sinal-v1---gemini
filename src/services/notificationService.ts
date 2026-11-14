@@ -4,6 +4,7 @@
  */
 
 import { Event } from '../types/sinal';
+import { supabase, isSupabaseConfigured } from '../lib/supabase';
 
 const PUSH_PREF_KEY = 'sinal_push_notifications_enabled';
 
@@ -316,6 +317,193 @@ class NotificationService {
       });
       return true;
     } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Obtém chave de cache privada para notificações de um usuário específico
+   */
+  public getUserCacheKey(userId: string): string {
+    return `fatosbr_notifs_cache_${userId}`;
+  }
+
+  /**
+   * Limpa cache de notificações de um usuário (usado no logout)
+   */
+  public clearUserCache(userId: string): void {
+    if (typeof window === 'undefined') return;
+    try {
+      localStorage.removeItem(this.getUserCacheKey(userId));
+    } catch {}
+  }
+
+  /**
+   * Consulta as notificações reais do usuário autenticado no Supabase
+   */
+  public async getUserNotifications(userId: string): Promise<any[]> {
+    if (!isSupabaseConfigured || !userId) {
+      return [];
+    }
+
+    try {
+      const { data, error } = await (supabase as any)
+        .from('notifications')
+        .select('*')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+        .limit(50);
+
+      if (error) {
+        console.warn('[NotificationService] Falha ao consultar notificações no Supabase:', error.message);
+        return [];
+      }
+
+      if (!data || data.length === 0) {
+        return [];
+      }
+
+      const now = new Date();
+      const todayStr = now.toLocaleDateString('pt-BR');
+      const yesterday = new Date(now);
+      yesterday.setDate(yesterday.getDate() - 1);
+      const yesterdayStr = yesterday.toLocaleDateString('pt-BR');
+
+      const items = data.map((n: any) => {
+        const notifDate = new Date(n.created_at);
+        const dateStr = notifDate.toLocaleDateString('pt-BR');
+        let dateGroup = 'Anteriores';
+        if (dateStr === todayStr) {
+          dateGroup = 'Hoje';
+        } else if (dateStr === yesterdayStr) {
+          dateGroup = 'Ontem';
+        }
+
+        const diffMinutes = Math.floor((now.getTime() - notifDate.getTime()) / 60000);
+        let timestamp = 'agora';
+        if (diffMinutes >= 1 && diffMinutes < 60) {
+          timestamp = `há ${diffMinutes} min`;
+        } else if (diffMinutes >= 60 && diffMinutes < 1440) {
+          const h = Math.floor(diffMinutes / 60);
+          timestamp = h === 1 ? 'há 1 hora' : `há ${h} horas`;
+        } else if (diffMinutes >= 1440) {
+          const d = Math.floor(diffMinutes / 1440);
+          timestamp = d === 1 ? 'há 1 dia' : `há ${d} dias`;
+        }
+
+        return {
+          id: n.id,
+          category: n.category || 'acontecimentos',
+          dateGroup,
+          title: n.title,
+          subtitle: n.subtitle || '',
+          timestamp,
+          read: Boolean(n.read),
+          eventId: n.event_id || undefined,
+          entityId: n.entity_id || undefined,
+          metadata: n.metadata || {}
+        };
+      });
+
+      // Salva no cache privado do usuário
+      if (typeof window !== 'undefined') {
+        try {
+          localStorage.setItem(this.getUserCacheKey(userId), JSON.stringify(items));
+        } catch {}
+      }
+
+      return items;
+    } catch (err: any) {
+      console.warn('[NotificationService] Erro na consulta de notificações:', err?.message);
+      return [];
+    }
+  }
+
+  /**
+   * Consulta a contagem real de notificações não lidas no Supabase
+   */
+  public async getUnreadCount(userId: string): Promise<number> {
+    if (!isSupabaseConfigured || !userId) {
+      return 0;
+    }
+
+    try {
+      const { count, error } = await (supabase as any)
+        .from('notifications')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', userId)
+        .eq('read', false);
+
+      if (error) {
+        console.warn('[NotificationService] Erro ao buscar contagem de não lidas:', error.message);
+        return 0;
+      }
+
+      return count || 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Marca uma notificação como lida no Supabase
+   */
+  public async markAsRead(notificationId: string, userId: string): Promise<boolean> {
+    if (!isSupabaseConfigured || !userId || !notificationId) {
+      return false;
+    }
+
+    try {
+      const { error } = await (supabase as any)
+        .from('notifications')
+        .update({ read: true })
+        .eq('id', notificationId)
+        .eq('user_id', userId);
+
+      if (error) {
+        console.error('[NotificationService] Erro ao marcar notificação como lida:', error.message);
+        return false;
+      }
+
+      // Dispara evento para sincronizar cabeçalhos e telas
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('fatosbr_notifications_updated'));
+      }
+
+      return true;
+    } catch (err: any) {
+      console.error('[NotificationService] Erro de rede ao marcar notificação:', err?.message);
+      return false;
+    }
+  }
+
+  /**
+   * Marca todas as notificações do usuário como lidas no Supabase
+   */
+  public async markAllAsRead(userId: string): Promise<boolean> {
+    if (!isSupabaseConfigured || !userId) {
+      return false;
+    }
+
+    try {
+      const { error } = await (supabase as any)
+        .from('notifications')
+        .update({ read: true })
+        .eq('user_id', userId)
+        .eq('read', false);
+
+      if (error) {
+        console.error('[NotificationService] Erro ao marcar todas as notificações:', error.message);
+        return false;
+      }
+
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('fatosbr_notifications_updated'));
+      }
+
+      return true;
+    } catch (err: any) {
+      console.error('[NotificationService] Erro de rede ao marcar todas:', err?.message);
       return false;
     }
   }

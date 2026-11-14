@@ -35,6 +35,8 @@ import { authService } from './services/authService';
 import { userService } from './services/userService';
 import { eventService } from './services/eventService';
 import { newsIngestionService } from './services/newsIngestionService';
+import { notificationService } from './services/notificationService';
+import { briefingService } from './services/briefingService';
 import { isSupabaseConfigured } from './lib/supabase';
 import { User as SupabaseUser } from '@supabase/supabase-js';
 import {
@@ -93,7 +95,6 @@ import {
 import { rateLimitService } from './services/rateLimitService';
 import { KeyboardShortcutsModal } from './components/KeyboardShortcutsModal';
 import { soundAlertService } from './services/soundAlertService';
-import { notificationService } from './services/notificationService';
 import { motion, AnimatePresence } from 'motion/react';
 import { EditorialPushBanner, PushNotificationPayload } from './components/EditorialPushBanner';
 import { FatosBRControlView } from './components/FatosBRControlView';
@@ -854,39 +855,51 @@ export default function App() {
   const [hasError, setHasError] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearchingExternalApis, setIsSearchingExternalApis] = useState(false);
-  const [unreadCount, setUnreadCount] = useState<number>(() => {
-    try {
-      const saved = localStorage.getItem('sinal_notifications_v1');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) {
-          return parsed.filter((n: any) => !n.read).length;
-        }
-      }
-    } catch {}
-    return 2;
-  });
+  // Contador real de notificações não lidas baseado no usuário autenticado (fonte canônica: Supabase)
+  const [unreadCount, setUnreadCount] = useState<number>(0);
 
   // Sincronização em tempo real do contador de notificações não lidas
   useEffect(() => {
-    const handleNotifsChanged = () => {
+    if (!currentUser?.id) {
+      setUnreadCount(0);
+      return;
+    }
+
+    const syncUnread = async () => {
       try {
-        const saved = localStorage.getItem('sinal_notifications_v1');
-        if (saved) {
-          const parsed = JSON.parse(saved);
-          if (Array.isArray(parsed)) {
-            setUnreadCount(parsed.filter((n: any) => !n.read).length);
-          }
-        }
-      } catch {}
+        const count = await notificationService.getUnreadCount(currentUser.id);
+        setUnreadCount(count);
+      } catch {
+        setUnreadCount(0);
+      }
     };
+
+    // 1. Tentar ler do cache privado do usuário para 0ms de layout shift
+    try {
+      const cacheKey = notificationService.getUserCacheKey(currentUser.id);
+      const saved = localStorage.getItem(cacheKey);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          setUnreadCount(parsed.filter((n: any) => !n.read).length);
+        }
+      }
+    } catch {}
+
+    // 2. Consulta canônica no Supabase
+    syncUnread();
+
+    const handleNotifsChanged = () => {
+      syncUnread();
+    };
+
     window.addEventListener('fatosbr_notifications_updated', handleNotifsChanged);
     window.addEventListener('storage', handleNotifsChanged);
     return () => {
       window.removeEventListener('fatosbr_notifications_updated', handleNotifsChanged);
       window.removeEventListener('storage', handleNotifsChanged);
     };
-  }, []);
+  }, [currentUser?.id]);
   const [externalSearchFailed, setExternalSearchFailed] = useState<string | null>(null);
 
   // Busca real em APIs externas (GNews / World News API) quando o termo não existe no cache local
@@ -1756,6 +1769,7 @@ export default function App() {
             <NotificationsView
               events={events}
               entities={entities}
+              currentUser={currentUser}
               onOpenEvent={(ev) => handleOpenEventDetail(ev)}
               onOpenEntity={(ent) => setActiveEntityModal(ent)}
               onBack={() => setCurrentNav('home')}
@@ -1811,8 +1825,10 @@ export default function App() {
             <BriefingView
               events={events}
               subscription={subscription}
+              currentUser={currentUser}
               onOpenEventDetail={(ev) => handleOpenEventDetail(ev)}
               onOpenBilling={() => setIsBillingModalOpen(true)}
+              onRequireAuth={() => setIsAuthModalOpen(true)}
               isSuperAdmin={isSuperAdmin}
             />
           </div>
@@ -1867,9 +1883,15 @@ export default function App() {
                 await loadRealTimeNews(true);
               }}
               onLogout={async () => {
+                const loggedOutId = currentUser?.id;
                 await authService.signOut();
                 setCurrentUser(null);
                 setCurrentUserAvatar(null);
+                setUnreadCount(0);
+                if (loggedOutId) {
+                  notificationService.clearUserCache(loggedOutId);
+                  briefingService.clearUserCache(loggedOutId);
+                }
                 try {
                   localStorage.removeItem('fatosbr_session_active');
                   localStorage.removeItem('sinal_user_profile');

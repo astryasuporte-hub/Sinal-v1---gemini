@@ -44,9 +44,12 @@ export interface SinalNotificationItem {
   entityId?: string;
 }
 
+import { User as SupabaseUser } from '@supabase/supabase-js';
+
 interface NotificationsViewProps {
   events?: Event[];
   entities?: Entity[];
+  currentUser?: SupabaseUser | null;
   onOpenEvent?: (event: Event) => void;
   onOpenEntity?: (entity: Entity) => void;
   onBack?: () => void;
@@ -125,35 +128,57 @@ export function buildDefaultNotifications(events: Event[] = [], entities: Entity
 export const NotificationsView: React.FC<NotificationsViewProps> = ({
   events = [],
   entities = [],
+  currentUser,
   onOpenEvent,
   onOpenEntity,
   onBack
 }) => {
-  // Notificações reais persistidas ou geradas dos eventos atuais
+  // Notificações reais do usuário autenticado via Supabase
   const [notifications, setNotifications] = useState<SinalNotificationItem[]>(() => {
+    if (!currentUser?.id) return [];
     try {
-      const saved = localStorage.getItem('sinal_notifications_v1');
+      const cacheKey = notificationService.getUserCacheKey(currentUser.id);
+      const saved = localStorage.getItem(cacheKey);
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed)) return parsed;
       }
-    } catch {
-      // Ignorar erro de parse
-    }
-    return buildDefaultNotifications(events, entities);
+    } catch {}
+    return [];
   });
 
-  // Atualiza ou popula as notificações assim que os eventos carregam
+  const [isLoading, setIsLoading] = useState(false);
+
+  // Consulta ativamente o Supabase sempre que a sessão do usuário estiver ativa
   React.useEffect(() => {
-    if (notifications.length === 0 && events.length > 0) {
-      const generated = buildDefaultNotifications(events, entities);
-      setNotifications(generated);
-      try {
-        localStorage.setItem('sinal_notifications_v1', JSON.stringify(generated));
-        window.dispatchEvent(new CustomEvent('fatosbr_notifications_updated'));
-      } catch {}
+    if (!currentUser?.id) {
+      setNotifications([]);
+      return;
     }
-  }, [events, entities, notifications.length]);
+
+    // 1. Hidratação imediata do cache local privado do usuário
+    try {
+      const cacheKey = notificationService.getUserCacheKey(currentUser.id);
+      const saved = localStorage.getItem(cacheKey);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) setNotifications(parsed);
+      }
+    } catch {}
+
+    // 2. Consulta real no Supabase
+    setIsLoading(true);
+    notificationService.getUserNotifications(currentUser.id)
+      .then((items: any[]) => {
+        setNotifications(items);
+      })
+      .catch((err) => {
+        console.warn('[NotificationsView] Falha ao carregar notificações reais:', err);
+      })
+      .finally(() => {
+        setIsLoading(false);
+      });
+  }, [currentUser?.id]);
 
   const [activeTab, setActiveTab] = useState<NotificationCategory>('todas');
   const [searchQuery, setSearchQuery] = useState('');
@@ -193,12 +218,18 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
   }, [notifications]);
 
   const handleItemClick = (item: SinalNotificationItem) => {
+    // 1. Atualização otimista
     const updated = notifications.map((n) => (n.id === item.id ? { ...n, read: true } : n));
     setNotifications(updated);
-    try {
-      localStorage.setItem('sinal_notifications_v1', JSON.stringify(updated));
-      window.dispatchEvent(new CustomEvent('fatosbr_notifications_updated'));
-    } catch {}
+
+    // 2. Persistência no Supabase associada ao usuário autenticado
+    if (currentUser?.id) {
+      notificationService.markAsRead(item.id, currentUser.id).catch(() => {});
+      try {
+        const cacheKey = notificationService.getUserCacheKey(currentUser.id);
+        localStorage.setItem(cacheKey, JSON.stringify(updated));
+      } catch {}
+    }
 
     if (item.eventId && onOpenEvent) {
       const foundEvent = events.find((e) => e.id === item.eventId);
@@ -218,12 +249,19 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
   };
 
   const handleMarkAllAsRead = () => {
+    // 1. Atualização otimista
     const updated = notifications.map((n) => ({ ...n, read: true }));
     setNotifications(updated);
-    try {
-      localStorage.setItem('sinal_notifications_v1', JSON.stringify(updated));
-      window.dispatchEvent(new CustomEvent('fatosbr_notifications_updated'));
-    } catch {}
+
+    // 2. Persistência no Supabase para o usuário logado
+    if (currentUser?.id) {
+      notificationService.markAllAsRead(currentUser.id).catch(() => {});
+      try {
+        const cacheKey = notificationService.getUserCacheKey(currentUser.id);
+        localStorage.setItem(cacheKey, JSON.stringify(updated));
+      } catch {}
+    }
+
     setFilterOnlyUnread(false);
   };
 

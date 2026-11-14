@@ -5,6 +5,7 @@
 
 import React, { useState, useMemo, useEffect } from 'react';
 import { Event, UserSubscription } from '../types/sinal';
+import { User as SupabaseUser } from '@supabase/supabase-js';
 import {
   Sun,
   Moon,
@@ -19,29 +20,22 @@ import {
   FileText,
   Calendar,
   Sparkles,
-  ArrowRight
+  ArrowRight,
+  AlertCircle
 } from 'lucide-react';
 import { resendService } from '../services/resendService';
+import { userService } from '../services/userService';
+import { briefingService, RealBriefingItem } from '../services/briefingService';
 
-interface BriefingItem {
-  id: string;
-  type: 'morning' | 'evening';
-  title: string;
-  description: string;
-  eventsCount: number;
-  readTime: string;
-  timeFormatted: string;
-  dateLabel: string;
-  groupDate: string; // 'Hoje' | 'Ontem' | '3 de outubro de 2026'
-  status: 'Pronto' | 'Enviado';
-  bgImage: string;
-}
+export type BriefingItem = RealBriefingItem;
 
 interface BriefingViewProps {
   events?: Event[];
   subscription?: UserSubscription;
+  currentUser?: SupabaseUser | null;
   onOpenEventDetail?: (event: Event) => void;
   onOpenBilling?: () => void;
+  onRequireAuth?: () => void;
   isSuperAdmin?: boolean;
 }
 
@@ -49,10 +43,7 @@ interface BriefingViewProps {
 const MORNING_IMG = '/assets/aistudio/Amanhecer_sobre_a_cidade__1__638f4414.png';
 const EVENING_IMG = '/assets/aistudio/Horizonte_urbano_ao_anoitecer__2__4a1dd254.png';
 
-// Tier 1: Cache estático em memória e pré-carregamento imediato no escopo do módulo (0ms de latência)
 let preloadedBriefingImages: HTMLImageElement[] = [];
-const BRIEFING_CACHE_KEY = 'fatosbr_briefing_editorial_cache_v2';
-let memoryBriefingsCache: BriefingItem[] | null = null;
 
 if (typeof window !== 'undefined') {
   try {
@@ -67,13 +58,15 @@ if (typeof window !== 'undefined') {
 export const BriefingView: React.FC<BriefingViewProps> = ({
   events = [],
   subscription,
+  currentUser,
   onOpenEventDetail,
-  onOpenBilling
+  onOpenBilling,
+  onRequireAuth
 }) => {
   // Estados de filtro e busca
   const [activeFilter, setActiveFilter] = useState<'all' | 'morning' | 'evening' | 'preferences'>('all');
   const [searchQuery, setSearchQuery] = useState('');
-  const [selectedBriefing, setSelectedBriefing] = useState<BriefingItem | null>(null);
+  const [selectedBriefing, setSelectedBriefing] = useState<RealBriefingItem | null>(null);
   const [isPreferencesOpen, setIsPreferencesOpen] = useState(false);
 
   // Preferências
@@ -81,7 +74,11 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
   const [eveningEnabled, setEveningEnabled] = useState(true);
   const [morningTime, setMorningTime] = useState('07:00');
   const [eveningTime, setEveningTime] = useState('20:00');
-  const [emailAddress, setEmailAddress] = useState('astryasuporte@gmail.com');
+  const [emailAddress, setEmailAddress] = useState(currentUser?.email || '');
+  const [isLoadingPrefs, setIsLoadingPrefs] = useState(false);
+  const [isSavingPrefs, setIsSavingPrefs] = useState(false);
+  const [isLoadingBriefings, setIsLoadingBriefings] = useState(false);
+  const [userBriefings, setUserBriefings] = useState<RealBriefingItem[]>([]);
   const [isSendingTest, setIsSendingTest] = useState(false);
   const [testCooldown, setTestCooldown] = useState(0);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
@@ -100,28 +97,22 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
     return () => clearInterval(interval);
   }, [testCooldown]);
 
-  // Pré-carregamento agressivo e hidratação imediata de preferências (0ms)
+  // Carregamento de preferências e briefings associados exclusivamente ao usuário autenticado
   useEffect(() => {
-    if (preloadedBriefingImages.length === 0 && typeof window !== 'undefined') {
-      const pre1 = new Image();
-      pre1.src = MORNING_IMG;
-      const pre2 = new Image();
-      pre2.src = EVENING_IMG;
-      preloadedBriefingImages = [pre1, pre2];
+    if (!currentUser) {
+      setEmailAddress('');
+      setUserBriefings([]);
+      return;
     }
 
-    // Pré-carrega também imagens dos acontecimentos que compõem os briefings
-    if (Array.isArray(events) && events.length > 0) {
-      events.slice(0, 8).forEach((ev) => {
-        if (ev.imageUrl) {
-          const img = new Image();
-          img.src = ev.imageUrl;
-        }
-      });
+    if (currentUser.email) {
+      setEmailAddress((prev) => prev || currentUser.email || '');
     }
 
+    // 1. Hidratação imediata via cache privado do usuário
     try {
-      const saved = localStorage.getItem('fatosbr_briefing_prefs');
+      const cacheKey = `fatosbr_briefing_prefs_${currentUser.id}`;
+      const saved = localStorage.getItem(cacheKey);
       if (saved) {
         const p = JSON.parse(saved);
         if (p.emailAddress) setEmailAddress(p.emailAddress);
@@ -131,93 +122,43 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
         if (typeof p.eveningEnabled === 'boolean') setEveningEnabled(p.eveningEnabled);
       }
     } catch {}
-  }, [events]);
 
-  // Base estruturada de Briefings
-  const briefingsData: BriefingItem[] = useMemo(() => [
-    {
-      id: 'briefing-today-evening',
-      type: 'evening',
-      title: 'Seu briefing da noite está pronto.',
-      description: 'Veja o que realmente importou ao longo do dia e o que mudou.',
-      eventsCount: 4,
-      readTime: '2 min de leitura',
-      timeFormatted: '20:12',
-      dateLabel: 'Hoje · 20:12 · Pronto',
-      groupDate: 'Hoje',
-      status: 'Pronto',
-      bgImage: EVENING_IMG
-    },
-    {
-      id: 'briefing-today-morning',
-      type: 'morning',
-      title: 'Seu briefing da manhã está pronto.',
-      description: 'Os principais acontecimentos das últimas horas, organizados e resumidos para você.',
-      eventsCount: 6,
-      readTime: '3 min de leitura',
-      timeFormatted: '07:03',
-      dateLabel: 'Hoje · 07:03 · Enviado',
-      groupDate: 'Hoje',
-      status: 'Enviado',
-      bgImage: MORNING_IMG
-    },
-    {
-      id: 'briefing-yesterday-evening',
-      type: 'evening',
-      title: 'Resumo da noite',
-      description: 'O balanço dos mercados, geopolítica e tecnologia do fechamento de ontem.',
-      eventsCount: 4,
-      readTime: '2 min de leitura',
-      timeFormatted: '20:12',
-      dateLabel: 'Ontem · 20:12 · Enviado',
-      groupDate: 'Ontem',
-      status: 'Enviado',
-      bgImage: EVENING_IMG
-    },
-    {
-      id: 'briefing-yesterday-morning',
-      type: 'morning',
-      title: 'Resumo da manhã',
-      description: 'As notícias que abriram os mercados globais e o panorama matinal do Brasil.',
-      eventsCount: 6,
-      readTime: '3 min de leitura',
-      timeFormatted: '07:03',
-      dateLabel: 'Ontem · 07:03 · Enviado',
-      groupDate: 'Ontem',
-      status: 'Enviado',
-      bgImage: MORNING_IMG
-    },
-    {
-      id: 'briefing-oct3-evening',
-      type: 'evening',
-      title: 'Resumo da noite',
-      description: 'Consolidação de fatos com contexto analítico do final do dia.',
-      eventsCount: 4,
-      readTime: '2 min de leitura',
-      timeFormatted: '20:12',
-      dateLabel: '03 de out. de 2026 · 20:12 · Enviado',
-      groupDate: '3 de outubro de 2026',
-      status: 'Enviado',
-      bgImage: EVENING_IMG
-    },
-    {
-      id: 'briefing-oct3-morning',
-      type: 'morning',
-      title: 'Resumo da manhã',
-      description: 'Radar executivo com as decisões mais estratégicas do amanhecer.',
-      eventsCount: 6,
-      readTime: '3 min de leitura',
-      timeFormatted: '07:03',
-      dateLabel: '03 de out. de 2026 · 07:03 · Enviado',
-      groupDate: '3 de outubro de 2026',
-      status: 'Enviado',
-      bgImage: MORNING_IMG
-    }
-  ], [MORNING_IMG, EVENING_IMG]);
+    // 2. Consulta de preferências reais no Supabase
+    setIsLoadingPrefs(true);
+    userService.getUserPreferences(currentUser.id)
+      .then((prefs: any) => {
+        if (prefs) {
+          if (prefs.briefing_email) setEmailAddress(prefs.briefing_email);
+          if (typeof prefs.email_morning_briefing === 'boolean') setMorningEnabled(prefs.email_morning_briefing);
+          if (typeof prefs.email_evening_briefing === 'boolean') setEveningEnabled(prefs.email_evening_briefing);
+          if (prefs.morning_time) setMorningTime(prefs.morning_time);
+          if (prefs.evening_time) setEveningTime(prefs.evening_time);
+        }
+      })
+      .catch((err) => {
+        console.warn('[BriefingView] Falha ao carregar preferências do usuário:', err);
+      })
+      .finally(() => {
+        setIsLoadingPrefs(false);
+      });
 
-  // Filtragem
+    // 3. Consulta de briefings reais do usuário no Supabase
+    setIsLoadingBriefings(true);
+    briefingService.getUserBriefings(currentUser.id, events)
+      .then((items) => {
+        setUserBriefings(items);
+      })
+      .catch((err) => {
+        console.warn('[BriefingView] Falha ao carregar briefings do usuário:', err);
+      })
+      .finally(() => {
+        setIsLoadingBriefings(false);
+      });
+  }, [currentUser, events]);
+
+  // Filtragem dos briefings reais do usuário
   const filteredBriefings = useMemo(() => {
-    return briefingsData.filter((item) => {
+    return userBriefings.filter((item) => {
       if (activeFilter === 'morning' && item.type !== 'morning') return false;
       if (activeFilter === 'evening' && item.type !== 'evening') return false;
       if (searchQuery.trim()) {
@@ -230,14 +171,14 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
       }
       return true;
     });
-  }, [briefingsData, activeFilter, searchQuery]);
+  }, [userBriefings, activeFilter, searchQuery]);
 
   // Agrupamento por Hoje, Ontem e datas anteriores
   const todayItems = filteredBriefings.filter((b) => b.groupDate === 'Hoje');
   const yesterdayItems = filteredBriefings.filter((b) => b.groupDate === 'Ontem');
   const pastDateItems = filteredBriefings.filter((b) => b.groupDate !== 'Hoje' && b.groupDate !== 'Ontem');
 
-  // Envio de teste de e-mail (com cooldown de 30s e validação de e-mail)
+  // Envio de teste de e-mail (validação server-side, sem falso sucesso)
   const handleSendTest = async () => {
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailAddress || !emailRegex.test(emailAddress.trim())) {
@@ -248,6 +189,14 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
     setIsSendingTest(true);
     try {
       const cleanEmail = emailAddress.trim();
+
+      // Verifica status de conectividade do serviço de e-mail antes de despachar
+      const status = await resendService.getStatus();
+      if (!status.connected) {
+        showToast('Serviço de envio de e-mail temporariamente indisponível no servidor.');
+        return;
+      }
+
       const res = await resendService.sendBriefing(
         cleanEmail,
         'FatosBR • Demonstração do Briefing Matinal',
@@ -257,7 +206,6 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
         setTestCooldown(30);
         showToast(`E-mail de teste enviado para ${cleanEmail}!`);
       } else {
-        // Se a API externa não estiver configurada no ambiente atual, informa graciosamente sem crash
         showToast(res.message || res.error || 'Não foi possível disparar o teste no momento.');
       }
     } catch {
@@ -351,6 +299,41 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
         {/* COLUNA ESQUERDA: Feed de Briefings */}
         <div className="space-y-8 min-w-0">
           
+          {/* Indicador de Carregamento */}
+          {isLoadingBriefings && (
+            <div className="rounded-2xl border border-zinc-800/80 bg-[#0d0e12] p-12 text-center text-zinc-400 text-sm space-y-3">
+              <div className="w-8 h-8 rounded-full border-2 border-white/20 border-t-white animate-spin mx-auto" />
+              <p>Carregando seus briefings...</p>
+            </div>
+          )}
+
+          {/* Empty State Oficial quando não há briefings persistidos ainda */}
+          {!isLoadingBriefings && filteredBriefings.length === 0 && (
+            <div className="rounded-2xl border border-zinc-800/80 bg-[#0d0e12] p-8 sm:p-12 text-center max-w-xl mx-auto space-y-4">
+              <div className="w-12 h-12 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center mx-auto text-zinc-300">
+                <Sun className="w-6 h-6 text-zinc-400" />
+              </div>
+              <div className="space-y-1.5">
+                <h3 className="text-base sm:text-lg font-bold text-white tracking-tight">
+                  Nenhum briefing disponível no momento
+                </h3>
+                <p className="text-xs sm:text-sm text-zinc-400 leading-relaxed max-w-md mx-auto">
+                  Seus resumos matinais e noturnos serão gerados e consolidados aqui conforme o cronograma e os temas que você acompanha.
+                </p>
+              </div>
+              <div className="pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsPreferencesOpen(true)}
+                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white hover:bg-zinc-200 text-black text-xs font-bold transition cursor-pointer active:scale-95 shadow-sm min-h-[44px]"
+                >
+                  <Settings className="w-3.5 h-3.5" />
+                  <span>Configurar preferências de envio</span>
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* SEÇÃO HOJE (Cards Hero) */}
           {todayItems.length > 0 && (
             <div>
@@ -460,7 +443,9 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
           {/* SEÇÃO DATAS ANTERIORES */}
           {pastDateItems.length > 0 && (
             <div>
-              <h2 className="text-base font-bold text-white mb-3">3 de outubro de 2026</h2>
+              <h2 className="text-base font-bold text-white mb-3">
+                {pastDateItems[0]?.groupDate || 'Anteriores'}
+              </h2>
               <div className="space-y-3">
                 {pastDateItems.map((briefing) => (
                   <div
@@ -826,12 +811,15 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => {
+                disabled={isSavingPrefs}
+                onClick={async () => {
                   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
                   if (!emailAddress || !emailRegex.test(emailAddress.trim())) {
                     showToast('Por favor, informe um endereço de e-mail válido.');
                     return;
                   }
+
+                  setIsSavingPrefs(true);
                   try {
                     const cleanEmail = emailAddress.trim();
                     const prefs = {
@@ -842,18 +830,43 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
                       eveningTime,
                       updatedAt: new Date().toISOString()
                     };
-                    localStorage.setItem('fatosbr_briefing_prefs', JSON.stringify(prefs));
+
+                    // Se o usuário estiver autenticado, salva no Supabase (fonte canônica)
+                    if (currentUser?.id) {
+                      const ok = await userService.updateUserPreferences(currentUser.id, {
+                        briefing_email: cleanEmail,
+                        email_morning_briefing: morningEnabled,
+                        email_evening_briefing: eveningEnabled,
+                        morning_time: morningTime,
+                        evening_time: eveningTime,
+                        timezone: 'America/Sao_Paulo'
+                      });
+
+                      if (!ok) {
+                        showToast('Não foi possível persistir no servidor. Verifique a conexão.');
+                        return;
+                      }
+
+                      // Cache local isolado exclusivamente por usuário
+                      localStorage.setItem(`fatosbr_briefing_prefs_${currentUser.id}`, JSON.stringify(prefs));
+                    } else {
+                      // Usuário sem sessão ativa: alerta para fazer login
+                      onRequireAuth?.();
+                    }
+
                     resendService.setStoredSubscriberEmail(cleanEmail);
                     window.dispatchEvent(new CustomEvent('fatosbr_briefing_prefs_updated'));
                     setIsPreferencesOpen(false);
                     showToast('Preferências salvas com sucesso!');
                   } catch {
-                    showToast('Erro ao salvar preferências localmente.');
+                    showToast('Erro ao salvar preferências.');
+                  } finally {
+                    setIsSavingPrefs(false);
                   }
                 }}
-                className="px-5 py-2.5 bg-white hover:bg-zinc-200 text-black font-bold text-xs rounded-xl transition cursor-pointer min-h-[44px] shadow-sm active:scale-95"
+                className="px-5 py-2.5 bg-white hover:bg-zinc-200 text-black font-bold text-xs rounded-xl transition cursor-pointer min-h-[44px] shadow-sm active:scale-95 disabled:opacity-50"
               >
-                Salvar preferências
+                {isSavingPrefs ? 'Salvando...' : 'Salvar preferências'}
               </button>
             </div>
           </div>

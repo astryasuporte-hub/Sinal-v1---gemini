@@ -93,7 +93,7 @@ export const userService = {
   },
 
   /**
-   * Carrega preferências do usuário
+   * Carrega preferências do usuário diretamente do Supabase
    */
   async getUserPreferences(userId: string) {
     if (!isSupabaseConfigured || !userId) return null;
@@ -102,17 +102,21 @@ export const userService = {
         .from('user_preferences')
         .select('*')
         .eq('id', userId)
-        .single();
+        .maybeSingle();
 
-      if (error) return null;
+      if (error) {
+        console.warn('[UserService] Falha ao carregar preferências do Supabase:', error.message);
+        return null;
+      }
       return data;
-    } catch {
+    } catch (err: any) {
+      console.warn('[UserService] Erro na consulta de preferências:', err?.message);
       return null;
     }
   },
 
   /**
-   * Atualiza preferências do usuário
+   * Atualiza ou cria as preferências do usuário no Supabase (upsert idempotente)
    */
   async updateUserPreferences(
     userId: string,
@@ -122,17 +126,31 @@ export const userService = {
       email_breaking_alerts?: boolean;
       weekend_edition?: boolean;
       briefing_email?: string;
+      morning_time?: string;
+      evening_time?: string;
+      timezone?: string;
     }
   ): Promise<boolean> {
     if (!isSupabaseConfigured || !userId) return false;
     try {
+      const payload: any = {
+        id: userId,
+        ...updates,
+        updated_at: new Date().toISOString()
+      };
+
       const { error } = await supabase
         .from('user_preferences')
-        .update(updates)
-        .eq('id', userId);
+        .upsert(payload, { onConflict: 'id' });
 
-      return !error;
-    } catch {
+      if (error) {
+        console.error('[UserService] Erro ao persistir preferências no Supabase:', error.message);
+        return false;
+      }
+
+      return true;
+    } catch (err: any) {
+      console.error('[UserService] Erro de rede ao persistir preferências:', err?.message);
       return false;
     }
   },
