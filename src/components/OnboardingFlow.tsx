@@ -16,14 +16,11 @@ import {
   MapPin,
   Globe,
   Sliders,
-  Sparkles,
   Layers,
-  ArrowRight,
   TrendingUp,
   Cpu,
   Building2,
   Landmark,
-  Scale,
   Atom,
   HeartPulse,
   Trophy,
@@ -32,11 +29,17 @@ import {
   Leaf,
   GraduationCap,
   X,
-  Download,
   Smartphone,
-  Users
+  Users,
+  Zap,
+  ShieldCheck,
+  BarChart3
 } from 'lucide-react';
 import { Entity, Topic, Source } from '../types/sinal';
+import { INITIAL_ENTITIES, INITIAL_SOURCES } from '../data/mockData';
+import { FatosBrLogo } from './FatosBrLogo';
+import { EntityAvatar } from './EntityAvatar';
+import { HorizontalFilterTabs, FilterTabItem } from './HorizontalFilterTabs';
 import { usePWAInstall } from '../hooks/usePWAInstall';
 import { searchBrazilLocations, BrazilLocation } from '../data/brazilLocations';
 
@@ -46,14 +49,18 @@ interface OnboardingFlowProps {
   entities?: Entity[];
   topics?: Topic[];
   sources?: Source[];
+  onToggleEntity?: (id: string) => void;
+  onToggleSource?: (id: string) => void;
 }
 
 export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
   onComplete,
   onOpenLogin,
   entities = [],
-  topics = [],
-  sources = []
+  topics: _topics = [],
+  sources = [],
+  onToggleEntity,
+  onToggleSource
 }) => {
   const [step, setStep] = useState<number>(1);
   const pwa = usePWAInstall();
@@ -113,59 +120,128 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
     });
   };
 
-  // Tela 3: Seguir Pessoas, Empresas e Organizações
-  const [activeFollowTab, setActiveFollowTab] = useState<'people' | 'companies' | 'organizations'>('people');
+  // Tela 3: Seguir Pessoas, Empresas, Organizações e Fontes Reais da Plataforma
+  const [activeFollowTab, setActiveFollowTab] = useState<'all' | 'companies' | 'people' | 'organizations' | 'sources'>('all');
   const [entitySearch, setEntitySearch] = useState('');
 
-  const PEOPLE_LIST = useMemo(
-    () => [
-      { id: 'p1', name: 'Elon Musk', handle: '@elonmusk', role: 'CEO Tesla / X', emoji: '👨‍💼', color: '#1e293b' },
-      { id: 'p2', name: 'Sam Altman', handle: '@sama', role: 'CEO OpenAI', emoji: '🚀', color: '#0f172a' },
-      { id: 'p3', name: 'Sundar Pichai', handle: '@sundarpichai', role: 'CEO Google', emoji: '🌐', color: '#172554' },
-      { id: 'p4', name: 'Satya Nadella', handle: '@satyanadella', role: 'CEO Microsoft', emoji: '💻', color: '#1e1b4b' },
-      { id: 'p5', name: 'Jair Bolsonaro', handle: '@jairbolsonaro', role: 'Político', emoji: '🇧🇷', color: '#14532d' },
-      { id: 'p6', name: 'Fernando Haddad', handle: '@fernandohaddad', role: 'Ministro da Fazenda', emoji: '📊', color: '#7f1d1d' }
-    ],
-    []
-  );
+  const availableEntities = useMemo(() => {
+    return entities.length > 0 ? entities : INITIAL_ENTITIES;
+  }, [entities]);
 
-  const COMPANIES_LIST = useMemo(
-    () => [
-      { id: 'c1', name: 'NVIDIA', handle: '@nvidia', role: 'Semicondutores & IA', badge: 'NVDA', color: '#76b900' },
-      { id: 'c2', name: 'X (Twitter)', handle: '@X', role: 'Plataforma Global', badge: 'X', color: '#000000' },
-      { id: 'c3', name: 'Apple', handle: '@apple', role: 'Tecnologia & Hardware', badge: 'AAPL', color: '#27272a' },
-      { id: 'c4', name: 'Microsoft', handle: '@microsoft', role: 'Cloud & Software', badge: 'MSFT', color: '#0284c7' },
-      { id: 'c5', name: 'Google', handle: '@google', role: 'Search & IA', badge: 'GOOG', color: '#ea4335' },
-      { id: 'c6', name: 'Petrobras', handle: '@petrobras', role: 'Energia & Petróleo', badge: 'PETR4', color: '#16a34a' }
-    ],
-    []
-  );
+  const availableSources = useMemo(() => {
+    return sources.length > 0 ? sources : INITIAL_SOURCES;
+  }, [sources]);
 
-  const ORGANIZATIONS_LIST = useMemo(
-    () => [
-      { id: 'o1', name: 'BBC News Brasil', handle: '@bbcbrasil', role: 'Veículo Internacional', badge: 'BBC', color: '#b91c1c' },
-      { id: 'o2', name: 'Banco Central do Brasil', handle: '@bancocentralbr', role: 'Autoridade Monetária', badge: 'BACEN', color: '#1e3a8a' },
-      { id: 'o3', name: 'The Verge', handle: '@verge', role: 'Tecnologia & Inovação', badge: 'VERGE', color: '#9333ea' },
-      { id: 'o4', name: 'Reuters', handle: '@reuters', role: 'Agência de Notícias', badge: 'RT', color: '#ea580c' },
-      { id: 'o5', name: 'Supremo Tribunal Federal', handle: '@stf_oficial', role: 'Poder Judiciário', badge: 'STF', color: '#334155' }
-    ],
-    []
-  );
+  interface FollowableItem {
+    id: string;
+    kind: 'entity' | 'source';
+    tabCategory: 'companies' | 'people' | 'organizations' | 'sources';
+    name: string;
+    subtitle: string;
+    meta?: string;
+    entityType: 'company' | 'person' | 'organization' | 'source';
+    logoUrl?: string;
+    website?: string;
+    domain?: string;
+    brandColor?: string;
+    isFollowedByDefault: boolean;
+  }
 
-  const [followedEntities, setFollowedEntities] = useState<Set<string>>(
-    new Set(['p1', 'c1', 'o1'])
-  );
+  const followableItems = useMemo<FollowableItem[]>(() => {
+    const entityItems: FollowableItem[] = availableEntities.map((ent) => {
+      const tabCategory: FollowableItem['tabCategory'] =
+        ent.type === 'person'
+          ? 'people'
+          : ent.type === 'organization'
+          ? 'organizations'
+          : 'companies';
+      const defaultSubtitle =
+        ent.type === 'person'
+          ? 'Líder ou personalidade'
+          : ent.type === 'organization'
+          ? 'Organização'
+          : 'Empresa';
+      return {
+        id: ent.id,
+        kind: 'entity',
+        tabCategory,
+        name: ent.name,
+        subtitle: ent.role || ent.sector || defaultSubtitle,
+        meta: ent.interestCount || undefined,
+        entityType: ent.type === 'person' ? 'person' : ent.type === 'organization' ? 'organization' : 'company',
+        logoUrl: ent.avatarUrl || ent.logoUrl,
+        website: ent.website,
+        brandColor: ent.brandColor,
+        isFollowedByDefault: Boolean(ent.isFollowed)
+      };
+    });
 
-  const toggleFollow = (id: string) => {
+    const sourceItems: FollowableItem[] = availableSources.map((src) => ({
+      id: src.id,
+      kind: 'source',
+      tabCategory: 'sources',
+      name: src.name,
+      subtitle: src.category || 'Veículo jornalístico',
+      meta: src.domain,
+      entityType: 'source',
+      domain: src.domain,
+      brandColor: src.brandColor,
+      isFollowedByDefault: Boolean(src.isFollowed)
+    }));
+
+    return [...entityItems, ...sourceItems];
+  }, [availableEntities, availableSources]);
+
+  const followTabs = useMemo<FilterTabItem[]>(() => {
+    const counts = {
+      all: followableItems.length,
+      companies: followableItems.filter((i) => i.tabCategory === 'companies').length,
+      people: followableItems.filter((i) => i.tabCategory === 'people').length,
+      organizations: followableItems.filter((i) => i.tabCategory === 'organizations').length,
+      sources: followableItems.filter((i) => i.tabCategory === 'sources').length
+    };
+    const tabs: FilterTabItem[] = [{ id: 'all', label: 'Todos', count: counts.all }];
+    if (counts.companies > 0) tabs.push({ id: 'companies', label: 'Empresas', count: counts.companies });
+    if (counts.people > 0) tabs.push({ id: 'people', label: 'Pessoas', count: counts.people });
+    if (counts.organizations > 0) tabs.push({ id: 'organizations', label: 'Organizações', count: counts.organizations });
+    if (counts.sources > 0) tabs.push({ id: 'sources', label: 'Fontes', count: counts.sources });
+    return tabs;
+  }, [followableItems]);
+
+  const [followedEntities, setFollowedEntities] = useState<Set<string>>(() => {
+    const preselected = followableItems.filter((i) => i.isFollowedByDefault).map((i) => i.id);
+    return new Set(preselected.length > 0 ? preselected : followableItems.slice(0, 3).map((i) => i.id));
+  });
+
+  const filteredFollowItems = useMemo(() => {
+    const q = entitySearch.trim().toLowerCase();
+    return followableItems.filter((item) => {
+      const matchesTab = activeFollowTab === 'all' || item.tabCategory === activeFollowTab;
+      if (!matchesTab) return false;
+      if (!q) return true;
+      return (
+        item.name.toLowerCase().includes(q) ||
+        item.subtitle.toLowerCase().includes(q) ||
+        (item.meta && item.meta.toLowerCase().includes(q))
+      );
+    });
+  }, [followableItems, activeFollowTab, entitySearch]);
+
+  const toggleFollow = (item: FollowableItem) => {
     setFollowedEntities((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
+      if (next.has(item.id)) {
+        next.delete(item.id);
       } else {
-        next.add(id);
+        next.add(item.id);
       }
       return next;
     });
+    if (item.kind === 'entity') {
+      onToggleEntity?.(item.id);
+    } else {
+      onToggleSource?.(item.id);
+    }
   };
 
   // Tela 4: Notificações
@@ -186,9 +262,18 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
   };
 
   // Tela 5: Personalize seu Feed
-  const [feedPreferences, setFeedPreferences] = useState<Set<string>>(
-    new Set(['realtime_news', 'analyses_context', 'trusted_sources'])
-  );
+  const [feedPreferences, setFeedPreferences] = useState<Set<string>>(() => {
+    try {
+      const saved = localStorage.getItem('fatosbr_feed_preferences');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return new Set(parsed);
+        }
+      }
+    } catch {}
+    return new Set(['realtime_news', 'analyses_context', 'trusted_sources']);
+  });
 
   const toggleFeedPref = (id: string) => {
     setFeedPreferences((prev) => {
@@ -198,6 +283,9 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
       } else {
         next.add(id);
       }
+      try {
+        localStorage.setItem('fatosbr_feed_preferences', JSON.stringify(Array.from(next)));
+      } catch {}
       return next;
     });
   };
@@ -251,26 +339,11 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
             <span className="hidden sm:inline">Voltar</span>
           </button>
 
-          {/* Logo Central Minimalista */}
-          <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded-md bg-zinc-900 border border-zinc-800 flex items-center justify-center">
-              <svg
-                className="w-3.5 h-3.5 text-white"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <polyline points="2 12 6 12 9 3 13 21 16 12 22 12" />
-              </svg>
-            </div>
-            <span className="font-bold text-xs tracking-tight text-white">FatosBR</span>
-          </div>
+          {/* Logo Central Oficial */}
+          <FatosBrLogo size="sm" variant="compact" glow={false} />
 
           {/* Indicador de Etapa Numérica */}
-          <div className="font-mono text-xs text-zinc-400 font-semibold px-2.5 py-1 rounded-full bg-zinc-900 border border-zinc-800">
+          <div className="font-mono tabular-nums text-xs text-zinc-400 font-semibold px-2.5 py-1 rounded-full bg-zinc-900 border border-zinc-800">
             {step}/7
           </div>
         </div>
@@ -332,20 +405,9 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
         {/* ========================================================================= */}
         {step === 1 && (
           <div className="flex-1 flex flex-col justify-between animate-fadeIn py-2 min-h-[calc(100vh-60px)] sm:min-h-[720px] max-w-sm sm:max-w-md mx-auto w-full">
-            {/* Top Logo FatosBR Centralizado */}
-            <div className="pt-3 pb-2 flex items-center justify-center gap-2">
-              <svg
-                className="w-7 h-7 text-white"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <polyline points="2 12 6 12 9 3 13 21 16 12 22 12" />
-              </svg>
-              <span className="font-bold text-2xl tracking-tight text-white">FatosBR</span>
+            {/* Top Logo Oficial FatosBR Centralizado */}
+            <div className="pt-3 pb-2 flex items-center justify-center">
+              <FatosBrLogo size="lg" variant="compact" glow={false} />
             </div>
 
             {/* Imagem do Globo com Halo Radial Centralizado */}
@@ -468,108 +530,163 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
             {/* Ações Inferiores Etapa 2 */}
             <div className="pt-6 pb-4">
               <button
+                type="button"
                 onClick={nextStep}
                 disabled={selectedThemes.size === 0}
-                className="w-full py-4 px-6 bg-white text-black hover:bg-zinc-200 font-bold text-sm sm:text-base rounded-full transition cursor-pointer active:scale-[0.99] disabled:opacity-50"
+                className="w-full min-h-[52px] py-3.5 px-6 bg-white text-black hover:bg-zinc-200 font-bold text-sm sm:text-base rounded-full transition cursor-pointer active:scale-[0.99] disabled:opacity-50"
               >
-                Continuar ({selectedThemes.size} selecionados)
+                Continuar ({selectedThemes.size} {selectedThemes.size === 1 ? 'selecionado' : 'selecionados'})
               </button>
             </div>
           </div>
         )}
 
         {/* ========================================================================= */}
-        {/* ETAPA 3: QUEM VOCÊ QUER SEGUIR */}
+        {/* ETAPA 3: QUEM VOCÊ QUER SEGUIR (ENTIDADES E FONTES REAIS DA PLATAFORMA) */}
         {/* ========================================================================= */}
         {step === 3 && (
-          <div className="flex-1 flex flex-col animate-fadeIn py-2">
+          <div className="flex-1 flex flex-col justify-between animate-fadeIn py-2">
             <div>
-              <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
-                Quem você quer seguir?
-              </h1>
-              <p className="text-xs sm:text-sm text-zinc-400 mt-1.5 mb-4">
-                Escolha pessoas, empresas e organizações para acompanhar.
-              </p>
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+                    Quem você quer seguir?
+                  </h1>
+                  <p className="text-xs sm:text-sm text-zinc-400 mt-1.5 leading-relaxed">
+                    Acompanhe empresas, líderes, instituições e veículos jornalísticos reais da plataforma.
+                  </p>
+                </div>
+                <span className="shrink-0 text-[11px] font-mono tabular-nums text-zinc-300 bg-zinc-900 border border-zinc-800 px-2.5 py-1 rounded-lg mt-1">
+                  {followedEntities.size} seguindo
+                </span>
+              </div>
 
-              {/* Barra de Busca de Entidades */}
-              <div className="relative mb-4">
-                <Search className="w-4 h-4 text-zinc-500 absolute left-3.5 top-3.5" />
+              {/* Barra de Busca */}
+              <div className="relative mt-4 mb-3">
+                <Search className="w-4 h-4 text-zinc-500 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                 <input
                   type="text"
                   value={entitySearch}
                   onChange={(e) => setEntitySearch(e.target.value)}
-                  placeholder="Buscar pessoas, empresas..."
-                  className="w-full bg-[#12141a] border border-zinc-800 focus:border-zinc-600 rounded-xl pl-10 pr-4 py-2.5 text-xs sm:text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none transition"
+                  placeholder="Buscar empresas, pessoas, organizações ou fontes..."
+                  className="w-full min-h-[44px] bg-[#101218] border border-zinc-800 focus:border-zinc-500 rounded-xl pl-10 pr-10 py-2.5 text-xs sm:text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none transition"
+                />
+                {entitySearch && (
+                  <button
+                    type="button"
+                    onClick={() => setEntitySearch('')}
+                    aria-label="Limpar busca"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-zinc-500 hover:text-zinc-200 rounded-lg cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+
+              {/* Abas Dinâmicas por Categoria */}
+              <div className="mb-3.5">
+                <HorizontalFilterTabs
+                  tabs={followTabs}
+                  activeTabId={followTabs.some((t) => t.id === activeFollowTab) ? activeFollowTab : 'all'}
+                  onSelectTab={(tabId) =>
+                    setActiveFollowTab(tabId as 'all' | 'companies' | 'people' | 'organizations' | 'sources')
+                  }
+                  ariaLabel="Filtrar perfis para seguir"
                 />
               </div>
 
-              {/* Tabs de Seleção */}
-              <div className="flex p-1 bg-[#12141a] border border-zinc-800 rounded-full mb-4">
-                {(['people', 'companies', 'organizations'] as const).map((tab) => (
-                  <button
-                    key={tab}
-                    onClick={() => setActiveFollowTab(tab)}
-                    className={`flex-1 py-1.5 text-xs font-semibold rounded-full transition cursor-pointer ${
-                      activeFollowTab === tab ? 'bg-white text-black' : 'text-zinc-400 hover:text-white'
-                    }`}
-                  >
-                    {tab === 'people' ? 'Pessoas' : tab === 'companies' ? 'Empresas' : 'Organizações'}
-                  </button>
-                ))}
-              </div>
-
-              {/* Lista com Follow Toggles */}
-              <div className="space-y-2 max-h-[48vh] overflow-y-auto pr-1">
-                {(activeFollowTab === 'people'
-                  ? PEOPLE_LIST
-                  : activeFollowTab === 'companies'
-                  ? COMPANIES_LIST
-                  : ORGANIZATIONS_LIST
-                )
-                  .filter((item) => item.name.toLowerCase().includes(entitySearch.toLowerCase()))
-                  .map((item) => {
+              {/* Lista Real de Entidades e Fontes com Avatares/Logos */}
+              <div className="space-y-2.5 max-h-[46vh] overflow-y-auto no-scrollbar pr-0.5">
+                {filteredFollowItems.length > 0 ? (
+                  filteredFollowItems.map((item) => {
                     const isFollowed = followedEntities.has(item.id);
                     return (
                       <div
                         key={item.id}
-                        className="flex items-center justify-between p-3 rounded-2xl bg-[#0f1116] border border-zinc-800 hover:border-zinc-700 transition"
+                        onClick={() => toggleFollow(item)}
+                        className={`flex items-center justify-between gap-3 p-3.5 rounded-2xl border transition cursor-pointer active:scale-[0.99] ${
+                          isFollowed
+                            ? 'bg-[#15171e] border-zinc-500/80 shadow-sm'
+                            : 'bg-[#0d0f14] border-zinc-800/80 hover:border-zinc-700 hover:bg-[#12141b]'
+                        }`}
                       >
-                        <div className="flex items-center gap-3">
-                          <div
-                            className="w-10 h-10 rounded-xl flex items-center justify-center text-xs font-bold shrink-0 border border-zinc-700/60"
-                            style={{ backgroundColor: item.color, color: '#fff' }}
-                          >
-                            <span>{'badge' in item ? item.badge : item.emoji}</span>
-                          </div>
-                          <div>
-                            <div className="text-xs sm:text-sm font-semibold text-white">{item.name}</div>
-                            <div className="text-[11px] text-zinc-400">
-                              {item.handle} · <span className="text-zinc-500">{item.role}</span>
+                        <div className="flex items-center gap-3 min-w-0">
+                          <EntityAvatar
+                            name={item.name}
+                            type={item.entityType}
+                            logoUrl={item.logoUrl}
+                            website={item.website}
+                            domain={item.domain}
+                            brandColor={item.brandColor}
+                            size="md"
+                          />
+                          <div className="min-w-0">
+                            <div className="text-xs sm:text-sm font-semibold text-white truncate">
+                              {item.name}
+                            </div>
+                            <div className="text-[11px] text-zinc-400 truncate mt-0.5">
+                              {item.subtitle}
+                              {item.meta ? (
+                                <span className="text-zinc-500 font-mono"> · {item.meta}</span>
+                              ) : null}
                             </div>
                           </div>
                         </div>
 
                         <button
-                          onClick={() => toggleFollow(item.id)}
-                          className={`w-8 h-8 rounded-full flex items-center justify-center transition cursor-pointer shrink-0 border ${
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toggleFollow(item);
+                          }}
+                          aria-label={isFollowed ? `Deixar de seguir ${item.name}` : `Seguir ${item.name}`}
+                          className={`min-h-[36px] min-w-[36px] px-3 rounded-full flex items-center justify-center gap-1.5 text-xs font-semibold transition cursor-pointer shrink-0 border ${
                             isFollowed
                               ? 'bg-white text-black border-white'
-                              : 'bg-zinc-900 text-zinc-300 border-zinc-700 hover:text-white'
+                              : 'bg-zinc-900 text-zinc-300 border-zinc-700 hover:text-white hover:border-zinc-500'
                           }`}
                         >
-                          {isFollowed ? <Check className="w-4 h-4 stroke-[3]" /> : <Plus className="w-4 h-4" />}
+                          {isFollowed ? (
+                            <>
+                              <Check className="w-3.5 h-3.5 stroke-[3]" />
+                              <span className="hidden sm:inline">Seguindo</span>
+                            </>
+                          ) : (
+                            <>
+                              <Plus className="w-3.5 h-3.5" />
+                              <span className="hidden sm:inline">Seguir</span>
+                            </>
+                          )}
                         </button>
                       </div>
                     );
-                  })}
+                  })
+                ) : (
+                  <div className="p-6 rounded-2xl border border-zinc-800/80 bg-[#0d0f14] text-center space-y-2">
+                    <p className="text-xs sm:text-sm text-zinc-300 font-medium">
+                      Nenhum resultado encontrado para &ldquo;{entitySearch}&rdquo;.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEntitySearch('');
+                        setActiveFollowTab('all');
+                      }}
+                      className="text-xs text-white underline hover:text-zinc-300 cursor-pointer"
+                    >
+                      Limpar filtros
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
 
             {/* Ações Inferiores Etapa 3 */}
             <div className="pt-6 pb-4">
               <button
+                type="button"
                 onClick={nextStep}
-                className="w-full py-4 px-6 bg-white text-black hover:bg-zinc-200 font-bold text-sm sm:text-base rounded-full transition cursor-pointer active:scale-[0.99]"
+                className="w-full min-h-[52px] py-3.5 px-6 bg-white text-black hover:bg-zinc-200 font-bold text-sm sm:text-base rounded-full transition cursor-pointer active:scale-[0.99] shadow-lg shadow-white/5"
               >
                 Continuar
               </button>
@@ -613,7 +730,7 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
                   {
                     id: 'whatsapp_digest',
                     title: 'Resumo por WhatsApp',
-                    desc: 'Em breve para assinantes FatosBR Pro.',
+                    desc: 'Canal adicional em preparação para envio diário.',
                     icon: MessageSquare,
                     badge: 'Em breve'
                   }
@@ -674,72 +791,103 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
         {/* ETAPA 5: PERSONALIZE SEU FEED */}
         {/* ========================================================================= */}
         {step === 5 && (
-          <div className="flex-1 flex flex-col animate-fadeIn py-2">
+          <div className="flex-1 flex flex-col justify-between animate-fadeIn py-2">
             <div>
-              <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
-                Personalize seu feed
-              </h1>
-              <p className="text-xs sm:text-sm text-zinc-400 mt-1.5 mb-5">
-                Escolha o que mais te interessa para que a FatosBR priorize os eventos certos.
-              </p>
+              <div className="flex items-start justify-between gap-3 mb-5">
+                <div>
+                  <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+                    Personalize seu feed
+                  </h1>
+                  <p className="text-xs sm:text-sm text-zinc-400 mt-1.5 leading-relaxed">
+                    Defina o foco da sua cobertura para que a FatosBR priorize os acontecimentos certos.
+                  </p>
+                </div>
+                <span className="shrink-0 text-[11px] font-mono tabular-nums text-zinc-300 bg-zinc-900 border border-zinc-800 px-2.5 py-1 rounded-lg mt-1">
+                  {feedPreferences.size} ativos
+                </span>
+              </div>
 
-              <div className="space-y-2.5 max-h-[50vh] overflow-y-auto pr-1">
+              <div className="space-y-3">
                 {[
                   {
                     id: 'realtime_news',
                     title: 'Notícias em tempo real',
-                    desc: 'Acontecimentos do momento com consolidação contínua.'
+                    desc: 'Acontecimentos do momento com atualização contínua.',
+                    icon: Zap
                   },
                   {
                     id: 'analyses_context',
-                    title: 'Análises e contextos',
-                    desc: 'Entenda o porquê de tudo e impactos estratégicos.'
+                    title: 'Análises e contexto',
+                    desc: 'Entenda causas, desdobramentos e impactos práticos.',
+                    icon: Layers
                   },
                   {
                     id: 'trusted_sources',
-                    title: 'Fontes confiáveis',
-                    desc: 'Veículos consagrados e jornalismo investigativo verificado.'
+                    title: 'Fontes verificadas',
+                    desc: 'Prioridade para veículos consagrados e dados oficiais.',
+                    icon: ShieldCheck
                   },
                   {
                     id: 'events_trends',
                     title: 'Eventos e tendências',
-                    desc: 'O que está ganhando tração e discussões em alta.'
+                    desc: 'Assuntos que estão ganhando repercussão agora.',
+                    icon: TrendingUp
                   },
                   {
                     id: 'markets_investments',
-                    title: 'Mercado e investimentos',
-                    desc: 'Bolsas, balanços, câmbio e movimentos financeiros.'
+                    title: 'Mercado e economia',
+                    desc: 'Bolsas, juros, câmbio, balanços e política fiscal.',
+                    icon: BarChart3
                   },
                   {
                     id: 'innovation_ai',
                     title: 'Inovação e tecnologia',
-                    desc: 'Inteligência Artificial, ciência aplicada e futuro digital.'
+                    desc: 'Inteligência Artificial, ciência aplicada e infraestrutura digital.',
+                    icon: Cpu
                   }
                 ].map((item) => {
+                  const Icon = item.icon;
                   const isSelected = feedPreferences.has(item.id);
                   return (
-                    <div
+                    <button
                       key={item.id}
+                      type="button"
                       onClick={() => toggleFeedPref(item.id)}
-                      className={`p-3.5 sm:p-4 rounded-2xl border transition-all cursor-pointer flex items-center justify-between gap-3 ${
+                      aria-pressed={isSelected}
+                      className={`w-full text-left p-4 rounded-2xl border transition-all cursor-pointer flex items-center justify-between gap-3.5 active:scale-[0.99] ${
                         isSelected
-                          ? 'bg-[#181a20] border-white'
-                          : 'bg-[#0f1116] border-zinc-800 hover:border-zinc-700'
+                          ? 'bg-[#161820] border-white/90 shadow-sm'
+                          : 'bg-[#0d0f14] border-zinc-800/80 hover:border-zinc-700 hover:bg-[#12141b]'
                       }`}
                     >
-                      <div>
-                        <div className="text-xs sm:text-sm font-semibold text-white">{item.title}</div>
-                        <p className="text-[11px] sm:text-xs text-zinc-400 mt-0.5">{item.desc}</p>
+                      <div className="flex items-center gap-3.5 min-w-0">
+                        <div
+                          className={`w-10 h-10 rounded-xl border flex items-center justify-center shrink-0 transition-colors ${
+                            isSelected
+                              ? 'bg-white text-black border-white'
+                              : 'bg-zinc-900/90 text-zinc-400 border-zinc-800'
+                          }`}
+                        >
+                          <Icon className="w-4 h-4" />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-xs sm:text-sm font-semibold text-white">
+                            {item.title}
+                          </div>
+                          <p className="text-xs text-zinc-400 mt-0.5 leading-snug">
+                            {item.desc}
+                          </p>
+                        </div>
                       </div>
 
                       <div
-                        className={`w-5 h-5 rounded-full border flex items-center justify-center shrink-0 transition-all ${
+                        className={`w-6 h-6 rounded-full border flex items-center justify-center shrink-0 transition-all ${
                           isSelected ? 'bg-white border-white' : 'border-zinc-700 bg-transparent'
                         }`}
                       >
-                        {isSelected && <Check className="w-3 h-3 text-black stroke-[3]" />}
+                        {isSelected && <Check className="w-3.5 h-3.5 text-black stroke-[3]" />}
                       </div>
-                    </div>
+                    </button>
                   );
                 })}
               </div>
@@ -748,8 +896,10 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
             {/* Ações Inferiores Etapa 5 */}
             <div className="pt-6 pb-4">
               <button
+                type="button"
                 onClick={nextStep}
-                className="w-full py-4 px-6 bg-white text-black hover:bg-zinc-200 font-bold text-sm sm:text-base rounded-full transition cursor-pointer active:scale-[0.99]"
+                disabled={feedPreferences.size === 0}
+                className="w-full min-h-[52px] py-3.5 px-6 bg-white text-black hover:bg-zinc-200 font-bold text-sm sm:text-base rounded-full transition cursor-pointer active:scale-[0.99] disabled:opacity-50 shadow-lg shadow-white/5"
               >
                 Continuar
               </button>
@@ -968,10 +1118,10 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
                 <div className="flex items-center justify-between text-sm">
                   <div className="flex items-center gap-2.5 text-[#8e8e93]">
                     <Users className="w-4 h-4 text-[#8e8e93]" />
-                    <span>Pessoas e empresas</span>
+                    <span>Perfis e fontes</span>
                   </div>
-                  <span className="font-medium text-[#a1a1aa] font-mono">
-                    +{followedEntities.size || 3}
+                  <span className="font-medium text-[#a1a1aa] font-mono tabular-nums">
+                    +{followedEntities.size}
                   </span>
                 </div>
 

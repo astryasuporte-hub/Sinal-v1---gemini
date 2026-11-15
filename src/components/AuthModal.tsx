@@ -13,11 +13,10 @@ import {
   Sparkles,
   CheckCircle2,
   AlertCircle,
-  KeyRound,
-  ShieldCheck,
   ChevronLeft,
   RotateCcw
 } from 'lucide-react';
+import { FatosBrLogo } from './FatosBrLogo';
 import { authService } from '../services/authService';
 import { isSupabaseConfigured, getSupabaseConfigStatus } from '../lib/supabase';
 
@@ -142,11 +141,22 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         }
       }
 
+      // Dispara o e-mail de verificação via authService sem exibir o código na interface
+      const generatedCode = Math.floor(100000 + Math.random() * 900000).toString();
+      const otpSendRes = await authService.sendLoginOtp(email, generatedCode);
+
       // Avança para a tela de confirmação de código de 6 dígitos
       setIsLoading(false);
       setStep('verify-code');
       setResendCooldown(45);
-      setSuccessMessage(`Código de verificação enviado para ${email}.`);
+      if (otpSendRes.success) {
+        setSuccessMessage('Código de verificação enviado para seu e-mail. Verifique sua caixa de entrada e spam.');
+      } else {
+        setErrorMessage(
+          otpSendRes.error ||
+            'Não foi possível confirmar o envio do e-mail agora. Tente reenviar o código em instantes.'
+        );
+      }
       setTimeout(() => {
         digitInputRefs.current[0]?.focus();
       }, 100);
@@ -203,7 +213,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   };
 
   // Confirmação do Código de Verificação de 6 Dígitos
-  const handleVerifyCodeSubmit = (e: React.FormEvent) => {
+  const handleVerifyCodeSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
 
@@ -215,34 +225,55 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
     setIsLoading(true);
 
-    setTimeout(() => {
+    let verified = false;
+    try {
+      const verifyRes = await authService.verifyOtp(email, fullCode, mode === 'signup' ? 'signup' : 'email');
+      verified = verifyRes.success;
+    } catch {
+      verified = false;
+    }
+
+    if (!verified) {
       setIsLoading(false);
-      setSuccessMessage('Código verificado com sucesso! Acessando FatosBR...');
+      setErrorMessage('Código de verificação incorreto ou expirado. Confira o código recebido por e-mail.');
+      return;
+    }
 
-      // Salva dados locais do usuário autenticado
-      try {
-        const userProfile = {
-          name: fullName || email.split('@')[0],
-          displayName: fullName || email.split('@')[0],
-          email: email,
-          avatarUrl: null,
-          timezone: 'America/Sao_Paulo'
-        };
-        localStorage.setItem('sinal_user_profile', JSON.stringify(userProfile));
-      } catch {}
+    setIsLoading(false);
+    setSuccessMessage('Código verificado com sucesso! Acessando FatosBR...');
 
-      setTimeout(() => {
-        onAuthSuccess?.(email, fullName || email.split('@')[0]);
-        onClose();
-      }, 700);
-    }, 600);
+    try {
+      const userProfile = {
+        name: fullName || email.split('@')[0],
+        displayName: fullName || email.split('@')[0],
+        email: email,
+        avatarUrl: null,
+        timezone: 'America/Sao_Paulo'
+      };
+      localStorage.setItem('sinal_user_profile', JSON.stringify(userProfile));
+    } catch {}
+
+    setTimeout(() => {
+      onAuthSuccess?.(email, fullName || email.split('@')[0]);
+      onClose();
+    }, 500);
   };
 
-  const handleResendCode = () => {
+  const handleResendCode = async () => {
     if (resendCooldown > 0) return;
+    setErrorMessage(null);
     setResendCooldown(45);
     setCodeDigits(['', '', '', '', '', '']);
-    setSuccessMessage(`Um novo código de verificação de 6 dígitos foi enviado para ${email}.`);
+    setSuccessMessage('Reenviando código de verificação para seu e-mail...');
+
+    const newCode = Math.floor(100000 + Math.random() * 900000).toString();
+    const res = await authService.sendLoginOtp(email, newCode);
+    if (res.success) {
+      setSuccessMessage('Código de verificação enviado para seu e-mail. Verifique sua caixa de entrada e spam.');
+    } else {
+      setSuccessMessage(null);
+      setErrorMessage(res.error || 'Não foi possível reenviar o código agora. Tente novamente em instantes.');
+    }
     digitInputRefs.current[0]?.focus();
   };
 
@@ -253,19 +284,14 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         onClick={(e) => e.stopPropagation()}
       >
         {/* Top Header */}
-        <div className="flex items-center justify-between p-5 border-b border-zinc-800/80 bg-zinc-950/60">
-          <div className="flex items-center space-x-3">
-            <div className="w-8 h-8 rounded-lg bg-zinc-900 border border-zinc-800 flex items-center justify-center">
-              <span className="font-mono text-xs font-bold text-white tracking-wider">FBR</span>
-            </div>
-            <div>
-              <h3 className="text-sm sm:text-base font-semibold text-white tracking-tight">FatosBR Intelligence</h3>
-              <p className="text-[11px] text-zinc-400">Acesso seguro e sincronização contínua</p>
-            </div>
+        <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800/80 bg-zinc-950/60">
+          <div className="flex items-center gap-3">
+            <FatosBrLogo size="sm" variant="compact" glow={false} />
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 text-zinc-400 hover:text-white rounded-lg hover:bg-zinc-800/60 transition-colors cursor-pointer"
+            className="p-2 text-zinc-400 hover:text-white rounded-xl hover:bg-zinc-800/60 transition-colors cursor-pointer min-h-[40px] min-w-[40px] flex items-center justify-center"
+            aria-label="Fechar"
           >
             <X className="w-5 h-5" />
           </button>
@@ -454,20 +480,23 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           /* ================= ETAPA 2: CÓDIGO DE VERIFICAÇÃO DE 6 DÍGITOS ================= */
           <div className="p-6 space-y-5 animate-fade-in">
             {/* Header da Etapa de Código */}
-            <div className="space-y-1 text-center">
-              <div className="w-12 h-12 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center mx-auto text-emerald-400 mb-2">
-                <KeyRound className="w-6 h-6" />
+            <div className="space-y-1.5 text-center">
+              <div className="w-12 h-12 rounded-2xl bg-[#111318] border border-zinc-800 flex items-center justify-center mx-auto text-white mb-3 shadow-inner">
+                <Mail className="w-5 h-5" />
               </div>
-              <h4 className="text-base font-bold text-white">Código de Verificação</h4>
-              <p className="text-xs text-zinc-400 leading-relaxed">
-                Digite o código de 6 dígitos enviado para{' '}
-                <span className="text-zinc-200 font-semibold">{email}</span>.
-              </p>
+              <h4 className="text-lg font-bold text-white tracking-tight">Verifique seu e-mail</h4>
+              <div className="text-xs text-zinc-400 leading-relaxed space-y-0.5">
+                <p>
+                  Código de verificação enviado para{' '}
+                  <span className="text-zinc-200 font-medium">{email}</span>.
+                </p>
+                <p className="text-zinc-500">Verifique sua caixa de entrada e spam.</p>
+              </div>
             </div>
 
             <form onSubmit={handleVerifyCodeSubmit} className="space-y-4">
               {/* Grid dos 6 Dígitos */}
-              <div className="flex items-center justify-center gap-2 sm:gap-2.5">
+              <div className="grid grid-cols-6 gap-2 sm:gap-2.5">
                 {codeDigits.map((digit, idx) => (
                   <input
                     key={idx}
@@ -476,13 +505,15 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     }}
                     type="text"
                     inputMode="numeric"
+                    autoComplete={idx === 0 ? 'one-time-code' : 'off'}
                     pattern="[0-9]*"
                     maxLength={1}
                     value={digit}
+                    aria-label={`Dígito ${idx + 1} de 6`}
                     onChange={(e) => handleDigitChange(idx, e.target.value)}
                     onKeyDown={(e) => handleDigitKeyDown(idx, e)}
                     onPaste={idx === 0 ? handleDigitPaste : undefined}
-                    className="w-11 h-13 sm:w-12 sm:h-14 rounded-xl border border-zinc-700 bg-zinc-900 text-center text-lg sm:text-xl font-mono font-bold text-white focus:outline-none focus:border-white focus:ring-1 focus:ring-white transition-all shadow-inner"
+                    className="w-full h-12 sm:h-14 rounded-xl border border-zinc-800 bg-[#111318] text-center text-lg sm:text-xl font-mono font-bold text-white focus:outline-none focus:border-white focus:ring-1 focus:ring-white/30 transition-all shadow-inner"
                   />
                 ))}
               </div>
@@ -505,13 +536,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               <button
                 type="submit"
                 disabled={isLoading}
-                className="w-full flex items-center justify-center space-x-2 px-4 py-3 bg-zinc-100 hover:bg-white text-zinc-950 font-bold text-sm rounded-xl transition-all disabled:opacity-50 cursor-pointer shadow-sm active:scale-[0.99]"
+                className="w-full flex items-center justify-center space-x-2 px-4 py-3 bg-white hover:bg-zinc-200 text-black font-bold text-sm rounded-xl transition-all disabled:opacity-50 cursor-pointer shadow-sm active:scale-[0.99] min-h-[48px]"
               >
                 {isLoading ? (
                   <span className="inline-block w-4 h-4 border-2 border-zinc-900 border-t-transparent rounded-full animate-spin" />
                 ) : (
                   <>
-                    <span>Confirmar Código e Acessar FatosBR</span>
+                    <span>Confirmar código</span>
                     <ArrowRight className="w-4 h-4" />
                   </>
                 )}

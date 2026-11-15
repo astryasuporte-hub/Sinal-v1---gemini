@@ -18,11 +18,9 @@ import {
   Send,
   X,
   FileText,
-  Calendar,
-  Sparkles,
-  ArrowRight,
-  AlertCircle
+  ArrowLeft
 } from 'lucide-react';
+import { FatosBrLogo } from './FatosBrLogo';
 import { resendService } from '../services/resendService';
 import { userService } from '../services/userService';
 import { briefingService, RealBriefingItem } from '../services/briefingService';
@@ -547,101 +545,105 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
               <ChevronRight className="w-4 h-4 text-zinc-500" />
             </button>
           </div>
-
-          {/* Card Trial / Assinatura */}
-          <div
-            onClick={onOpenBilling}
-            className="flex items-center gap-3 p-4 bg-[#121215] border border-zinc-800/80 rounded-2xl cursor-pointer hover:border-zinc-700 transition"
-          >
-            <span className="text-[10px] font-bold font-mono px-2 py-0.5 rounded bg-zinc-900 border border-zinc-700/80 text-zinc-300">
-              TRIAL
-            </span>
-            <div>
-              <h4 className="text-xs font-semibold text-white">Teste grátis</h4>
-              <p className="text-[11px] text-zinc-400">
-                {subscription?.trialEndsAt
-                  ? `Termina em ${new Date(subscription.trialEndsAt).toLocaleDateString('pt-BR')}`
-                  : 'Termina em 11 de out. de 2026'}
-              </p>
-            </div>
-          </div>
         </aside>
 
       </div>
 
       {/* ================= MODAL: LEITOR DE BRIEFING SELECIONADO ================= */}
       {selectedBriefing && (
-        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in">
-          <div className="bg-[#0e0f14] border border-zinc-800 rounded-2xl max-w-2xl w-full max-h-[90vh] overflow-hidden flex flex-col shadow-2xl">
-            {/* Header do Modal com Capa */}
-            <div
-              className="relative p-6 bg-cover bg-center min-h-[160px] flex flex-col justify-between"
-              style={{ backgroundImage: `url('${selectedBriefing.bgImage}')` }}
-            >
-              <div className="absolute inset-0 bg-black/75 pointer-events-none" />
-              <div className="relative z-10 flex items-center justify-between">
-                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-black/70 border border-zinc-700 text-white">
-                  {selectedBriefing.type === 'evening' ? <Moon className="w-3.5 h-3.5" /> : <Sun className="w-3.5 h-3.5" />}
-                  <span>{selectedBriefing.type === 'evening' ? 'Resumo da noite' : 'Resumo da manhã'}</span>
-                </span>
-
+        <div
+          className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center sm:p-6 animate-fade-in"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setSelectedBriefing(null);
+          }}
+        >
+          <div className="bg-[#090a0d] sm:border sm:border-zinc-800 sm:rounded-2xl max-w-2xl w-full h-full sm:h-auto sm:max-h-[90vh] overflow-hidden flex flex-col shadow-2xl">
+            {/* Barra Superior Consistente com a Home */}
+            <div className="sticky top-0 z-20 px-4 sm:px-6 h-14 bg-[#090a0d]/95 backdrop-blur-md border-b border-zinc-800/80 flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2.5">
                 <button
+                  type="button"
                   onClick={() => setSelectedBriefing(null)}
-                  className="p-1.5 rounded-full bg-black/60 hover:bg-black/90 text-white cursor-pointer transition"
+                  className="min-h-[44px] min-w-[44px] -ml-2 flex items-center justify-center rounded-xl text-zinc-300 hover:text-white hover:bg-zinc-900 transition cursor-pointer"
+                  aria-label="Voltar para Briefings"
                 >
-                  <X className="w-5 h-5" />
+                  <ArrowLeft className="w-5 h-5" />
                 </button>
+                <FatosBrLogo size="sm" variant="compact" glow={false} />
               </div>
 
-              <div className="relative z-10">
-                <h2 className="text-xl sm:text-2xl font-bold text-white tracking-tight">
+              <button
+                type="button"
+                onClick={() => setSelectedBriefing(null)}
+                className="min-h-[44px] min-w-[44px] -mr-2 flex items-center justify-center rounded-xl text-zinc-400 hover:text-white hover:bg-zinc-900 transition cursor-pointer"
+                aria-label="Fechar briefing"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Capa Editorial do Briefing */}
+            <div
+              className="relative px-6 py-7 bg-cover bg-center min-h-[168px] flex flex-col justify-end shrink-0 border-b border-zinc-800/80"
+              style={{ backgroundImage: `url('${selectedBriefing.bgImage}')` }}
+            >
+              <div className="absolute inset-0 bg-gradient-to-t from-[#090a0d] via-[#090a0d]/75 to-black/55 pointer-events-none" />
+              <div className="relative z-10 space-y-2">
+                <div className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-zinc-300">
+                  {selectedBriefing.type === 'evening' ? <Moon className="w-3.5 h-3.5" /> : <Sun className="w-3.5 h-3.5" />}
+                  <span>{selectedBriefing.type === 'evening' ? 'Resumo da noite' : 'Resumo da manhã'}</span>
+                </div>
+
+                <h2 className="text-xl sm:text-2xl font-bold text-white tracking-tight leading-snug">
                   {selectedBriefing.title}
                 </h2>
-                <p className="text-xs text-zinc-300 font-mono mt-1">
+                <p className="text-xs text-zinc-400 font-mono tabular-nums">
                   {selectedBriefing.dateLabel} · {selectedBriefing.readTime}
                 </p>
               </div>
             </div>
 
             {/* Lista de acontecimentos do briefing */}
-            <div className="p-6 overflow-y-auto space-y-4 flex-1 divide-y divide-zinc-800/80">
-              <div className="text-sm text-zinc-300 pb-2 leading-relaxed">
+            <div className="p-5 sm:p-6 overflow-y-auto space-y-4 flex-1">
+              <p className="text-sm sm:text-base text-zinc-200 leading-relaxed pb-2 border-b border-zinc-800/80">
                 {selectedBriefing.description}
-              </div>
+              </p>
 
-              {events.slice(0, selectedBriefing.eventsCount).map((ev, i) => (
-                <div
-                  key={ev.id}
-                  onClick={() => {
-                    setSelectedBriefing(null);
-                    onOpenEventDetail?.(ev);
-                  }}
-                  className="pt-4 hover:bg-zinc-900/40 p-2.5 rounded-xl transition cursor-pointer group"
-                >
-                  <div className="flex items-center gap-2 text-[11px] text-zinc-400 font-mono mb-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-zinc-300" />
-                    <span className="uppercase">{ev.category}</span>
-                    <span>·</span>
-                    <span>{ev.sources?.length || 2} fontes apuradas</span>
+              <div className="divide-y divide-zinc-800/70">
+                {events.slice(0, selectedBriefing.eventsCount).map((ev) => (
+                  <div
+                    key={ev.id}
+                    onClick={() => {
+                      setSelectedBriefing(null);
+                      onOpenEventDetail?.(ev);
+                    }}
+                    className="py-4 first:pt-2 hover:bg-zinc-900/50 px-3 -mx-3 rounded-xl transition cursor-pointer group"
+                  >
+                    <div className="flex items-center gap-2 text-[11px] text-zinc-400 font-mono mb-1.5">
+                      <span className="uppercase tracking-wider text-zinc-300">{ev.category}</span>
+                      <span>·</span>
+                      <span>{ev.sources?.length || 2} fontes apuradas</span>
+                    </div>
+                    <h4 className="text-sm sm:text-base font-bold text-white group-hover:text-zinc-200 transition leading-snug">
+                      {ev.title}
+                    </h4>
+                    <p className="text-xs sm:text-sm text-zinc-400 mt-1.5 line-clamp-2 leading-relaxed">
+                      {ev.summary}
+                    </p>
                   </div>
-                  <h4 className="text-sm font-bold text-white group-hover:text-zinc-200 transition leading-snug">
-                    {ev.title}
-                  </h4>
-                  <p className="text-xs text-zinc-400 mt-1 line-clamp-2 leading-relaxed">
-                    {ev.summary}
-                  </p>
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
 
             {/* Rodapé do Modal */}
-            <div className="p-4 bg-[#0a0b0e] border-t border-zinc-800 flex items-center justify-between">
+            <div className="px-5 py-3.5 bg-[#0a0b0e] border-t border-zinc-800 flex items-center justify-between shrink-0">
               <span className="text-xs text-zinc-400 font-mono">
-                FatosBR • Edição oficial
+                FatosBR · Edição consolidada
               </span>
               <button
+                type="button"
                 onClick={() => setSelectedBriefing(null)}
-                className="px-4 py-2 bg-white text-black text-xs font-semibold rounded-lg hover:bg-zinc-200 transition cursor-pointer"
+                className="min-h-[40px] px-4 py-2 bg-white text-black text-xs font-bold rounded-xl hover:bg-zinc-200 transition cursor-pointer"
               >
                 Fechar
               </button>

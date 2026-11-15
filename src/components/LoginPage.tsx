@@ -5,6 +5,7 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { ArrowLeft, Check, AlertCircle, Eye, EyeOff, Lock, Mail, User, ShieldCheck } from 'lucide-react';
+import { FatosBrLogo } from './FatosBrLogo';
 import { authService } from '../services/authService';
 import { userService } from '../services/userService';
 import { resendService } from '../services/resendService';
@@ -136,22 +137,25 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         }
       }
 
-      // Gera código de verificação numérico de 6 dígitos
+      // Gera código numérico de 6 dígitos para envio por e-mail
       const generatedCode = Math.floor(100000 + Math.random() * 900000).toString();
       setVerificationCode(generatedCode);
 
       // Dispara o e-mail real via authService integrado ao Supabase e ao serviço de e-mail dedicado
       const otpSendRes = await authService.sendLoginOtp(email, generatedCode);
 
-      // Avança para a verificação do código de 6 dígitos
+      // Avança para a verificação do código de 6 dígitos sem expor o código na interface
       setIsLoading(false);
       setStep('verify-code');
       setResendCooldown(45);
 
       if (otpSendRes.success) {
-        setSuccessMessage(`Código de verificação enviado para ${email}. Verifique sua caixa de entrada e pasta de spam.`);
+        setSuccessMessage('Código de verificação enviado para seu e-mail. Verifique sua caixa de entrada e spam.');
       } else {
-        setSuccessMessage(`Código gerado: ${generatedCode}. Confira seu e-mail ou utilize o código de acesso abaixo.`);
+        setErrorMessage(
+          otpSendRes.error ||
+            'Não foi possível confirmar o envio do e-mail agora. Tente reenviar o código em instantes.'
+        );
       }
 
       setTimeout(() => {
@@ -231,12 +235,12 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       }
     }
 
-    // 3. Valida contra o código gerado em sessão ou código mestre de segurança
-    const localMatch = (verificationCode && fullCode === verificationCode) || fullCode === '123456';
+    // 3. Valida contra o código enviado na sessão atual (sem nunca exibi-lo na UI)
+    const localMatch = Boolean(verificationCode && fullCode === verificationCode);
 
     if (!backendValidated && !supabaseValidated && !localMatch) {
       setIsLoading(false);
-      setErrorMessage('Código de verificação incorreto ou expirado. Confira o número recebido por e-mail.');
+      setErrorMessage('Código de verificação incorreto ou expirado. Confira o código recebido por e-mail.');
       return;
     }
 
@@ -272,17 +276,21 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 
   const handleResendCode = async () => {
     if (resendCooldown > 0) return;
+    setErrorMessage(null);
     const newCode = Math.floor(100000 + Math.random() * 900000).toString();
     setVerificationCode(newCode);
     setResendCooldown(45);
     setCodeDigits(['', '', '', '', '', '']);
-    setSuccessMessage(`Reenviando código de verificação para ${email}...`);
+    setSuccessMessage('Reenviando código de verificação para seu e-mail...');
 
     const otpRes = await authService.sendLoginOtp(email, newCode);
     if (otpRes.success) {
-      setSuccessMessage(`Um novo código de verificação foi enviado para ${email}.`);
+      setSuccessMessage('Código de verificação reenviado para seu e-mail. Verifique sua caixa de entrada e spam.');
     } else {
-      setSuccessMessage(`Novo código gerado: ${newCode}. Confira seu e-mail ou utilize o código abaixo.`);
+      setSuccessMessage(null);
+      setErrorMessage(
+        otpRes.error || 'Não foi possível reenviar o código no momento. Tente novamente em instantes.'
+      );
     }
     digitInputRefs.current[0]?.focus();
   };
@@ -303,33 +311,18 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       <header className="relative z-10 w-full max-w-5xl mx-auto px-6 py-6 flex items-center justify-between">
         <button
           onClick={onBackToLanding}
-          className="inline-flex items-center gap-2 text-xs sm:text-sm font-medium text-zinc-400 hover:text-white transition cursor-pointer p-2 -ml-2 rounded-xl hover:bg-zinc-900/60"
+          className="inline-flex items-center gap-2 text-xs sm:text-sm font-medium text-zinc-400 hover:text-white transition cursor-pointer p-2 -ml-2 rounded-xl hover:bg-zinc-900/60 min-h-[44px]"
         >
           <ArrowLeft className="w-4 h-4" />
           <span>Voltar à página inicial</span>
         </button>
 
-        <div className="flex items-center gap-2">
-          <div className="w-7 h-7 rounded-lg bg-zinc-900 border border-zinc-800 flex items-center justify-center">
-            <svg
-              className="w-4 h-4 text-white"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <polyline points="2 12 6 12 9 3 13 21 16 12 22 12" />
-            </svg>
-          </div>
-          <span className="font-bold text-sm tracking-tight text-white">FatosBR</span>
-        </div>
+        <FatosBrLogo size="sm" variant="compact" glow={false} />
       </header>
 
       {/* Main Content Area */}
       <main className="relative z-10 flex-1 flex items-center justify-center px-4 py-8 sm:py-12">
-        <div className="w-full max-w-md bg-[#090a0d] border border-zinc-800/90 rounded-3xl p-7 sm:p-9 shadow-2xl backdrop-blur-xl">
+        <div className="w-full max-w-md bg-[#090a0d] border border-zinc-800/90 rounded-3xl p-6 sm:p-9 shadow-2xl backdrop-blur-xl">
           {/* Alerta de bloqueio caso haja service_role por engano */}
           {status.isServiceRoleBlocked && (
             <div className="mb-6 flex items-start space-x-2 text-xs text-red-400 bg-red-500/10 border border-red-500/20 px-3.5 py-2.5 rounded-xl">
@@ -343,18 +336,32 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 
           {/* Heading */}
           <div className="text-center mb-7">
-            <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+            {step === 'verify-code' && (
+              <div className="w-12 h-12 rounded-2xl bg-[#111318] border border-zinc-800 flex items-center justify-center mx-auto mb-4 text-white shadow-inner">
+                <Mail className="w-5 h-5" />
+              </div>
+            )}
+            <h1 className="text-2xl sm:text-[28px] font-bold text-white tracking-tight">
               {step === 'credentials'
                 ? mode === 'signin'
                   ? 'Acesse sua conta'
                   : 'Crie sua conta'
                 : 'Verifique seu e-mail'}
             </h1>
-            <p className="text-xs sm:text-sm text-zinc-400 mt-2">
-              {step === 'credentials'
-                ? 'Acontecimentos em tempo real e contexto claro.'
-                : `Digite o código numérico de 6 dígitos enviado para ${email}.`}
-            </p>
+            {step === 'credentials' ? (
+              <p className="text-xs sm:text-sm text-zinc-400 mt-2 leading-relaxed">
+                Acontecimentos em tempo real e contexto claro.
+              </p>
+            ) : (
+              <div className="text-xs sm:text-sm text-zinc-400 mt-2.5 space-y-1 leading-relaxed">
+                <p>
+                  Código de verificação enviado para <span className="text-zinc-200 font-medium">{email}</span>.
+                </p>
+                <p className="text-zinc-500 text-xs">
+                  Verifique sua caixa de entrada e spam.
+                </p>
+              </div>
+            )}
           </div>
 
           {/* Feedback Messages */}
@@ -514,67 +521,67 @@ export const LoginPage: React.FC<LoginPageProps> = ({
           ) : (
             /* ================= ETAPA 2: CÓDIGO DE 6 DÍGITOS ================= */
             <form onSubmit={handleVerifyCodeSubmit} className="space-y-6">
-              {verificationCode && (
-                <div className="p-3.5 rounded-xl bg-zinc-900/90 border border-zinc-700/80 text-center space-y-1.5 animate-fadeIn">
-                  <div className="text-[11px] text-zinc-400">Código de verificação gerado para sua conta:</div>
-                  <div className="text-2xl font-mono font-black text-white tracking-widest flex items-center justify-center gap-2">
-                    <span className="bg-zinc-800 px-3 py-1 rounded-lg border border-zinc-700">{verificationCode}</span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const digits = verificationCode.split('').slice(0, 6);
-                        setCodeDigits(digits);
-                        digitInputRefs.current[5]?.focus();
+              <div>
+                <label className="block text-[11px] font-medium text-zinc-400 text-center mb-3">
+                  Digite o código de 6 dígitos
+                </label>
+                <div
+                  className="grid grid-cols-6 gap-2 sm:gap-2.5"
+                  onPaste={(e) => {
+                    const pasted = e.clipboardData.getData('text').replace(/\D/g, '').slice(0, 6);
+                    if (!pasted) return;
+                    e.preventDefault();
+                    const nextDigits = ['', '', '', '', '', ''];
+                    pasted.split('').forEach((char, i) => {
+                      if (i < 6) nextDigits[i] = char;
+                    });
+                    setCodeDigits(nextDigits);
+                    const nextIdx = Math.min(pasted.length, 5);
+                    digitInputRefs.current[nextIdx]?.focus();
+                  }}
+                >
+                  {codeDigits.map((digit, idx) => (
+                    <input
+                      key={idx}
+                      ref={(el) => {
+                        digitInputRefs.current[idx] = el;
                       }}
-                      className="text-[11px] font-sans font-semibold px-2.5 py-1 rounded-lg bg-white text-black hover:bg-zinc-200 transition cursor-pointer"
-                    >
-                      Preencher
-                    </button>
-                  </div>
-                  <div className="text-[10px] text-zinc-500">
-                    Também despachado para <strong className="text-zinc-300">{email}</strong>
-                  </div>
+                      type="text"
+                      inputMode="numeric"
+                      autoComplete={idx === 0 ? 'one-time-code' : 'off'}
+                      maxLength={1}
+                      value={digit}
+                      aria-label={`Dígito ${idx + 1} de 6`}
+                      onChange={(e) => handleDigitChange(idx, e.target.value)}
+                      onKeyDown={(e) => handleDigitKeyDown(idx, e)}
+                      className="w-full h-13 sm:h-14 text-center text-xl sm:text-2xl font-mono font-bold bg-[#111318] border border-zinc-800 focus:border-white focus:ring-1 focus:ring-white/30 rounded-xl text-white focus:outline-none transition shadow-inner"
+                    />
+                  ))}
                 </div>
-              )}
-
-              <div className="flex justify-between gap-2 sm:gap-3 py-2">
-                {codeDigits.map((digit, idx) => (
-                  <input
-                    key={idx}
-                    ref={(el) => {
-                      digitInputRefs.current[idx] = el;
-                    }}
-                    type="text"
-                    inputMode="numeric"
-                    maxLength={1}
-                    value={digit}
-                    onChange={(e) => handleDigitChange(idx, e.target.value)}
-                    onKeyDown={(e) => handleDigitKeyDown(idx, e)}
-                    className="w-12 h-14 sm:w-14 sm:h-16 text-center text-xl sm:text-2xl font-mono font-bold bg-[#12141a] border border-zinc-700/80 focus:border-white rounded-2xl text-white focus:outline-none transition shadow-inner"
-                  />
-                ))}
               </div>
 
               <button
                 type="submit"
                 disabled={isLoading}
-                className="w-full py-3.5 bg-white text-black hover:bg-zinc-200 font-bold text-sm rounded-2xl transition cursor-pointer active:scale-[0.99] disabled:opacity-60 flex items-center justify-center gap-2"
+                className="w-full py-3.5 bg-white text-black hover:bg-zinc-200 font-bold text-sm rounded-2xl transition cursor-pointer active:scale-[0.99] disabled:opacity-60 flex items-center justify-center gap-2 min-h-[48px] shadow-sm"
               >
                 {isLoading ? (
                   <span className="inline-block w-4 h-4 border-2 border-black border-t-transparent rounded-full animate-spin" />
                 ) : (
-                  <span>Confirmar Código e Acessar</span>
+                  <span>Confirmar código</span>
                 )}
               </button>
 
-              <div className="flex items-center justify-between text-xs pt-1 text-zinc-400">
+              <div className="flex items-center justify-between text-xs pt-2 text-zinc-400">
                 <button
                   type="button"
                   onClick={() => {
                     setStep('credentials');
                     setErrorMessage(null);
+                    setSuccessMessage(null);
+                    setCodeDigits(['', '', '', '', '', '']);
                   }}
-                  className="hover:text-white underline cursor-pointer"
+                  className="hover:text-white transition cursor-pointer py-2 min-h-[40px]"
                 >
                   Alterar e-mail
                 </button>
@@ -583,9 +590,13 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                   type="button"
                   disabled={resendCooldown > 0}
                   onClick={handleResendCode}
-                  className="hover:text-white transition cursor-pointer disabled:text-zinc-600 disabled:no-underline"
+                  className={`transition py-2 min-h-[40px] ${
+                    resendCooldown > 0
+                      ? 'text-zinc-500 cursor-not-allowed'
+                      : 'text-zinc-200 hover:text-white font-medium cursor-pointer'
+                  }`}
                 >
-                  {resendCooldown > 0 ? `Reenviar código em ${resendCooldown}s` : 'Reenviar código'}
+                  {resendCooldown > 0 ? `Reenviar código (${resendCooldown}s)` : 'Reenviar código'}
                 </button>
               </div>
             </form>

@@ -758,24 +758,8 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
           </div>
         </div>
 
-        {/* Lado Direito Desktop: Card do Plano Pro & Resumo de Contadores */}
+        {/* Lado Direito Desktop: Resumo de Contadores */}
         <div className="w-full md:w-auto flex flex-col sm:flex-row items-stretch sm:items-center gap-4">
-          {/* Card do Plano Atual */}
-          <div
-            onClick={onOpenBilling}
-            className="p-3.5 px-4 rounded-xl border border-zinc-800 bg-[#16181f] hover:border-zinc-700 transition flex items-center justify-between gap-4 cursor-pointer group"
-          >
-            <div className="flex items-center gap-3">
-              <span className="px-2 py-0.5 rounded text-[10px] font-extrabold uppercase bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                PRO
-              </span>
-              <div>
-                <div className="text-xs font-bold text-white">Plano Pro</div>
-                <div className="text-[11px] text-zinc-400">Ativo até 12 de set. de 2026</div>
-              </div>
-            </div>
-            <ChevronRight className="w-4 h-4 text-zinc-500 group-hover:text-white transition" />
-          </div>
 
           {/* Contadores Desktop */}
           <div className="hidden xl:flex items-center gap-4 p-3 px-5 rounded-xl border border-zinc-800/80 bg-[#16181f]">
@@ -1228,65 +1212,8 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
           </div>
         </div>
 
-        {/* COLUNA 2: ASSINATURA, SEUS DADOS, SOBRE A SINAL */}
+        {/* COLUNA 2: SEUS DADOS, SOBRE O FATOSBR */}
         <div className="space-y-5 sm:space-y-6">
-          {/* CARD 4: ASSINATURA */}
-          <div className="p-5 rounded-2xl border border-[#1e2026] bg-[#111216] space-y-4">
-            <div className="flex items-center gap-2.5 border-b border-zinc-800/80 pb-3">
-              <CreditCard className="w-4 h-4 text-zinc-400" />
-              <div>
-                <h3 className="text-sm font-bold text-white">Assinatura</h3>
-                <p className="text-[11px] text-zinc-400">Gerencie seu plano e pagamento.</p>
-              </div>
-            </div>
-
-            <div className="space-y-1 text-xs">
-              <div
-                onClick={onOpenBilling}
-                className="p-3 rounded-xl hover:bg-[#16181f] transition cursor-pointer flex items-center justify-between group"
-              >
-                <div className="flex items-center gap-3">
-                  <span className="px-1.5 py-0.5 rounded text-[9px] font-extrabold uppercase bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                    PRO
-                  </span>
-                  <div>
-                    <div className="font-semibold text-white">Plano Pro</div>
-                    <div className="text-[11px] text-zinc-400">Ativo até 12 de set. de 2026</div>
-                  </div>
-                </div>
-                <ChevronRight className="w-4 h-4 text-zinc-500 group-hover:text-white transition" />
-              </div>
-
-              <div
-                onClick={() => setActiveModal('paymentMethod')}
-                className="p-3 rounded-xl hover:bg-[#16181f] transition cursor-pointer flex items-center justify-between group"
-              >
-                <div className="flex items-center gap-3">
-                  <CreditCard className="w-4 h-4 text-zinc-400 group-hover:text-white" />
-                  <div>
-                    <div className="font-semibold text-white">Método de pagamento</div>
-                    <div className="text-[11px] text-zinc-400">PIX Direto</div>
-                  </div>
-                </div>
-                <ChevronRight className="w-4 h-4 text-zinc-500 group-hover:text-white transition" />
-              </div>
-
-              <div
-                onClick={() => setActiveModal('invoices')}
-                className="p-3 rounded-xl hover:bg-[#16181f] transition cursor-pointer flex items-center justify-between group"
-              >
-                <div className="flex items-center gap-3">
-                  <Clock className="w-4 h-4 text-zinc-400 group-hover:text-white" />
-                  <div>
-                    <div className="font-semibold text-white">Histórico de pagamentos</div>
-                    <div className="text-[11px] text-zinc-400">Veja suas cobranças e faturas</div>
-                  </div>
-                </div>
-                <ChevronRight className="w-4 h-4 text-zinc-500 group-hover:text-white transition" />
-              </div>
-            </div>
-          </div>
-
           {/* CARD 5: SEUS DADOS */}
           <div className="p-5 rounded-2xl border border-[#1e2026] bg-[#111216] space-y-4">
             <div className="flex items-center gap-2.5 border-b border-zinc-800/80 pb-3">
@@ -2333,13 +2260,6 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                 <h4 className="font-bold text-white">Como funciona o agrupamento de fontes?</h4>
                 <p className="text-zinc-400 leading-relaxed">
                   Nossos algoritmos monitoram veículos jornalísticos independentes e convergem a cobertura de um mesmo fato em um único Acontecimento, eliminando ruído e manchetes sensacionalistas.
-                </p>
-              </div>
-
-              <div className="p-3.5 rounded-xl bg-[#111216] border border-zinc-800 space-y-1">
-                <h4 className="font-bold text-white">Como cancelar minha assinatura?</h4>
-                <p className="text-zinc-400 leading-relaxed">
-                  Você pode pausar ou cancelar a qualquer momento na aba Assinatura sem taxas de rescisão ou multas.
                 </p>
               </div>
             </div>

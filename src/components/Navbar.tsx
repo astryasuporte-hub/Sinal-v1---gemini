@@ -97,16 +97,6 @@ export const Navbar: React.FC<NavbarProps> = ({
 
         {/* Right Action Tools */}
         <div className="flex items-center space-x-2">
-          {/* Status da Assinatura / Trial */}
-          <button
-            onClick={onOpenBilling}
-            className="hidden sm:flex items-center gap-2 px-2.5 py-1 text-xs rounded-md bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 transition-colors cursor-pointer"
-          >
-            <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-            <span>Trial Ativo (6d)</span>
-            <span className="text-[10px] text-zinc-400 underline">PIX</span>
-          </button>
-
           {/* Calibrar / Onboarding */}
           <button
             onClick={onOpenOnboarding}

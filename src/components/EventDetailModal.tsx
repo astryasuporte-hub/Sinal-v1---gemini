@@ -4,8 +4,8 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
 import { Event, Entity } from '../types/sinal';
+import { FatosBrLogo } from './FatosBrLogo';
 import {
   ArrowLeft,
   Bookmark,
@@ -18,9 +18,7 @@ import {
   Pause,
   ExternalLink,
   Check,
-  Clock,
-  Layers,
-  Sparkles
+  Clock
 } from 'lucide-react';
 
 interface EventDetailModalProps {
@@ -42,17 +40,28 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
   const [fontSize, setFontSize] = useState<'normal' | 'large' | 'xlarge'>('normal');
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [heroImgError, setHeroImgError] = useState(false);
+
+  // Reseta estado da imagem e menu ao trocar de matéria
+  useEffect(() => {
+    setHeroImgError(false);
+    setIsMenuOpen(false);
+  }, [event?.id]);
 
   // Fecha o modal com tecla ESC
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        if (isMenuOpen) {
+          setIsMenuOpen(false);
+          return;
+        }
         onClose();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onClose]);
+  }, [onClose, isMenuOpen]);
 
   // Interrompe qualquer áudio em reprodução ao fechar ou trocar de matéria
   useEffect(() => {
@@ -161,14 +170,9 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
     return `${formattedDate} · ${formattedTime}`;
   };
 
-  const primarySource = event.sources[0]?.sourceName || 'InfoMoney';
-
-  const defaultImage =
-    event.category === 'Economia'
-      ? 'https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?auto=format&fit=crop&w=1200&q=80'
-      : event.category === 'Tecnologia & IA' || event.category === 'Tecnologia'
-      ? 'https://images.unsplash.com/photo-1518770660439-4636190af475?auto=format&fit=crop&w=1200&q=80'
-      : 'https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?auto=format&fit=crop&w=1200&q=80';
+  const primarySource = event.sources[0]?.sourceName || 'Redação FatosBR';
+  const sourceCount = event.sources?.length || 0;
+  const hasHeroImage = Boolean(event.imageUrl && event.imageUrl.trim().length > 0 && !heroImgError);
 
   return (
     <div
@@ -179,106 +183,122 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
     >
       {/* Toast Notification Flutuante */}
       {toastMessage && (
-        <div className="fixed top-5 left-1/2 -translate-x-1/2 z-[70] px-4 py-2 rounded-full bg-zinc-900 border border-zinc-700 text-white text-xs font-medium shadow-2xl flex items-center gap-2 animate-bounce-short">
+        <div className="fixed top-5 left-1/2 -translate-x-1/2 z-[70] px-4 py-2 rounded-full bg-zinc-900 border border-zinc-700 text-white text-xs font-medium shadow-2xl flex items-center gap-2">
           <Check className="w-3.5 h-3.5 text-white" />
           <span>{toastMessage}</span>
         </div>
       )}
 
       {/* ========================================================
-          CABEÇALHO EDITORIAL COMPACTO & DISCRETO
-          (<- | FatosBR | Bookmark | Share | Menu)
+          CABEÇALHO EDITORIAL COMPACTO E UNIFICADO COM A HOME
       ======================================================== */}
-      <header className="sticky top-0 z-40 w-full bg-[#000000]/95 backdrop-blur-md border-b border-zinc-900/80 px-4 sm:px-6 h-14 flex items-center justify-between shrink-0">
-        {/* Esquerda: Botão Voltar + Logotipo FatosBR */}
-        <div className="flex items-center gap-3">
+      <header className="sticky top-0 z-40 w-full bg-[#050507]/95 backdrop-blur-md border-b border-zinc-900/90 px-4 sm:px-6 h-14 sm:h-16 flex items-center justify-between shrink-0">
+        {/* Esquerda: Botão Voltar + Logotipo Oficial FatosBR */}
+        <div className="flex items-center gap-2.5 sm:gap-3">
           <button
+            type="button"
             onClick={onClose}
-            className="min-h-[44px] min-w-[44px] -ml-2 flex items-center justify-center text-zinc-200 hover:text-white transition cursor-pointer active:scale-95"
-            aria-label="Voltar para a página anterior"
+            className="min-h-[44px] min-w-[44px] -ml-2 flex items-center justify-center rounded-xl text-zinc-300 hover:text-white hover:bg-zinc-900/80 transition cursor-pointer active:scale-95"
+            aria-label="Voltar para o feed"
             title="Voltar"
           >
-            <ArrowLeft className="w-5 h-5 text-white stroke-[2.2]" />
+            <ArrowLeft className="w-5 h-5 stroke-[2]" />
           </button>
 
-          <span className="font-extrabold text-lg sm:text-xl text-white tracking-tight select-none">
-            Fatos<span className="text-zinc-400 font-semibold">BR</span>
-          </span>
+          <FatosBrLogo size="sm" variant="compact" glow={false} onClick={onClose} />
         </div>
 
-        {/* Direita: Salvar, Compartilhar e Menu de Opções */}
-        <div className="flex items-center gap-1 sm:gap-2">
+        {/* Direita: Ações Consistentes (Salvar, Compartilhar e Menu) */}
+        <div className="flex items-center gap-1">
           <button
+            type="button"
             onClick={() => {
               onToggleSave(event.id);
               showToast(event.isSaved ? 'Notícia removida dos salvos' : 'Notícia salva nos seus itens');
             }}
-            className="min-h-[44px] min-w-[44px] flex items-center justify-center text-zinc-300 hover:text-white transition cursor-pointer active:scale-95"
-            aria-label={event.isSaved ? 'Notícia Salva' : 'Salvar Notícia'}
-            title={event.isSaved ? 'Salva' : 'Salvar notícia'}
+            className={`min-h-[44px] min-w-[44px] rounded-xl flex items-center justify-center transition cursor-pointer active:scale-95 ${
+              event.isSaved
+                ? 'text-white bg-zinc-900/90'
+                : 'text-zinc-300 hover:text-white hover:bg-zinc-900/80'
+            }`}
+            aria-label={event.isSaved ? 'Remover dos salvos' : 'Salvar notícia'}
+            title={event.isSaved ? 'Salvo' : 'Salvar notícia'}
           >
             {event.isSaved ? (
               <BookmarkCheck className="w-5 h-5 text-white fill-white" />
             ) : (
-              <Bookmark className="w-5 h-5 text-zinc-300 hover:text-white" />
+              <Bookmark className="w-5 h-5" />
             )}
           </button>
 
           <button
+            type="button"
             onClick={handleShare}
-            className="min-h-[44px] min-w-[44px] flex items-center justify-center text-zinc-300 hover:text-white transition cursor-pointer active:scale-95"
-            aria-label="Compartilhar Notícia"
+            className="min-h-[44px] min-w-[44px] rounded-xl flex items-center justify-center text-zinc-300 hover:text-white hover:bg-zinc-900/80 transition cursor-pointer active:scale-95"
+            aria-label="Compartilhar notícia"
             title="Compartilhar"
           >
-            <Share2 className="w-5 h-5 text-zinc-300 hover:text-white" />
+            <Share2 className="w-5 h-5" />
           </button>
 
           <div className="relative">
             <button
-              onClick={() => setIsMenuOpen(!isMenuOpen)}
-              className="min-h-[44px] min-w-[44px] flex items-center justify-center text-zinc-300 hover:text-white transition cursor-pointer active:scale-95"
+              type="button"
+              onClick={() => setIsMenuOpen((prev) => !prev)}
+              className="min-h-[44px] min-w-[44px] rounded-xl flex items-center justify-center text-zinc-300 hover:text-white hover:bg-zinc-900/80 transition cursor-pointer active:scale-95"
               aria-label="Mais opções"
+              aria-expanded={isMenuOpen}
               title="Opções"
             >
-              <MoreHorizontal className="w-5 h-5 text-zinc-300 hover:text-white" />
+              <MoreHorizontal className="w-5 h-5" />
             </button>
 
-            {/* Menu Dropdown Discreto */}
             {isMenuOpen && (
-              <div className="absolute right-0 top-12 w-52 rounded-xl bg-[#111216] border border-zinc-800 shadow-2xl p-1.5 z-50 text-xs space-y-1 animate-fade-in">
-                <button
-                  onClick={() => {
-                    handleShare();
-                    setIsMenuOpen(false);
-                  }}
-                  className="w-full text-left px-3 py-2.5 rounded-lg text-zinc-200 hover:bg-zinc-800 transition flex items-center justify-between"
-                >
-                  <span>Copiar link</span>
-                  <Share2 className="w-3.5 h-3.5 text-zinc-400" />
-                </button>
-                <button
-                  onClick={() => {
-                    cycleFontSize();
-                    setIsMenuOpen(false);
-                  }}
-                  className="w-full text-left px-3 py-2.5 rounded-lg text-zinc-200 hover:bg-zinc-800 transition flex items-center justify-between"
-                >
-                  <span>Ajustar tamanho da fonte</span>
-                  <span className="font-mono text-[10px] text-zinc-400 uppercase">{fontSize}</span>
-                </button>
-                {event.sources[0]?.url && (
-                  <a
-                    href={event.sources[0].url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    onClick={() => setIsMenuOpen(false)}
-                    className="w-full text-left px-3 py-2.5 rounded-lg text-zinc-200 hover:bg-zinc-800 transition flex items-center justify-between"
+              <>
+                <div
+                  className="fixed inset-0 z-40"
+                  onClick={() => setIsMenuOpen(false)}
+                  aria-hidden="true"
+                />
+                <div className="absolute right-0 top-12 w-56 rounded-2xl bg-[#0e1015] border border-zinc-800 shadow-2xl p-1.5 z-50 text-xs space-y-1 animate-fade-in">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleShare();
+                      setIsMenuOpen(false);
+                    }}
+                    className="w-full min-h-[40px] text-left px-3 py-2 rounded-xl text-zinc-200 hover:bg-zinc-800/80 transition flex items-center justify-between cursor-pointer"
                   >
-                    <span>Ver matéria original</span>
-                    <ExternalLink className="w-3.5 h-3.5 text-zinc-400" />
-                  </a>
-                )}
-              </div>
+                    <span>Copiar link</span>
+                    <Share2 className="w-3.5 h-3.5 text-zinc-400" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      cycleFontSize();
+                      setIsMenuOpen(false);
+                    }}
+                    className="w-full min-h-[40px] text-left px-3 py-2 rounded-xl text-zinc-200 hover:bg-zinc-800/80 transition flex items-center justify-between cursor-pointer"
+                  >
+                    <span>Tamanho da fonte</span>
+                    <span className="font-mono text-[10px] text-zinc-400 uppercase">
+                      {fontSize === 'normal' ? 'Padrão' : fontSize === 'large' ? 'Grande' : 'Extra'}
+                    </span>
+                  </button>
+                  {event.sources[0]?.url && (
+                    <a
+                      href={event.sources[0].url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={() => setIsMenuOpen(false)}
+                      className="w-full min-h-[40px] text-left px-3 py-2 rounded-xl text-zinc-200 hover:bg-zinc-800/80 transition flex items-center justify-between"
+                    >
+                      <span>Ler na fonte original</span>
+                      <ExternalLink className="w-3.5 h-3.5 text-zinc-400" />
+                    </a>
+                  )}
+                </div>
+              </>
             )}
           </div>
         </div>
@@ -286,72 +306,83 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
 
       {/* ========================================================
           CORPO EDITORIAL PRINCIPAL (SCROLLÁVEL)
-          Legibilidade máxima, contraste elevado, tipografia moderna
       ======================================================== */}
-      <main className="flex-1 overflow-y-auto overscroll-contain px-4 sm:px-6 py-6 pb-28">
-        <div className="max-w-2xl mx-auto space-y-6">
-          {/* Categoria em Etiqueta Simples e Discreta */}
-          <div>
-            <span className="inline-block px-3 py-1 rounded-full bg-zinc-900 border border-zinc-800 text-xs text-zinc-300 font-medium tracking-wide">
+      <main className="flex-1 overflow-y-auto overscroll-contain px-5 sm:px-8 pt-6 sm:pt-9 pb-28">
+        <div className="max-w-[680px] mx-auto">
+          {/* Bloco de Abertura: Categoria, Título, Subtítulo e Metadados */}
+          <div className="space-y-4">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-400">
               {event.category || 'Geral'}
-            </span>
+            </div>
+
+            <h1
+              id="news-reading-title"
+              className="text-[26px] sm:text-[34px] font-bold text-white tracking-[-0.02em] leading-[1.2] [text-wrap:balance] break-words"
+            >
+              {event.title}
+            </h1>
+
+            {event.summary && (
+              <p className="text-base sm:text-[18px] text-zinc-400 font-normal leading-[1.6] break-words">
+                {event.summary}
+              </p>
+            )}
+
+            {/* Metadados Limpos com Tipografia Tabular */}
+            <div className="flex items-center gap-2.5 text-xs text-zinc-400 font-mono tabular-nums flex-wrap pt-3 border-t border-zinc-900">
+              <span className="inline-flex items-center gap-1.5">
+                <Calendar className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                <span>{formatDateTime(event.publishedAt)}</span>
+              </span>
+
+              <span className="text-zinc-700 select-none">·</span>
+
+              <span className="inline-flex items-center gap-1.5">
+                <Landmark className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                <span className="text-zinc-200 font-semibold font-sans">{primarySource}</span>
+              </span>
+
+              {sourceCount > 1 && (
+                <>
+                  <span className="text-zinc-700 select-none">·</span>
+                  <span className="text-zinc-400 font-sans">
+                    {sourceCount} fontes apuradas
+                  </span>
+                </>
+              )}
+            </div>
           </div>
 
-          {/* Título Principal com Destaque e Quebra Natural */}
-          <h1
-            id="news-reading-title"
-            className="text-2xl sm:text-3xl lg:text-[34px] font-bold text-white tracking-tight leading-[1.28] break-words font-sans"
-          >
-            {event.title}
-          </h1>
-
-          {/* Subtítulo Complementar (sem redundâncias) */}
-          {event.summary && (
-            <p className="text-base sm:text-lg text-zinc-400 font-normal leading-relaxed break-words font-sans">
-              {event.summary}
-            </p>
+          {/* Imagem Editorial Principal (exibida somente se válida) */}
+          {hasHeroImage && (
+            <figure className="mt-6 mb-8">
+              <div className="w-full aspect-[16/10] sm:aspect-video rounded-2xl overflow-hidden bg-zinc-950 border border-zinc-900 shadow-2xl">
+                <img
+                  src={event.imageUrl}
+                  alt={event.title}
+                  referrerPolicy="no-referrer"
+                  loading="eager"
+                  onError={() => setHeroImgError(true)}
+                  className="w-full h-full object-cover object-center"
+                />
+              </div>
+            </figure>
           )}
-
-          {/* Metadados Monocromáticos Discretos */}
-          <div className="flex items-center gap-3 text-xs text-zinc-400 font-mono flex-wrap pt-1 border-t border-zinc-900">
-            <div className="flex items-center gap-1.5">
-              <Calendar className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
-              <span>{formatDateTime(event.publishedAt)}</span>
-            </div>
-
-            <span className="text-zinc-700 select-none">|</span>
-
-            <div className="flex items-center gap-1.5">
-              <Landmark className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
-              <span className="text-zinc-300 font-semibold">{primarySource}</span>
-            </div>
-          </div>
-
-          {/* Imagem Principal Ampla com Cantos Arredondados (Sem etiquetas sobrepostas) */}
-          <div className="w-full aspect-[16/10] sm:aspect-video rounded-2xl overflow-hidden bg-zinc-950 border border-zinc-900 shadow-xl">
-            <img
-              src={event.imageUrl || defaultImage}
-              alt={event.title}
-              onError={(e) => {
-                (e.currentTarget as HTMLImageElement).src = defaultImage;
-              }}
-              className="w-full h-full object-cover object-center"
-            />
-          </div>
 
           {/* Corpo do Artigo / Matéria Editorial */}
           <article
-            className={`space-y-5 text-zinc-200 font-normal selection:bg-zinc-800 selection:text-white transition-all ${
+            className={`space-y-5 text-zinc-200 font-normal selection:bg-white selection:text-black transition-all ${
+              !hasHeroImage ? 'mt-7 pt-6 border-t border-zinc-900' : ''
+            } ${
               fontSize === 'normal'
                 ? 'text-base sm:text-[17px] leading-[1.8]'
                 : fontSize === 'large'
-                ? 'text-lg sm:text-[19px] leading-[1.9]'
-                : 'text-xl sm:text-[22px] leading-[2.0]'
+                ? 'text-lg sm:text-[19px] leading-[1.88]'
+                : 'text-xl sm:text-[21px] leading-[1.95]'
             }`}
           >
-            {/* Parágrafos jornalísticos estruturados */}
             {event.whatHappened ? (
-              <p className="text-zinc-100">{event.whatHappened}</p>
+              <p className="text-[#EAECEF]">{event.whatHappened}</p>
             ) : null}
 
             {event.marketImpact && (
@@ -362,34 +393,33 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
               <p className="text-zinc-300">{event.nextSteps}</p>
             )}
 
-            {/* Seção "Por que isso importa?" (Opcional, curta e específica; oculta se vazia) */}
+            {/* Seção "Por que isso importa" */}
             {event.whyItMatters && event.whyItMatters.trim().length > 0 && (
-              <section className="my-8 p-5 rounded-2xl bg-zinc-950 border border-zinc-800/80 space-y-2">
-                <h3 className="text-xs font-bold font-mono uppercase tracking-wider text-white flex items-center gap-1.5">
-                  <Sparkles className="w-3.5 h-3.5 text-zinc-400" />
-                  <span>Por que isso importa</span>
+              <section className="my-8 p-5 sm:p-6 rounded-2xl bg-[#0c0d11] border border-zinc-800/80 border-l-2 border-l-white space-y-2">
+                <h3 className="text-[11px] font-bold font-mono uppercase tracking-[0.12em] text-zinc-300">
+                  Por que isso importa
                 </h3>
-                <p className="text-sm sm:text-base text-zinc-300 leading-relaxed font-normal">
+                <p className="text-sm sm:text-base text-zinc-200 leading-relaxed font-normal">
                   {event.whyItMatters}
                 </p>
               </section>
             )}
 
-            {/* Cronologia Fidedigna (apenas quando houver marcos e horários distintos) */}
+            {/* Cronologia Fidedigna */}
             {event.timeline && event.timeline.length > 0 && (
-              <section className="pt-6 my-6 border-t border-zinc-900 space-y-4">
-                <h3 className="text-xs font-bold uppercase tracking-wider text-white font-mono flex items-center gap-2">
+              <section className="pt-7 my-8 border-t border-zinc-900 space-y-4">
+                <h3 className="text-[11px] font-bold uppercase tracking-[0.12em] text-zinc-300 font-mono flex items-center gap-2">
                   <Clock className="w-3.5 h-3.5 text-zinc-400" />
                   <span>Cronologia dos fatos</span>
                 </h3>
-                <div className="space-y-3 pl-2 border-l border-zinc-800">
+                <div className="space-y-4 pl-3 border-l border-zinc-800">
                   {event.timeline.map((item, idx) => (
                     <div key={item.id || idx} className="text-xs sm:text-sm pl-3 relative">
-                      <div className="absolute -left-[17px] top-1.5 w-2 h-2 rounded-full bg-zinc-600 border border-black" />
-                      <div className="font-mono text-zinc-400 font-semibold mb-0.5">
+                      <div className="absolute -left-[17px] top-1.5 w-2 h-2 rounded-full bg-zinc-500 border border-black" />
+                      <div className="font-mono tabular-nums text-zinc-400 font-semibold mb-1 text-[11px]">
                         {item.time || item.date}
                       </div>
-                      <div className="text-zinc-200">
+                      <div className="text-zinc-300 leading-relaxed">
                         <strong className="text-white font-semibold">{item.title}:</strong> {item.description}
                       </div>
                     </div>
@@ -399,27 +429,33 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
             )}
           </article>
 
-          {/* Fontes Jornalísticas Compactas */}
-          <section className="pt-8 border-t border-zinc-900 space-y-3">
-            <h3 className="text-xs font-mono uppercase tracking-wider text-zinc-400">
-              Fontes jornalísticas verificadas
-            </h3>
-            <div className="flex flex-wrap gap-2">
-              {event.sources.map((src) => (
-                <a
-                  key={src.id}
-                  href={src.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-zinc-950 hover:bg-zinc-900 border border-zinc-800 hover:border-zinc-700 text-xs text-zinc-300 hover:text-white transition cursor-pointer"
-                >
-                  <span className="font-semibold text-white">{src.sourceName}</span>
-                  <span className="text-zinc-500 font-mono text-[11px]">({src.domain})</span>
-                  <ExternalLink className="w-3.5 h-3.5 text-zinc-400" />
-                </a>
-              ))}
-            </div>
-          </section>
+          {/* Fontes Jornalísticas Verificadas */}
+          {event.sources && event.sources.length > 0 && (
+            <section className="mt-10 pt-7 border-t border-zinc-900 space-y-3.5">
+              <h3 className="text-[11px] font-mono uppercase tracking-[0.12em] text-zinc-400 font-semibold">
+                Fontes jornalísticas verificadas
+              </h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {event.sources.map((src) => (
+                  <a
+                    key={src.id}
+                    href={src.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center justify-between gap-3 px-4 py-3 rounded-xl bg-[#0c0d11] hover:bg-zinc-900 border border-zinc-800/80 hover:border-zinc-700 text-xs text-zinc-300 hover:text-white transition cursor-pointer"
+                  >
+                    <div className="min-w-0">
+                      <div className="font-semibold text-white truncate">{src.sourceName}</div>
+                      {src.domain && (
+                        <div className="text-zinc-500 font-mono text-[11px] truncate">{src.domain}</div>
+                      )}
+                    </div>
+                    <ExternalLink className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
+                  </a>
+                ))}
+              </div>
+            </section>
+          )}
         </div>
       </main>
 

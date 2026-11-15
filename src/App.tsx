@@ -1149,18 +1149,6 @@ export default function App() {
           onClose={() => setIsLegalModalOpen(false)}
           initialTab={legalModalTab}
         />
-        <BillingModal
-          isOpen={isBillingModalOpen}
-          onClose={() => setIsBillingModalOpen(false)}
-          subscription={subscription}
-          onUpgradeApproved={() => {
-            setSubscription((prev) => ({
-              ...prev,
-              status: 'ACTIVE',
-              planName: 'FatosBR Pro (Ativo)'
-            }));
-          }}
-        />
       </div>
     );
   }
@@ -1204,6 +1192,8 @@ export default function App() {
         entities={entities}
         topics={topics}
         sources={sources}
+        onToggleEntity={handleToggleFollowEntity}
+        onToggleSource={handleToggleFollowSource}
         onOpenLogin={() => setCurrentNav('login')}
         onComplete={(newThemes) => {
           if (Array.isArray(newThemes) && newThemes.length > 0) {
@@ -1587,20 +1577,6 @@ export default function App() {
               <div className="pt-1">
                 <LanguageSelector variant="dropdown" />
               </div>
-            </div>
-          </div>
-
-          {/* Bottom Card da Sidebar: Plano Pro */}
-          <div
-            onClick={() => setIsBillingModalOpen(true)}
-            className="p-3.5 rounded-2xl border transition group cursor-pointer flex items-center space-x-3 border-[#202229] hover:border-zinc-700 bg-[#121418] hover:bg-[#16181f]"
-          >
-            <div className="w-8 h-8 rounded-xl border flex items-center justify-center text-xs font-bold shrink-0 transition bg-zinc-800 border-zinc-700 text-white">
-              <Shield className="w-4 h-4 text-zinc-300" />
-            </div>
-            <div className="overflow-hidden">
-              <div className="text-xs font-bold leading-tight text-white">Plano Pro</div>
-              <div className="text-[11px] truncate text-zinc-400">FatosBR mais completo.</div>
             </div>
           </div>
         </aside>
@@ -2098,7 +2074,6 @@ export default function App() {
                     <PaywallState
                       onUpgrade={() => {
                         setActiveStateSimulation(null);
-                        setIsBillingModalOpen(true);
                       }}
                       onBack={() => setActiveStateSimulation(null)}
                     />
@@ -2525,19 +2500,6 @@ export default function App() {
           />
         )}
       </AnimatePresence>
-
-      <BillingModal
-        isOpen={isBillingModalOpen}
-        onClose={() => setIsBillingModalOpen(false)}
-        subscription={subscription}
-        onUpgradeApproved={() => {
-          setSubscription((prev) => ({
-            ...prev,
-            status: 'ACTIVE',
-            planName: 'FatosBR Pro (Ativo)'
-          }));
-        }}
-      />
 
       <AuthModal
         isOpen={isAuthModalOpen}

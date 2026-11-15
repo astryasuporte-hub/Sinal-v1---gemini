@@ -5,22 +5,14 @@
 
 import React, { useState, useMemo } from 'react';
 import { Entity, Topic, Source } from '../types/sinal';
+import { EntityAvatar } from './EntityAvatar';
+import { FatosBrLogo } from './FatosBrLogo';
 import {
   Check,
   Search,
   X,
   ArrowRight,
-  TrendingUp,
-  Cpu,
-  Building2,
-  Newspaper,
-  Sparkles,
-  ShieldCheck,
-  CheckCircle2,
-  ChevronRight,
-  Sliders,
-  Layers,
-  Compass
+  CheckCircle2
 } from 'lucide-react';
 
 export interface OnboardingModalProps {
@@ -536,16 +528,14 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                         }`}
                       >
                         <div className="flex items-center space-x-3 overflow-hidden pr-2">
-                          {/* Avatar / Inicial monocromática com cor autêntica discreta */}
-                          <div
-                            className="w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold shrink-0 text-white shadow-inner"
-                            style={{
-                              backgroundColor: ent.brandColor || '#27272a',
-                              color: ent.brandColor === '#ffffff' ? '#000000' : '#ffffff'
-                            }}
-                          >
-                            {ent.name.charAt(0)}
-                          </div>
+                          <EntityAvatar
+                            name={ent.name}
+                            type={ent.type}
+                            logoUrl={ent.avatarUrl || ent.logoUrl}
+                            website={ent.website}
+                            brandColor={ent.brandColor}
+                            size="sm"
+                          />
                           <div className="overflow-hidden">
                             <div className="text-xs font-semibold text-zinc-100 group-hover:text-white truncate">
                               {ent.name}
@@ -617,17 +607,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
             <div className="py-12 px-4 flex flex-col items-center justify-center text-center space-y-6 max-w-md mx-auto">
               {/* Animação Minimalista Monocromática (Sem robôs ou neons) */}
               <div className="relative w-16 h-16 rounded-2xl bg-[#13141a] border border-zinc-700 flex items-center justify-center text-white">
-                <svg
-                  className="w-8 h-8 text-white animate-pulse"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2.2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d="M2 13h4l2.5-6 4 13 3-9 2.5 4h4" />
-                </svg>
+                <FatosBrLogo size="md" variant="symbol" glow={false} className="animate-pulse" />
               </div>
 
               <div className="space-y-2">
