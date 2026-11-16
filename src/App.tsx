@@ -264,6 +264,9 @@ export default function App() {
     step: number;
     data: import('./services/userService').OnboardingSavedData;
   } | null>(null);
+  const [profileLoadError, setProfileLoadError] = useState<string | null>(null);
+  const [isRetryingProfile, setIsRetryingProfile] = useState<boolean>(false);
+  const pendingTargetNavRef = React.useRef<'home' | 'explore' | 'following' | 'notifications' | 'briefings' | 'profile' | 'saved' | 'history' | 'admin' | 'control' | undefined>(undefined);
   const recoverySessionActiveRef = React.useRef(false);
   const { language, isRTL } = useI18n();
   const { t } = useTranslation();
@@ -693,6 +696,7 @@ export default function App() {
   }, [currentNav]);
 
   const hydrateAndResolveOnboarding = useCallback(async (user: SupabaseUser, preferredTargetNav?: 'home' | 'explore' | 'following' | 'notifications' | 'briefings' | 'profile' | 'saved' | 'history' | 'admin' | 'control') => {
+    pendingTargetNavRef.current = preferredTargetNav;
     try {
       const [onboardingState, followedEntityIds, followedTopicIds, followedSourceIds] = await Promise.all([
         userService.getOnboardingState(user.id),
@@ -700,6 +704,16 @@ export default function App() {
         userService.getFollowedTopicIds(user.id),
         userService.getFollowedSourceIds(user.id),
       ]);
+
+      if (onboardingState.status === 'ERROR') {
+        setProfileLoadError(
+          onboardingState.error ||
+            'Não foi possível carregar seu perfil e preferências no banco de dados. Tente novamente.'
+        );
+        return;
+      }
+
+      setProfileLoadError(null);
 
       // Restaurar temas salvos no perfil canônico
       if (Array.isArray(onboardingState.data?.themes) && onboardingState.data.themes.length > 0) {
@@ -761,14 +775,9 @@ export default function App() {
         setCurrentNav('onboarding');
       }
     } catch {
-      const cachedOnboarded = (() => {
-        try {
-          return localStorage.getItem('sinal_onboarded_' + user.id) === 'true';
-        } catch {
-          return false;
-        }
-      })();
-      setCurrentNav(cachedOnboarded ? (preferredTargetNav || 'home') : 'onboarding');
+      setProfileLoadError(
+        'Falha temporária ao consultar seu perfil no Supabase. Seus dados não foram alterados.'
+      );
     }
   }, []);
 
@@ -1235,6 +1244,58 @@ export default function App() {
     );
   }
 
+  if (currentUser && profileLoadError && currentNav !== 'landing' && currentNav !== 'login') {
+    return (
+      <div className="min-h-screen bg-[#050505] text-zinc-100 flex items-center justify-center p-4">
+        <div className="w-full max-w-md bg-[#111216] border border-zinc-800 rounded-3xl p-6 sm:p-8 text-center space-y-5 shadow-2xl">
+          <div className="flex justify-center">
+            <FatosBrLogo size="md" variant="compact" glow={false} />
+          </div>
+          <div className="w-12 h-12 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center mx-auto">
+            <AlertTriangle className="w-6 h-6 text-amber-400" />
+          </div>
+          <div className="space-y-2">
+            <h2 className="text-lg font-bold text-white">Erro ao carregar seu perfil</h2>
+            <p className="text-xs sm:text-sm text-zinc-400 leading-relaxed">
+              {profileLoadError}
+            </p>
+          </div>
+          <div className="flex flex-col gap-2.5 pt-1">
+            <button
+              type="button"
+              disabled={isRetryingProfile}
+              onClick={async () => {
+                if (!currentUser) return;
+                setIsRetryingProfile(true);
+                try {
+                  await hydrateAndResolveOnboarding(currentUser, pendingTargetNavRef.current || 'home');
+                } finally {
+                  setIsRetryingProfile(false);
+                }
+              }}
+              className="w-full min-h-[46px] py-3 px-4 bg-white text-black hover:bg-zinc-200 font-bold text-sm rounded-2xl transition cursor-pointer disabled:opacity-60 flex items-center justify-center gap-2"
+            >
+              <RefreshCw className={`w-4 h-4 ${isRetryingProfile ? 'animate-spin' : ''}`} />
+              <span>{isRetryingProfile ? 'Tentando novamente...' : 'Tentar novamente'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                setProfileLoadError(null);
+                await authService.signOut();
+                setCurrentUser(null);
+                setCurrentNav('login');
+              }}
+              className="w-full min-h-[44px] py-2.5 px-4 bg-transparent border border-zinc-800 hover:border-zinc-700 text-zinc-300 hover:text-white font-medium text-xs rounded-2xl transition cursor-pointer"
+            >
+              Voltar para o login
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // Renderização de Telas Especiais: Landing Page, Login, Onboarding ou Admin Panel
   if (currentNav === 'landing') {
     return (
@@ -1259,6 +1320,7 @@ export default function App() {
       <LoginPage
         onBackToLanding={() => {
           recoverySessionActiveRef.current = false;
+          setProfileLoadError(null);
           setCurrentNav('landing');
         }}
         onRecoveryModeChange={(active) => {
@@ -1266,6 +1328,7 @@ export default function App() {
         }}
         onAuthSuccess={async (_email, _name) => {
           recoverySessionActiveRef.current = false;
+          setProfileLoadError(null);
           const user = await authService.getCurrentUser();
           if (user) {
             handleUserSession(user);
@@ -1297,7 +1360,12 @@ export default function App() {
             setUserInterests(payload.themes);
           }
           if (currentUser?.id) {
-            await userService.completeOnboarding(currentUser.id, payload, currentUser.email);
+            const res = await userService.completeOnboarding(currentUser.id, payload, currentUser.email);
+            if (isSupabaseConfigured && !res.persistedInDb) {
+              throw new Error(
+                res.error || 'Não foi possível salvar suas preferências no momento. Tente novamente.'
+              );
+            }
           }
           setOnboardingResumeState(null);
           setCurrentNav('home');

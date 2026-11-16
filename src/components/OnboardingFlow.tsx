@@ -82,6 +82,7 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
 }) => {
   const [step, setStep] = useState<number>(() => Math.max(1, Math.min(7, initialStep || 1)));
   const [isCompleting, setIsCompleting] = useState(false);
+  const [completionError, setCompletionError] = useState<string | null>(null);
   const pwa = usePWAInstall();
   const [showIosGuide, setShowIosGuide] = useState<boolean>(false);
 
@@ -351,6 +352,7 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
   const finishOnboarding = async () => {
     if (isCompleting) return;
     setIsCompleting(true);
+    setCompletionError(null);
     const payload = buildPayload();
     try {
       localStorage.setItem('fatosbr_user_interests', JSON.stringify(payload.themes));
@@ -361,6 +363,8 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
 
     try {
       await onComplete(payload);
+    } catch (err: any) {
+      setCompletionError(err?.message || 'Não foi possível salvar seu onboarding agora. Tente novamente.');
     } finally {
       setIsCompleting(false);
     }
@@ -1218,6 +1222,14 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
 
             {/* Ações Inferiores Etapa 7: Botão + Indicador 7/7 + Barra 100% */}
             <div className="pt-4 pb-2 space-y-3 w-full">
+              {completionError && (
+                <div
+                  role="alert"
+                  className="p-3 rounded-2xl bg-red-500/10 border border-red-500/30 text-xs text-red-200 text-center"
+                >
+                  {completionError}
+                </div>
+              )}
               <button
                 type="button"
                 disabled={isCompleting}
@@ -1229,7 +1241,7 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
                 {isCompleting ? (
                   <span className="inline-block w-4 h-4 border-2 border-black border-t-transparent rounded-full animate-spin" />
                 ) : (
-                  <span>Acessar a FatosBR</span>
+                  <span>{completionError ? 'Tentar novamente' : 'Acessar a FatosBR'}</span>
                 )}
               </button>
 

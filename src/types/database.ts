@@ -17,37 +17,85 @@ export interface Database {
       profiles: {
         Row: {
           id: string;
-          email: string;
-          full_name: string | null;
+          user_id: string;
+          name: string | null;
+          username: string | null;
           avatar_url: string | null;
-          plan_name: string;
-          subscription_status: string;
-          trial_ends_at: string | null;
-          is_admin: boolean;
+          timezone: string | null;
+          locale: string | null;
+          onboarding_status: string;
+          onboarding_step: number | null;
+          onboarding_completed_at: string | null;
+          onboarding_data: Json | null;
           created_at: string;
           updated_at: string;
         };
         Insert: {
-          id: string;
-          email: string;
-          full_name?: string | null;
+          id?: string;
+          user_id: string;
+          name?: string | null;
+          username?: string | null;
           avatar_url?: string | null;
-          plan_name?: string;
-          subscription_status?: string;
-          trial_ends_at?: string | null;
-          is_admin?: boolean;
+          timezone?: string | null;
+          locale?: string | null;
+          onboarding_status?: string;
+          onboarding_step?: number | null;
+          onboarding_completed_at?: string | null;
+          onboarding_data?: Json | null;
           created_at?: string;
           updated_at?: string;
         };
         Update: {
-          id?: string;
-          email?: string;
-          full_name?: string | null;
+          name?: string | null;
+          username?: string | null;
           avatar_url?: string | null;
-          plan_name?: string;
-          subscription_status?: string;
-          trial_ends_at?: string | null;
-          is_admin?: boolean;
+          timezone?: string | null;
+          locale?: string | null;
+          onboarding_status?: string;
+          onboarding_step?: number | null;
+          onboarding_completed_at?: string | null;
+          onboarding_data?: Json | null;
+          updated_at?: string;
+        };
+      };
+      user_settings: {
+        Row: {
+          id: string;
+          user_id: string;
+          email_morning_briefing?: boolean;
+          email_evening_briefing?: boolean;
+          email_breaking_alerts?: boolean;
+          weekend_edition?: boolean;
+          briefing_email?: string | null;
+          morning_time?: string | null;
+          evening_time?: string | null;
+          timezone?: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          email_morning_briefing?: boolean;
+          email_evening_briefing?: boolean;
+          email_breaking_alerts?: boolean;
+          weekend_edition?: boolean;
+          briefing_email?: string | null;
+          morning_time?: string | null;
+          evening_time?: string | null;
+          timezone?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          email_morning_briefing?: boolean;
+          email_evening_briefing?: boolean;
+          email_breaking_alerts?: boolean;
+          weekend_edition?: boolean;
+          briefing_email?: string | null;
+          morning_time?: string | null;
+          evening_time?: string | null;
+          timezone?: string | null;
           updated_at?: string;
         };
       };
@@ -233,49 +281,55 @@ export interface Database {
           saved_at?: string;
         };
       };
-      user_followed_topics: {
+      user_topic_follows: {
         Row: {
+          id?: string;
           user_id: string;
           topic_id: string;
-          followed_at: string;
+          created_at: string;
         };
         Insert: {
+          id?: string;
           user_id: string;
           topic_id: string;
-          followed_at?: string;
+          created_at?: string;
         };
         Update: {
-          followed_at?: string;
+          created_at?: string;
         };
       };
-      user_followed_entities: {
+      user_entity_follows: {
         Row: {
+          id?: string;
           user_id: string;
           entity_id: string;
-          followed_at: string;
+          created_at: string;
         };
         Insert: {
+          id?: string;
           user_id: string;
           entity_id: string;
-          followed_at?: string;
+          created_at?: string;
         };
         Update: {
-          followed_at?: string;
+          created_at?: string;
         };
       };
-      user_followed_sources: {
+      user_source_follows: {
         Row: {
+          id?: string;
           user_id: string;
           source_id: string;
-          followed_at: string;
+          created_at: string;
         };
         Insert: {
+          id?: string;
           user_id: string;
           source_id: string;
-          followed_at?: string;
+          created_at?: string;
         };
         Update: {
-          followed_at?: string;
+          created_at?: string;
         };
       };
       notifications: {

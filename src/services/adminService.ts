@@ -224,22 +224,35 @@ export const adminService = {
 
         if (!error && remoteProfiles && remoteProfiles.length > 0) {
           remoteProfiles.forEach((row: any) => {
-            if (row && row.email) {
-              const emailKey = row.email.toLowerCase();
-              const existing = registryMap.get(emailKey);
-              registryMap.set(emailKey, {
-                id: row.id,
+            if (!row) return;
+            const authUserId = row.user_id || row.id;
+            const profileEmail = row.email ? String(row.email).toLowerCase() : null;
+            if (profileEmail) {
+              const existing = registryMap.get(profileEmail);
+              registryMap.set(profileEmail, {
+                id: authUserId,
                 email: row.email,
-                fullName: row.full_name || existing?.fullName || row.email.split('@')[0],
+                fullName: row.name || row.full_name || existing?.fullName || row.email.split('@')[0],
                 avatarUrl: row.avatar_url || existing?.avatarUrl,
                 provider: existing?.provider || (row.email.includes('gmail') ? 'google' : 'email'),
                 planName: row.plan_name || existing?.planName || 'TRIAL_7D',
                 subscriptionStatus: row.subscription_status || existing?.subscriptionStatus || 'ACTIVE',
                 trialEndsAt: row.trial_ends_at || existing?.trialEndsAt,
-                isAdmin: Boolean(row.is_admin || existing?.isAdmin || emailKey.includes('astrya') || emailKey.includes('yleao')),
+                isAdmin: Boolean(row.is_admin || existing?.isAdmin || profileEmail.includes('astrya') || profileEmail.includes('yleao')),
                 createdAt: row.created_at || existing?.createdAt || new Date().toISOString(),
                 lastSignInAt: existing?.lastSignInAt || row.updated_at || new Date().toISOString()
               });
+            } else if (authUserId) {
+              for (const [k, existing] of registryMap.entries()) {
+                if (existing.id === authUserId) {
+                  registryMap.set(k, {
+                    ...existing,
+                    fullName: row.name || existing.fullName,
+                    avatarUrl: row.avatar_url || existing.avatarUrl,
+                    lastSignInAt: row.updated_at || existing.lastSignInAt,
+                  });
+                }
+              }
             }
           });
         }
@@ -380,7 +393,7 @@ export const adminService = {
       if (updates.subscriptionStatus !== undefined)
         dbPayload.subscription_status = updates.subscriptionStatus;
 
-      const { error } = await supabase.from('profiles').update(dbPayload).eq('id', userId);
+      const { error } = await supabase.from('profiles').update(dbPayload).eq('user_id', userId);
       return !error;
     } catch {
       return false;

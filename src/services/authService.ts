@@ -662,7 +662,7 @@ export const authService = {
   },
 
   /**
-   * Carrega perfil completo do usuário na tabela public.profiles.
+   * Carrega perfil completo do usuário na tabela public.profiles (chaveado por user_id).
    */
   async getUserProfile(userId: string) {
     if (!isSupabaseConfigured || !userId) return null;
@@ -670,7 +670,7 @@ export const authService = {
       const { data, error } = await supabase
         .from('profiles')
         .select('*')
-        .eq('id', userId)
+        .eq('user_id', userId)
         .maybeSingle();
 
       if (error) return null;
