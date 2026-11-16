@@ -18,7 +18,7 @@
  */
 
 import { executeSql, isPostgresConfigured } from '../../postgres.js';
-import { getServerSupabase, isDatabaseConfigured } from '../../db.js';
+import { getServerSupabase } from '../../db.js';
 import { sendJson, setCorsHeaders, readJsonBody, getServerKeys } from '../../common.js';
 import { enforceRateLimit } from '../../rateLimiter.js';
 import { safeCompare } from '../../crypto.js';
@@ -186,7 +186,7 @@ export default async function handler(req: any, res: any) {
         }
       }
 
-      if (entities.length === 0 && sources.length === 0 && isDatabaseConfigured()) {
+      if (entities.length === 0 && sources.length === 0) {
         try {
           const client = getServerSupabase();
           const [entRes, srcRes] = await Promise.all([
@@ -415,9 +415,8 @@ export default async function handler(req: any, res: any) {
       }
 
       // 2. Fallback via Supabase Client server-side
-      if (isDatabaseConfigured()) {
-        try {
-          const client = getServerSupabase();
+      try {
+        const client = getServerSupabase();
           const { data, error } = await client
             .from('events')
             .select('id, title, slug, summary, why_it_matters, published_at, updated_at, relevance_score, article_count')
@@ -453,7 +452,6 @@ export default async function handler(req: any, res: any) {
         } catch (sbErr: any) {
           console.warn('[Events API] Supabase fallback falhou:', sbErr?.message);
         }
-      }
 
       // 3. Resposta segura HTTP 200 sem erro 500 para base em inicialização ou vazia
       return sendJson(res, 200, {
