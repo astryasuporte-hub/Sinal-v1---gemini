@@ -43,8 +43,23 @@ import { HorizontalFilterTabs, FilterTabItem } from './HorizontalFilterTabs';
 import { usePWAInstall } from '../hooks/usePWAInstall';
 import { searchBrazilLocations, BrazilLocation } from '../data/brazilLocations';
 
+import type { OnboardingSavedData } from '../services/userService';
+
+export interface OnboardingCompletionPayload {
+  themes: string[];
+  followedEntityIds: string[];
+  followedSourceIds: string[];
+  notificationsPreferences: string[];
+  feedPreferences: string[];
+  userLocation: string;
+  userLanguage: string;
+}
+
 interface OnboardingFlowProps {
-  onComplete: (themes?: string[]) => void;
+  onComplete: (payload: OnboardingCompletionPayload) => Promise<void> | void;
+  onSaveProgress?: (step: number, data: OnboardingSavedData) => void;
+  initialStep?: number;
+  initialData?: OnboardingSavedData;
   onOpenLogin?: () => void;
   entities?: Entity[];
   topics?: Topic[];
@@ -55,6 +70,9 @@ interface OnboardingFlowProps {
 
 export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
   onComplete,
+  onSaveProgress,
+  initialStep = 1,
+  initialData,
   onOpenLogin,
   entities = [],
   topics: _topics = [],
@@ -62,7 +80,8 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
   onToggleEntity,
   onToggleSource
 }) => {
-  const [step, setStep] = useState<number>(1);
+  const [step, setStep] = useState<number>(() => Math.max(1, Math.min(7, initialStep || 1)));
+  const [isCompleting, setIsCompleting] = useState(false);
   const pwa = usePWAInstall();
   const [showIosGuide, setShowIosGuide] = useState<boolean>(false);
 
@@ -90,6 +109,9 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
   );
 
   const [selectedThemes, setSelectedThemes] = useState<Set<string>>(() => {
+    if (Array.isArray(initialData?.themes) && initialData.themes.length > 0) {
+      return new Set(initialData.themes);
+    }
     try {
       const saved = localStorage.getItem('fatosbr_user_interests');
       if (saved) {
@@ -209,6 +231,13 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
   }, [followableItems]);
 
   const [followedEntities, setFollowedEntities] = useState<Set<string>>(() => {
+    const savedIds = [
+      ...(Array.isArray(initialData?.followedEntityIds) ? initialData.followedEntityIds : []),
+      ...(Array.isArray(initialData?.followedSourceIds) ? initialData.followedSourceIds : [])
+    ];
+    if (savedIds.length > 0) {
+      return new Set(savedIds);
+    }
     const preselected = followableItems.filter((i) => i.isFollowedByDefault).map((i) => i.id);
     return new Set(preselected.length > 0 ? preselected : followableItems.slice(0, 3).map((i) => i.id));
   });
@@ -245,9 +274,12 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
   };
 
   // Tela 4: Notificações
-  const [notificationsPreferences, setNotificationsPreferences] = useState<Set<string>>(
-    new Set(['app_realtime', 'daily_email'])
-  );
+  const [notificationsPreferences, setNotificationsPreferences] = useState<Set<string>>(() => {
+    if (Array.isArray(initialData?.notificationsPreferences) && initialData.notificationsPreferences.length > 0) {
+      return new Set(initialData.notificationsPreferences);
+    }
+    return new Set(['app_realtime', 'daily_email']);
+  });
 
   const toggleNotification = (id: string) => {
     setNotificationsPreferences((prev) => {
@@ -263,6 +295,9 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
 
   // Tela 5: Personalize seu Feed
   const [feedPreferences, setFeedPreferences] = useState<Set<string>>(() => {
+    if (Array.isArray(initialData?.feedPreferences) && initialData.feedPreferences.length > 0) {
+      return new Set(initialData.feedPreferences);
+    }
     try {
       const saved = localStorage.getItem('fatosbr_feed_preferences');
       if (saved) {
@@ -291,28 +326,62 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
   };
 
   // Tela 6: Localização
-  const [userLocation, setUserLocation] = useState('São Paulo, SP');
-  const [userLanguage, setUserLanguage] = useState('Português (Brasil)');
+  const [userLocation, setUserLocation] = useState(() => initialData?.userLocation || 'São Paulo, SP');
+  const [userLanguage] = useState(() => initialData?.userLanguage || 'Português (Brasil)');
+
+  const buildPayload = (): OnboardingCompletionPayload => {
+    const entityIdSet = new Set(availableEntities.map((e) => e.id));
+    const sourceIdSet = new Set(availableSources.map((s) => s.id));
+    const selectedFollowIds = Array.from(followedEntities);
+
+    return {
+      themes: Array.from(selectedThemes),
+      followedEntityIds: selectedFollowIds.filter((id) => entityIdSet.has(id)),
+      followedSourceIds: selectedFollowIds.filter((id) => sourceIdSet.has(id)),
+      notificationsPreferences: Array.from(notificationsPreferences),
+      feedPreferences: Array.from(feedPreferences),
+      userLocation: userLocation || 'São Paulo, SP',
+      userLanguage
+    };
+  };
 
   // Progresso global
   const progressPercent = Math.round((step / 7) * 100);
 
+  const finishOnboarding = async () => {
+    if (isCompleting) return;
+    setIsCompleting(true);
+    const payload = buildPayload();
+    try {
+      localStorage.setItem('fatosbr_user_interests', JSON.stringify(payload.themes));
+      localStorage.setItem('fatosbr_feed_preferences', JSON.stringify(payload.feedPreferences));
+      localStorage.setItem('fatosbr_user_region', payload.userLocation);
+      window.dispatchEvent(new CustomEvent('fatosbr_interests_updated', { detail: { interests: payload.themes } }));
+    } catch {}
+
+    try {
+      await onComplete(payload);
+    } finally {
+      setIsCompleting(false);
+    }
+  };
+
   const nextStep = () => {
     if (step < 7) {
-      setStep(step + 1);
+      const targetStep = step + 1;
+      setStep(targetStep);
+      onSaveProgress?.(targetStep, buildPayload());
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } else {
-      try {
-        localStorage.setItem('fatosbr_session_active', 'true');
-        localStorage.setItem('fatosbr_user_region', userLocation);
-      } catch {}
-      onComplete();
+      void finishOnboarding();
     }
   };
 
   const prevStep = () => {
     if (step > 1) {
-      setStep(step - 1);
+      const targetStep = step - 1;
+      setStep(targetStep);
+      onSaveProgress?.(targetStep, buildPayload());
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
   };
@@ -1151,17 +1220,17 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
             <div className="pt-4 pb-2 space-y-3 w-full">
               <button
                 type="button"
+                disabled={isCompleting}
                 onClick={() => {
-                  const arr = Array.from(selectedThemes);
-                  try {
-                    localStorage.setItem('fatosbr_user_interests', JSON.stringify(arr));
-                    window.dispatchEvent(new CustomEvent('fatosbr_interests_updated', { detail: { interests: arr } }));
-                  } catch {}
-                  onComplete(arr);
+                  void finishOnboarding();
                 }}
-                className="w-full py-4 px-6 bg-white text-black hover:bg-zinc-100 font-semibold text-base rounded-full transition cursor-pointer active:scale-[0.99] shadow-lg shadow-white/10"
+                className="w-full py-4 px-6 bg-white text-black hover:bg-zinc-100 font-semibold text-base rounded-full transition cursor-pointer active:scale-[0.99] shadow-lg shadow-white/10 disabled:opacity-60 flex items-center justify-center gap-2"
               >
-                Acessar a FatosBR
+                {isCompleting ? (
+                  <span className="inline-block w-4 h-4 border-2 border-black border-t-transparent rounded-full animate-spin" />
+                ) : (
+                  <span>Acessar a FatosBR</span>
+                )}
               </button>
 
               <div className="pt-2 space-y-2">

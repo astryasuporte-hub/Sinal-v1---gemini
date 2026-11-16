@@ -10,493 +10,752 @@ import {
   Lock,
   User,
   ArrowRight,
-  Sparkles,
   CheckCircle2,
   AlertCircle,
   ChevronLeft,
-  RotateCcw
+  RotateCcw,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import { FatosBrLogo } from './FatosBrLogo';
-import { authService } from '../services/authService';
+import { authService, validatePasswordRequirements } from '../services/authService';
 import { isSupabaseConfigured, getSupabaseConfigStatus } from '../lib/supabase';
+import { LegalCenterModal } from './LegalCenterModal';
 
 interface AuthModalProps {
   isOpen: boolean;
   onClose: () => void;
   onAuthSuccess?: (email: string, fullName?: string) => void;
+  onRecoveryModeChange?: (isRecovering: boolean) => void;
   initialMode?: 'login' | 'signup';
 }
+
+type ModalView = 'login' | 'signup' | 'recovery' | 'otp' | 'new-password';
+type OtpPurpose = 'email' | 'signup' | 'recovery';
 
 export const AuthModal: React.FC<AuthModalProps> = ({
   isOpen,
   onClose,
   onAuthSuccess,
+  onRecoveryModeChange,
   initialMode = 'login',
 }) => {
-  const [mode, setMode] = useState<'login' | 'signup'>(initialMode);
-  const [step, setStep] = useState<'credentials' | 'verify-code'>('credentials');
+  const [view, setView] = useState<ModalView>(initialMode);
+  const [signinMethod, setSigninMethod] = useState<'password' | 'otp'>('password');
+  const [otpPurpose, setOtpPurpose] = useState<OtpPurpose>('email');
+  const [returnView, setReturnView] = useState<'login' | 'signup' | 'recovery'>('login');
+
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [fullName, setFullName] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [acceptedTerms, setAcceptedTerms] = useState(false);
+  const [legalTab, setLegalTab] = useState<'terms' | 'lgpd' | null>(null);
+
   const [codeDigits, setCodeDigits] = useState<string[]>(['', '', '', '', '', '']);
-  const [resendCooldown, setResendCooldown] = useState(45);
+  const [resendCooldown, setResendCooldown] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const [isGoogleLoading, setIsGoogleLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
+  const submitLockRef = useRef(false);
   const digitInputRefs = useRef<(HTMLInputElement | null)[]>([]);
+  const passwordReqs = validatePasswordRequirements(password);
 
-  // Reset states when modal opens
   useEffect(() => {
     if (isOpen) {
-      setStep('credentials');
+      setView(initialMode);
+      setSigninMethod('password');
       setErrorMessage(null);
       setSuccessMessage(null);
       setCodeDigits(['', '', '', '', '', '']);
-      setResendCooldown(45);
+      setResendCooldown(0);
     }
   }, [isOpen, initialMode]);
 
-  // Resend cooldown timer
   useEffect(() => {
-    if (step === 'verify-code' && resendCooldown > 0) {
-      const timer = setInterval(() => {
-        setResendCooldown((prev) => Math.max(0, prev - 1));
-      }, 1000);
-      return () => clearInterval(timer);
-    }
-  }, [step, resendCooldown]);
+    if (resendCooldown <= 0) return;
+    const timer = setInterval(() => {
+      setResendCooldown((prev) => Math.max(0, prev - 1));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [resendCooldown]);
 
   if (!isOpen) return null;
 
-  // Google OAuth Flow
-  const handleGoogleSignIn = async () => {
+  const resetMessages = () => {
     setErrorMessage(null);
     setSuccessMessage(null);
+  };
+
+  const enterOtp = (purpose: OtpPurpose, backTo: 'login' | 'signup' | 'recovery', message: string) => {
+    setOtpPurpose(purpose);
+    setReturnView(backTo);
+    setCodeDigits(['', '', '', '', '', '']);
+    setResendCooldown(60);
+    setSuccessMessage(message);
+    setErrorMessage(null);
+    setView('otp');
+    setTimeout(() => digitInputRefs.current[0]?.focus(), 100);
+  };
+
+  const handleGoogleSignIn = async () => {
+    if (submitLockRef.current || isLoading || isGoogleLoading) return;
+    resetMessages();
+
+    if (!isSupabaseConfigured) {
+      setErrorMessage('Login com Google indisponível neste ambiente no momento.');
+      return;
+    }
+
+    submitLockRef.current = true;
     setIsGoogleLoading(true);
-
     try {
-      if (!isSupabaseConfigured) {
-        // Modo demonstração quando as variáveis do Supabase ainda não foram adicionadas no Vercel
-        setTimeout(() => {
-          setIsGoogleLoading(false);
-          setSuccessMessage('Login com Google autenticado (Modo Demonstração).');
-          setTimeout(() => {
-            onAuthSuccess?.('usuario.google@fatosbr.com.br', 'Usuário Google');
-            onClose();
-          }, 800);
-        }, 600);
-        return;
-      }
-
-      const res = await authService.signInWithOAuth('google');
+      const res = await authService.signInWithGoogle();
       if (!res.success) {
         setErrorMessage(res.error || 'Falha ao conectar com o Google.');
+        setIsGoogleLoading(false);
+        submitLockRef.current = false;
       } else {
         setSuccessMessage('Redirecionando para o Google...');
       }
     } catch (err) {
-      setErrorMessage(err instanceof Error ? err.message : 'Erro ao autenticar com Google.');
-    } finally {
+      setErrorMessage(authService.translateError(err, 'oauth').message);
       setIsGoogleLoading(false);
+      submitLockRef.current = false;
     }
   };
 
-  // Submissão das Credenciais (E-mail e Senha) -> Avança para tela de código de verificação
-  const handleCredentialsSubmit = async (e: React.FormEvent) => {
+  const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setErrorMessage(null);
-    setSuccessMessage(null);
+    if (submitLockRef.current || isLoading) return;
+    resetMessages();
 
-    if (!email.trim() || !password.trim()) {
-      setErrorMessage('Por favor, preencha o e-mail e a senha.');
+    const cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      setErrorMessage('Informe um e-mail válido.');
       return;
     }
 
-    if (password.length < 6) {
-      setErrorMessage('A senha deve conter no mínimo 6 caracteres.');
-      return;
-    }
-
-    setIsLoading(true);
-
-    try {
-      if (isSupabaseConfigured) {
-        if (mode === 'signup') {
-          const res = await authService.signUp(email, password, fullName);
-          if (!res.success) {
-            setErrorMessage(res.error || 'Erro ao registrar usuário.');
-            setIsLoading(false);
-            return;
-          }
-        } else {
-          // No login tradicional, podemos validar com Supabase
-          const res = await authService.signIn(email, password);
-          if (!res.success) {
-            setErrorMessage(res.error || 'Credenciais inválidas. Verifique seu e-mail e senha.');
-            setIsLoading(false);
-            return;
-          }
+    if (signinMethod === 'otp') {
+      submitLockRef.current = true;
+      setIsLoading(true);
+      try {
+        const res = await authService.signInWithEmailOtp(cleanEmail);
+        if (!res.success) {
+          setErrorMessage(res.error || 'Não foi possível enviar o código.');
+          return;
         }
+        enterOtp('email', 'login', 'Código enviado para seu e-mail. Verifique sua caixa de entrada e spam.');
+      } finally {
+        setIsLoading(false);
+        submitLockRef.current = false;
       }
+      return;
+    }
 
-      // Dispara o e-mail de verificação via authService sem exibir o código na interface
-      const generatedCode = Math.floor(100000 + Math.random() * 900000).toString();
-      const otpSendRes = await authService.sendLoginOtp(email, generatedCode);
+    if (!password) {
+      setErrorMessage('Informe sua senha.');
+      return;
+    }
 
-      // Avança para a tela de confirmação de código de 6 dígitos
-      setIsLoading(false);
-      setStep('verify-code');
-      setResendCooldown(45);
-      if (otpSendRes.success) {
-        setSuccessMessage('Código de verificação enviado para seu e-mail. Verifique sua caixa de entrada e spam.');
-      } else {
-        setErrorMessage(
-          otpSendRes.error ||
-            'Não foi possível confirmar o envio do e-mail agora. Tente reenviar o código em instantes.'
-        );
+    submitLockRef.current = true;
+    setIsLoading(true);
+    try {
+      const res = await authService.signInWithPassword(cleanEmail, password);
+      if (!res.success || !res.data?.user) {
+        setErrorMessage(res.error || 'E-mail ou senha incorretos.');
+        return;
       }
-      setTimeout(() => {
-        digitInputRefs.current[0]?.focus();
-      }, 100);
-    } catch (err) {
-      setErrorMessage(err instanceof Error ? err.message : 'Erro inesperado.');
+      const name =
+        (res.data.user.user_metadata?.full_name as string | undefined) || cleanEmail.split('@')[0];
+      onAuthSuccess?.(res.data.user.email || cleanEmail, name);
+      onClose();
+    } finally {
       setIsLoading(false);
+      submitLockRef.current = false;
     }
   };
 
-  // Manipulação dos 6 dígitos individuais
+  const handleSignUpSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (submitLockRef.current || isLoading) return;
+    resetMessages();
+
+    const cleanName = fullName.trim();
+    const cleanEmail = email.trim().toLowerCase();
+
+    if (cleanName.length < 2) {
+      setErrorMessage('Informe seu nome completo.');
+      return;
+    }
+    if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      setErrorMessage('Informe um e-mail válido.');
+      return;
+    }
+    if (!passwordReqs.isValid) {
+      setErrorMessage('A senha deve ter no mínimo 8 caracteres, com letras e números.');
+      return;
+    }
+    if (password !== confirmPassword) {
+      setErrorMessage('A confirmação de senha não confere.');
+      return;
+    }
+    if (!acceptedTerms) {
+      setErrorMessage('Aceite os Termos de Uso e a Política de Privacidade para criar sua conta.');
+      return;
+    }
+
+    submitLockRef.current = true;
+    setIsLoading(true);
+    try {
+      const res = await authService.signUpWithPassword(cleanEmail, password, cleanName);
+      if (!res.success) {
+        setErrorMessage(res.error || 'Não foi possível criar sua conta.');
+        return;
+      }
+
+      if (res.data?.needsEmailConfirmation) {
+        enterOtp('signup', 'signup', 'Código de ativação enviado para seu e-mail. Verifique sua caixa de entrada e spam.');
+        return;
+      }
+
+      onAuthSuccess?.(res.data?.user?.email || cleanEmail, cleanName);
+      onClose();
+    } finally {
+      setIsLoading(false);
+      submitLockRef.current = false;
+    }
+  };
+
+  const handleRecoverySubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (submitLockRef.current || isLoading) return;
+    resetMessages();
+
+    const cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      setErrorMessage('Informe um e-mail válido.');
+      return;
+    }
+
+    submitLockRef.current = true;
+    setIsLoading(true);
+    try {
+      onRecoveryModeChange?.(true);
+      const res = await authService.requestPasswordRecoveryOtp(cleanEmail);
+      if (!res.success) {
+        onRecoveryModeChange?.(false);
+        setErrorMessage(res.error || 'Não foi possível enviar o código de recuperação.');
+        return;
+      }
+      enterOtp('recovery', 'recovery', 'Código de recuperação enviado para seu e-mail. Verifique sua caixa de entrada e spam.');
+    } finally {
+      setIsLoading(false);
+      submitLockRef.current = false;
+    }
+  };
+
   const handleDigitChange = (index: number, val: string) => {
     const cleaned = val.replace(/\D/g, '');
     const newDigits = [...codeDigits];
 
     if (cleaned.length > 1) {
-      // Colagem de múltiplos dígitos
-      const pastedChars = cleaned.slice(0, 6).split('');
-      pastedChars.forEach((char, i) => {
-        if (i < 6) newDigits[i] = char;
-      });
+      const pasted = cleaned.slice(0, 6).split('');
+      for (let i = 0; i < 6; i++) {
+        newDigits[i] = pasted[i] || '';
+      }
       setCodeDigits(newDigits);
-      const nextIdx = Math.min(pastedChars.length, 5);
-      digitInputRefs.current[nextIdx]?.focus();
+      const nextIdx = Math.min(pasted.length - 1, 5);
+      digitInputRefs.current[Math.max(0, nextIdx)]?.focus();
       return;
     }
 
     newDigits[index] = cleaned;
     setCodeDigits(newDigits);
-
-    // Avanço automático para o próximo dígito
     if (cleaned && index < 5) {
       digitInputRefs.current[index + 1]?.focus();
     }
   };
 
   const handleDigitKeyDown = (index: number, e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Backspace' && !codeDigits[index] && index > 0) {
-      digitInputRefs.current[index - 1]?.focus();
+    if (e.key === 'Backspace') {
+      if (codeDigits[index]) {
+        const nextDigits = [...codeDigits];
+        nextDigits[index] = '';
+        setCodeDigits(nextDigits);
+        e.preventDefault();
+      } else if (index > 0) {
+        const nextDigits = [...codeDigits];
+        nextDigits[index - 1] = '';
+        setCodeDigits(nextDigits);
+        digitInputRefs.current[index - 1]?.focus();
+        e.preventDefault();
+      }
     }
   };
 
-  const handleDigitPaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
+  const handleDigitPaste = (e: React.ClipboardEvent) => {
     e.preventDefault();
     const pasted = e.clipboardData.getData('text').replace(/\D/g, '').slice(0, 6);
-    if (pasted) {
-      const newDigits = [...codeDigits];
-      pasted.split('').forEach((char, i) => {
-        if (i < 6) newDigits[i] = char;
-      });
-      setCodeDigits(newDigits);
-      const nextIdx = Math.min(pasted.length, 5);
-      digitInputRefs.current[nextIdx]?.focus();
-    }
+    if (!pasted) return;
+    const newDigits = ['', '', '', '', '', ''];
+    pasted.split('').forEach((char, i) => {
+      if (i < 6) newDigits[i] = char;
+    });
+    setCodeDigits(newDigits);
+    const nextIdx = Math.min(pasted.length - 1, 5);
+    digitInputRefs.current[Math.max(0, nextIdx)]?.focus();
   };
 
-  // Confirmação do Código de Verificação de 6 Dígitos
-  const handleVerifyCodeSubmit = async (e: React.FormEvent) => {
+  const handleVerifyOtpSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setErrorMessage(null);
+    if (submitLockRef.current || isLoading) return;
+    resetMessages();
 
-    const fullCode = codeDigits.join('');
-    if (fullCode.length < 6) {
-      setErrorMessage('Por favor, informe todos os 6 dígitos do código de verificação.');
+    const fullCode = codeDigits.join('').trim();
+    if (fullCode.length !== 6) {
+      setErrorMessage('Informe todos os 6 dígitos do código de verificação.');
       return;
     }
 
+    const cleanEmail = email.trim().toLowerCase();
+    submitLockRef.current = true;
     setIsLoading(true);
-
-    let verified = false;
     try {
-      const verifyRes = await authService.verifyOtp(email, fullCode, mode === 'signup' ? 'signup' : 'email');
-      verified = verifyRes.success;
-    } catch {
-      verified = false;
-    }
+      const res = await authService.verifyOtp(cleanEmail, fullCode, otpPurpose);
+      if (!res.success || !res.data?.session || !res.data?.user) {
+        setErrorMessage(res.error || 'Código inválido, expirado ou já utilizado.');
+        return;
+      }
 
-    if (!verified) {
-      setIsLoading(false);
-      setErrorMessage('Código de verificação incorreto ou expirado. Confira o código recebido por e-mail.');
-      return;
-    }
+      if (otpPurpose === 'recovery') {
+        onRecoveryModeChange?.(true);
+        setPassword('');
+        setConfirmPassword('');
+        setView('new-password');
+        setSuccessMessage('Código validado. Defina sua nova senha.');
+        return;
+      }
 
-    setIsLoading(false);
-    setSuccessMessage('Código verificado com sucesso! Acessando FatosBR...');
+      const name =
+        (res.data.user.user_metadata?.full_name as string | undefined) ||
+        fullName.trim() ||
+        cleanEmail.split('@')[0];
 
-    try {
-      const userProfile = {
-        name: fullName || email.split('@')[0],
-        displayName: fullName || email.split('@')[0],
-        email: email,
-        avatarUrl: null,
-        timezone: 'America/Sao_Paulo'
-      };
-      localStorage.setItem('sinal_user_profile', JSON.stringify(userProfile));
-    } catch {}
-
-    setTimeout(() => {
-      onAuthSuccess?.(email, fullName || email.split('@')[0]);
+      onAuthSuccess?.(res.data.user.email || cleanEmail, name);
       onClose();
-    }, 500);
+    } finally {
+      setIsLoading(false);
+      submitLockRef.current = false;
+    }
   };
 
   const handleResendCode = async () => {
-    if (resendCooldown > 0) return;
-    setErrorMessage(null);
-    setResendCooldown(45);
-    setCodeDigits(['', '', '', '', '', '']);
-    setSuccessMessage('Reenviando código de verificação para seu e-mail...');
+    if (resendCooldown > 0 || submitLockRef.current || isLoading) return;
+    resetMessages();
 
-    const newCode = Math.floor(100000 + Math.random() * 900000).toString();
-    const res = await authService.sendLoginOtp(email, newCode);
-    if (res.success) {
-      setSuccessMessage('Código de verificação enviado para seu e-mail. Verifique sua caixa de entrada e spam.');
-    } else {
-      setSuccessMessage(null);
-      setErrorMessage(res.error || 'Não foi possível reenviar o código agora. Tente novamente em instantes.');
+    const cleanEmail = email.trim().toLowerCase();
+    submitLockRef.current = true;
+    setIsLoading(true);
+    setCodeDigits(['', '', '', '', '', '']);
+    try {
+      const res =
+        otpPurpose === 'signup'
+          ? await authService.resendSignupOtp(cleanEmail)
+          : otpPurpose === 'recovery'
+          ? await authService.requestPasswordRecoveryOtp(cleanEmail)
+          : await authService.signInWithEmailOtp(cleanEmail);
+
+      if (!res.success) {
+        setErrorMessage(res.error || 'Não foi possível reenviar o código agora.');
+        return;
+      }
+      setResendCooldown(60);
+      setSuccessMessage('Código reenviado para seu e-mail. Verifique sua caixa de entrada e spam.');
+      setTimeout(() => digitInputRefs.current[0]?.focus(), 80);
+    } finally {
+      setIsLoading(false);
+      submitLockRef.current = false;
     }
-    digitInputRefs.current[0]?.focus();
   };
 
+  const handleUpdatePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (submitLockRef.current || isLoading) return;
+    resetMessages();
+
+    if (!passwordReqs.isValid) {
+      setErrorMessage('A nova senha deve ter no mínimo 8 caracteres, com letras e números.');
+      return;
+    }
+    if (password !== confirmPassword) {
+      setErrorMessage('A confirmação de senha não confere.');
+      return;
+    }
+
+    submitLockRef.current = true;
+    setIsLoading(true);
+    try {
+      const res = await authService.updatePassword(password);
+      if (!res.success) {
+        setErrorMessage(res.error || 'Não foi possível salvar sua nova senha.');
+        return;
+      }
+      onRecoveryModeChange?.(false);
+      const cleanEmail = res.data?.user?.email || email.trim().toLowerCase();
+      const name = (res.data?.user?.user_metadata?.full_name as string | undefined) || cleanEmail.split('@')[0];
+      onAuthSuccess?.(cleanEmail, name);
+      onClose();
+    } finally {
+      setIsLoading(false);
+      submitLockRef.current = false;
+    }
+  };
+
+  const status = getSupabaseConfigStatus();
+  const isOtpComplete = codeDigits.every((d) => /^\d$/.test(d));
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-fade-in">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md animate-fade-in overflow-y-auto">
       <div
-        className="w-full max-w-md bg-[#0a0c10] border border-zinc-800 rounded-2xl shadow-2xl overflow-hidden relative"
+        className="w-full max-w-md bg-[#111216] border border-zinc-800 rounded-2xl shadow-2xl overflow-hidden relative my-auto"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Top Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800/80 bg-zinc-950/60">
-          <div className="flex items-center gap-3">
-            <FatosBrLogo size="sm" variant="compact" glow={false} />
-          </div>
+        <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800/80 bg-[#050505]/70">
+          <FatosBrLogo size="sm" variant="compact" glow={false} />
           <button
-            onClick={onClose}
-            className="p-2 text-zinc-400 hover:text-white rounded-xl hover:bg-zinc-800/60 transition-colors cursor-pointer min-h-[40px] min-w-[40px] flex items-center justify-center"
+            type="button"
+            onClick={() => {
+              onRecoveryModeChange?.(false);
+              onClose();
+            }}
+            className="p-2 text-zinc-400 hover:text-white rounded-xl hover:bg-zinc-800/60 transition-colors cursor-pointer min-h-[44px] min-w-[44px] flex items-center justify-center"
             aria-label="Fechar"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Status de Segurança (Apenas se houver chave incorreta bloqueada) */}
-        {(() => {
-          const status = getSupabaseConfigStatus();
-          if (status.isServiceRoleBlocked) {
-            return (
-              <div className="px-6 pt-3">
-                <div className="flex items-start space-x-2 text-[11px] text-red-400 bg-red-500/10 border border-red-500/20 px-3 py-2 rounded-lg">
-                  <AlertCircle className="w-4 h-4 shrink-0 text-red-400 mt-0.5" />
-                  <div>
-                    <span className="font-semibold block">Bloqueio de Segurança Ativo</span>
-                    <span className="text-zinc-300">Foi detectada uma chave "service_role". Substitua pela chave pública "anon" para proteger o banco.</span>
-                  </div>
-                </div>
-              </div>
-            );
-          }
-          return null;
-        })()}
-
-        {step === 'credentials' ? (
-          /* ================= ETAPA 1: CREDENCIAIS (GOOGLE OU EMAIL E SENHA) ================= */
-          <div>
-            {/* Botão de Destaque: Continuar com o Google */}
-            <div className="px-6 pt-4">
-              <button
-                type="button"
-                disabled={isLoading || isGoogleLoading}
-                onClick={handleGoogleSignIn}
-                className="w-full flex items-center justify-center space-x-3 px-4 py-2.5 bg-[#12141a] hover:bg-[#181a22] text-zinc-100 border border-zinc-700/80 hover:border-zinc-500 font-medium text-sm rounded-xl transition-all cursor-pointer active:scale-[0.99] shadow-sm disabled:opacity-60"
-              >
-                {isGoogleLoading ? (
-                  <span className="inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                ) : (
-                  <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24">
-                    <path
-                      fill="#EA4335"
-                      d="M12 5c1.6 0 3 .6 4.1 1.6l3.1-3.1C17.3 1.7 14.8 1 12 1 7.5 1 3.7 3.6 1.9 7.3l3.7 2.9C6.5 7.4 9 5 12 5z"
-                    />
-                    <path
-                      fill="#4285F4"
-                      d="M23.5 12.3c0-.8-.1-1.6-.2-2.3H12v4.5h6.5c-.3 1.5-1.1 2.8-2.4 3.7l3.7 2.9c2.2-2 3.7-5 3.7-8.8z"
-                    />
-                    <path
-                      fill="#FBBC05"
-                      d="M5.6 14.8c-.2-.7-.4-1.5-.4-2.3s.1-1.6.4-2.3L1.9 7.3C.7 9.7 0 12 0 14.5s.7 4.8 1.9 7.2l3.7-2.9z"
-                    />
-                    <path
-                      fill="#34A853"
-                      d="M12 23.5c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3 0-5.5-2-6.4-4.8L1.9 17C3.7 20.7 7.5 23.5 12 23.5z"
-                    />
-                  </svg>
-                )}
-                <span>Continuar com o Google</span>
-              </button>
-
-              {/* Divisor Visual */}
-              <div className="flex items-center my-3.5 space-x-3">
-                <div className="flex-1 h-px bg-zinc-800"></div>
-                <span className="text-[10.5px] text-zinc-400 font-medium uppercase tracking-wider">ou com e-mail e senha</span>
-                <div className="flex-1 h-px bg-zinc-800"></div>
-              </div>
+        {status.isServiceRoleBlocked && (
+          <div className="px-5 pt-4">
+            <div className="flex items-start space-x-2 text-[11px] text-red-400 bg-red-500/10 border border-red-500/20 px-3 py-2 rounded-lg">
+              <AlertCircle className="w-4 h-4 shrink-0 text-red-400 mt-0.5" />
+              <span>Chave service_role detectada no cliente. Use exclusivamente a chave pública anon.</span>
             </div>
+          </div>
+        )}
 
-            {/* Tabs: Entrar vs Criar Conta (SEM LINK MÁGICO) */}
-            <div className="flex p-1.5 mx-6 bg-zinc-900/60 rounded-xl border border-zinc-800/80">
-              <button
-                type="button"
-                onClick={() => {
-                  setMode('login');
-                  setErrorMessage(null);
-                  setSuccessMessage(null);
-                }}
-                className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
-                  mode === 'login' ? 'bg-zinc-800 text-white shadow-sm' : 'text-zinc-400 hover:text-zinc-200'
-                }`}
-              >
-                Entrar
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setMode('signup');
-                  setErrorMessage(null);
-                  setSuccessMessage(null);
-                }}
-                className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
-                  mode === 'signup' ? 'bg-zinc-800 text-white shadow-sm' : 'text-zinc-400 hover:text-zinc-200'
-                }`}
-              >
-                Criar Conta
-              </button>
+        <div className="p-5 sm:p-6 space-y-5">
+          {errorMessage && (
+            <div className="flex items-start space-x-2 p-3 bg-red-950/40 border border-red-800/50 rounded-xl text-xs text-red-300">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>{errorMessage}</span>
             </div>
+          )}
 
-            {/* Formulário de Credenciais */}
-            <form onSubmit={handleCredentialsSubmit} className="p-6 pt-4 space-y-3.5">
-              {mode === 'signup' && (
-                <div className="space-y-1">
-                  <label className="block text-xs font-medium text-zinc-300">Nome completo</label>
+          {successMessage && (
+            <div className="flex items-start space-x-2 p-3 bg-emerald-950/40 border border-emerald-800/50 rounded-xl text-xs text-emerald-300">
+              <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>{successMessage}</span>
+            </div>
+          )}
+
+          {view === 'login' && (
+            <div className="space-y-4">
+              <div>
+                <h3 className="text-lg font-bold text-white">
+                  {signinMethod === 'otp' ? 'Entrar com código.' : 'Bem-vindo de volta.'}
+                </h3>
+                <p className="text-xs text-zinc-400 mt-1">
+                  {signinMethod === 'otp'
+                    ? 'Receba um código numérico de 6 dígitos por e-mail.'
+                    : 'Entre na sua conta para acompanhar o que realmente importa.'}
+                </p>
+              </div>
+
+              <form onSubmit={handleLoginSubmit} className="space-y-3.5">
+                <div>
+                  <label className="block text-xs font-medium text-zinc-300 mb-1">E-mail</label>
                   <div className="relative">
-                    <User className="absolute left-3 top-2.5 w-4 h-4 text-zinc-400" />
+                    <Mail className="absolute left-3 top-3.5 w-4 h-4 text-zinc-500" />
                     <input
-                      type="text"
+                      type="email"
                       required
-                      value={fullName}
-                      onChange={(e) => setFullName(e.target.value)}
-                      placeholder="Seu nome"
-                      className="w-full bg-zinc-900/90 border border-zinc-800 rounded-xl pl-9 pr-3 py-2 text-sm text-zinc-100 placeholder-zinc-400 focus:outline-none focus:border-zinc-500 transition-colors"
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      placeholder="seu@email.com"
+                      className="w-full min-h-[46px] bg-[#050505] border border-zinc-800 rounded-xl pl-9 pr-3 py-2.5 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-zinc-500"
                     />
                   </div>
                 </div>
+
+                {signinMethod === 'password' && (
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-xs font-medium text-zinc-300">Senha</label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          resetMessages();
+                          setView('recovery');
+                        }}
+                        className="text-xs text-zinc-400 hover:text-white cursor-pointer"
+                      >
+                        Esqueci minha senha
+                      </button>
+                    </div>
+                    <div className="relative">
+                      <Lock className="absolute left-3 top-3.5 w-4 h-4 text-zinc-500" />
+                      <input
+                        type={showPassword ? 'text' : 'password'}
+                        required
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        placeholder="Digite sua senha"
+                        className="w-full min-h-[46px] bg-[#050505] border border-zinc-800 rounded-xl pl-9 pr-10 py-2.5 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-zinc-500"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword(!showPassword)}
+                        className="absolute right-2 top-1.5 w-8 h-8 flex items-center justify-center text-zinc-500 hover:text-zinc-200 cursor-pointer"
+                      >
+                        {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={isLoading || isGoogleLoading}
+                  className="w-full min-h-[48px] flex items-center justify-center gap-2 px-4 py-2.5 bg-white hover:bg-zinc-200 text-black font-bold text-sm rounded-xl transition cursor-pointer disabled:opacity-50"
+                >
+                  {isLoading ? (
+                    <span className="inline-block w-4 h-4 border-2 border-black border-t-transparent rounded-full animate-spin" />
+                  ) : (
+                    <span>{signinMethod === 'otp' ? 'Enviar código por e-mail' : 'Entrar'}</span>
+                  )}
+                </button>
+              </form>
+
+              <button
+                type="button"
+                onClick={() => {
+                  resetMessages();
+                  setSigninMethod(signinMethod === 'password' ? 'otp' : 'password');
+                }}
+                className="w-full min-h-[44px] py-2 px-3 rounded-xl bg-[#050505] border border-zinc-800 hover:border-zinc-600 text-xs font-medium text-zinc-200 hover:text-white cursor-pointer"
+              >
+                {signinMethod === 'password' ? 'Entrar com código por e-mail' : 'Voltar para e-mail e senha'}
+              </button>
+
+              {isSupabaseConfigured && (
+                <button
+                  type="button"
+                  disabled={isLoading || isGoogleLoading}
+                  onClick={handleGoogleSignIn}
+                  className="w-full min-h-[44px] flex items-center justify-center gap-2.5 px-4 py-2 bg-[#050505] hover:bg-zinc-900 text-zinc-100 border border-zinc-800 rounded-xl text-xs font-medium cursor-pointer disabled:opacity-50"
+                >
+                  <span>Continuar com Google</span>
+                </button>
               )}
 
-              <div className="space-y-1">
-                <label className="block text-xs font-medium text-zinc-300">E-mail</label>
+              <div className="text-center text-xs text-zinc-400">
+                <span>Não tem conta? </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    resetMessages();
+                    setView('signup');
+                  }}
+                  className="text-white font-semibold hover:underline cursor-pointer"
+                >
+                  Criar uma conta
+                </button>
+              </div>
+            </div>
+          )}
+
+          {view === 'signup' && (
+            <form onSubmit={handleSignUpSubmit} className="space-y-3.5">
+              <div>
+                <h3 className="text-lg font-bold text-white">Comece com o que importa.</h3>
+                <p className="text-xs text-zinc-400 mt-1">
+                  Crie sua conta e tenha uma experiência de informação personalizada.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-zinc-300 mb-1">Nome completo</label>
                 <div className="relative">
-                  <Mail className="absolute left-3 top-2.5 w-4 h-4 text-zinc-400" />
+                  <User className="absolute left-3 top-3.5 w-4 h-4 text-zinc-500" />
+                  <input
+                    type="text"
+                    required
+                    value={fullName}
+                    onChange={(e) => setFullName(e.target.value)}
+                    placeholder="Seu nome"
+                    className="w-full min-h-[46px] bg-[#050505] border border-zinc-800 rounded-xl pl-9 pr-3 py-2.5 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-zinc-500"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-zinc-300 mb-1">E-mail</label>
+                <div className="relative">
+                  <Mail className="absolute left-3 top-3.5 w-4 h-4 text-zinc-500" />
                   <input
                     type="email"
                     required
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
-                    placeholder="seu.email@exemplo.com"
-                    className="w-full bg-zinc-900/90 border border-zinc-800 rounded-xl pl-9 pr-3 py-2 text-sm text-zinc-100 placeholder-zinc-400 focus:outline-none focus:border-zinc-500 transition-colors"
+                    placeholder="seu@email.com"
+                    className="w-full min-h-[46px] bg-[#050505] border border-zinc-800 rounded-xl pl-9 pr-3 py-2.5 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-zinc-500"
                   />
                 </div>
               </div>
 
-              <div className="space-y-1">
-                <label className="block text-xs font-medium text-zinc-300">Senha</label>
+              <div>
+                <label className="block text-xs font-medium text-zinc-300 mb-1">Senha</label>
                 <div className="relative">
-                  <Lock className="absolute left-3 top-2.5 w-4 h-4 text-zinc-400" />
+                  <Lock className="absolute left-3 top-3.5 w-4 h-4 text-zinc-500" />
                   <input
-                    type="password"
+                    type={showPassword ? 'text' : 'password'}
                     required
-                    minLength={6}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    placeholder="••••••••••••"
-                    className="w-full bg-zinc-900/90 border border-zinc-800 rounded-xl pl-9 pr-3 py-2 text-sm text-zinc-100 placeholder-zinc-400 focus:outline-none focus:border-zinc-500 transition-colors"
+                    placeholder="Mínimo 8 caracteres (letras e números)"
+                    className="w-full min-h-[46px] bg-[#050505] border border-zinc-800 rounded-xl pl-9 pr-10 py-2.5 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-zinc-500"
                   />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute right-2 top-1.5 w-8 h-8 flex items-center justify-center text-zinc-500 hover:text-zinc-200 cursor-pointer"
+                  >
+                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
                 </div>
-                <span className="text-[10px] text-zinc-400">Mínimo de 6 caracteres.</span>
               </div>
 
-              {errorMessage && (
-                <div className="flex items-start space-x-2 p-3 bg-red-950/40 border border-red-800/50 rounded-xl text-xs text-red-300">
-                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                  <span>{errorMessage}</span>
+              <div>
+                <label className="block text-xs font-medium text-zinc-300 mb-1">Confirmar senha</label>
+                <div className="relative">
+                  <Lock className="absolute left-3 top-3.5 w-4 h-4 text-zinc-500" />
+                  <input
+                    type={showConfirmPassword ? 'text' : 'password'}
+                    required
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    placeholder="Repita a senha"
+                    className="w-full min-h-[46px] bg-[#050505] border border-zinc-800 rounded-xl pl-9 pr-10 py-2.5 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-zinc-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+                    className="absolute right-2 top-1.5 w-8 h-8 flex items-center justify-center text-zinc-500 hover:text-zinc-200 cursor-pointer"
+                  >
+                    {showConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
                 </div>
-              )}
+              </div>
 
-              {successMessage && (
-                <div className="flex items-start space-x-2 p-3 bg-emerald-950/40 border border-emerald-800/50 rounded-xl text-xs text-emerald-300">
-                  <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
-                  <span>{successMessage}</span>
-                </div>
-              )}
+              <label className="flex items-start gap-2 text-xs text-zinc-400 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={acceptedTerms}
+                  onChange={(e) => setAcceptedTerms(e.target.checked)}
+                  className="mt-0.5 w-4 h-4 accent-emerald-500"
+                />
+                <span>
+                  Li e aceito os{' '}
+                  <button type="button" onClick={() => setLegalTab('terms')} className="text-zinc-200 underline cursor-pointer">
+                    Termos de Uso
+                  </button>{' '}
+                  e a{' '}
+                  <button type="button" onClick={() => setLegalTab('lgpd')} className="text-zinc-200 underline cursor-pointer">
+                    Política de Privacidade
+                  </button>.
+                </span>
+              </label>
 
               <button
                 type="submit"
                 disabled={isLoading}
-                className="w-full mt-2 flex items-center justify-center space-x-2 px-4 py-2.5 bg-zinc-100 hover:bg-white text-zinc-950 font-medium text-sm rounded-xl transition-all disabled:opacity-50 cursor-pointer shadow-sm active:scale-[0.99]"
+                className="w-full min-h-[48px] bg-white hover:bg-zinc-200 text-black font-bold text-sm rounded-xl cursor-pointer disabled:opacity-50"
               >
-                {isLoading ? (
-                  <span className="inline-block w-4 h-4 border-2 border-zinc-900 border-t-transparent rounded-full animate-spin" />
-                ) : mode === 'login' ? (
-                  <>
-                    <span>Continuar para Verificação</span>
-                    <ArrowRight className="w-4 h-4" />
-                  </>
-                ) : (
-                  <>
-                    <span>Criar Conta & Enviar Código (3 Dias)</span>
-                    <Sparkles className="w-4 h-4" />
-                  </>
-                )}
+                {isLoading ? 'Criando conta...' : 'Criar minha conta'}
+              </button>
+
+              <div className="text-center text-xs text-zinc-400">
+                <span>Já tem conta? </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    resetMessages();
+                    setView('login');
+                  }}
+                  className="text-white font-semibold hover:underline cursor-pointer"
+                >
+                  Entrar
+                </button>
+              </div>
+            </form>
+          )}
+
+          {view === 'recovery' && (
+            <form onSubmit={handleRecoverySubmit} className="space-y-4">
+              <div>
+                <h3 className="text-lg font-bold text-white">Recuperar acesso.</h3>
+                <p className="text-xs text-zinc-400 mt-1">
+                  Informe seu e-mail para receber o código numérico de 6 dígitos.
+                </p>
+              </div>
+
+              <input
+                type="email"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="seu@email.com"
+                className="w-full min-h-[46px] bg-[#050505] border border-zinc-800 rounded-xl px-3.5 py-2.5 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-zinc-500"
+              />
+
+              <button
+                type="submit"
+                disabled={isLoading}
+                className="w-full min-h-[48px] bg-white hover:bg-zinc-200 text-black font-bold text-sm rounded-xl cursor-pointer disabled:opacity-50"
+              >
+                {isLoading ? 'Enviando...' : 'Enviar código de recuperação'}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  resetMessages();
+                  setView('login');
+                }}
+                className="w-full text-xs text-zinc-400 hover:text-white py-2 cursor-pointer"
+              >
+                Voltar para Entrar
               </button>
             </form>
-          </div>
-        ) : (
-          /* ================= ETAPA 2: CÓDIGO DE VERIFICAÇÃO DE 6 DÍGITOS ================= */
-          <div className="p-6 space-y-5 animate-fade-in">
-            {/* Header da Etapa de Código */}
-            <div className="space-y-1.5 text-center">
-              <div className="w-12 h-12 rounded-2xl bg-[#111318] border border-zinc-800 flex items-center justify-center mx-auto text-white mb-3 shadow-inner">
-                <Mail className="w-5 h-5" />
-              </div>
-              <h4 className="text-lg font-bold text-white tracking-tight">Verifique seu e-mail</h4>
-              <div className="text-xs text-zinc-400 leading-relaxed space-y-0.5">
-                <p>
-                  Código de verificação enviado para{' '}
-                  <span className="text-zinc-200 font-medium">{email}</span>.
-                </p>
-                <p className="text-zinc-500">Verifique sua caixa de entrada e spam.</p>
-              </div>
-            </div>
+          )}
 
-            <form onSubmit={handleVerifyCodeSubmit} className="space-y-4">
-              {/* Grid dos 6 Dígitos */}
-              <div className="grid grid-cols-6 gap-2 sm:gap-2.5">
+          {view === 'otp' && (
+            <form onSubmit={handleVerifyOtpSubmit} className="space-y-4">
+              <div className="space-y-1 text-center">
+                <h4 className="text-lg font-bold text-white">Verifique seu e-mail.</h4>
+                <p className="text-xs text-zinc-400">
+                  Enviamos um código numérico de 6 dígitos para <span className="text-white font-medium break-all">{email}</span>.
+                </p>
+                <p className="text-[11px] text-zinc-500">Verifique sua caixa de entrada e spam.</p>
+              </div>
+
+              <div className="grid grid-cols-6 gap-1.5 sm:gap-2.5" onPaste={handleDigitPaste}>
                 {codeDigits.map((digit, idx) => (
                   <input
                     key={idx}
@@ -512,50 +771,26 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     aria-label={`Dígito ${idx + 1} de 6`}
                     onChange={(e) => handleDigitChange(idx, e.target.value)}
                     onKeyDown={(e) => handleDigitKeyDown(idx, e)}
-                    onPaste={idx === 0 ? handleDigitPaste : undefined}
-                    className="w-full h-12 sm:h-14 rounded-xl border border-zinc-800 bg-[#111318] text-center text-lg sm:text-xl font-mono font-bold text-white focus:outline-none focus:border-white focus:ring-1 focus:ring-white/30 transition-all shadow-inner"
+                    className="w-full h-12 sm:h-14 rounded-xl border border-zinc-800 bg-[#050505] text-center text-lg sm:text-xl font-mono font-bold text-white focus:outline-none focus:border-white"
                   />
                 ))}
               </div>
 
-              {errorMessage && (
-                <div className="flex items-start space-x-2 p-3 bg-red-950/40 border border-red-800/50 rounded-xl text-xs text-red-300">
-                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                  <span>{errorMessage}</span>
-                </div>
-              )}
-
-              {successMessage && (
-                <div className="flex items-start space-x-2 p-3 bg-emerald-950/40 border border-emerald-800/50 rounded-xl text-xs text-emerald-300">
-                  <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
-                  <span>{successMessage}</span>
-                </div>
-              )}
-
-              {/* Botão de Confirmação */}
               <button
                 type="submit"
-                disabled={isLoading}
-                className="w-full flex items-center justify-center space-x-2 px-4 py-3 bg-white hover:bg-zinc-200 text-black font-bold text-sm rounded-xl transition-all disabled:opacity-50 cursor-pointer shadow-sm active:scale-[0.99] min-h-[48px]"
+                disabled={isLoading || !isOtpComplete}
+                className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-white hover:bg-zinc-200 text-black font-bold text-sm rounded-xl transition cursor-pointer disabled:opacity-50 min-h-[48px]"
               >
-                {isLoading ? (
-                  <span className="inline-block w-4 h-4 border-2 border-zinc-900 border-t-transparent rounded-full animate-spin" />
-                ) : (
-                  <>
-                    <span>Confirmar código</span>
-                    <ArrowRight className="w-4 h-4" />
-                  </>
-                )}
+                <span>Confirmar código</span>
+                <ArrowRight className="w-4 h-4" />
               </button>
 
-              {/* Reenvio e Voltar */}
-              <div className="flex items-center justify-between pt-2 text-xs text-zinc-400">
+              <div className="flex items-center justify-between pt-1 text-xs text-zinc-400">
                 <button
                   type="button"
                   onClick={() => {
-                    setStep('credentials');
-                    setErrorMessage(null);
-                    setSuccessMessage(null);
+                    resetMessages();
+                    setView(returnView);
                   }}
                   className="flex items-center gap-1 hover:text-white transition cursor-pointer"
                 >
@@ -566,28 +801,60 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 <button
                   type="button"
                   onClick={handleResendCode}
-                  disabled={resendCooldown > 0}
-                  className={`flex items-center gap-1 transition cursor-pointer ${
-                    resendCooldown > 0 ? 'text-zinc-400 cursor-not-allowed' : 'text-zinc-200 hover:text-white font-medium'
-                  }`}
+                  disabled={resendCooldown > 0 || isLoading}
+                  className="flex items-center gap-1 text-zinc-200 hover:text-white disabled:text-zinc-500 cursor-pointer"
                 >
                   <RotateCcw className="w-3 h-3" />
-                  <span>
-                    {resendCooldown > 0 ? `Reenviar código (${resendCooldown}s)` : 'Reenviar código'}
-                  </span>
+                  <span>{resendCooldown > 0 ? `Reenviar código (${resendCooldown}s)` : 'Reenviar código'}</span>
                 </button>
               </div>
             </form>
-          </div>
-        )}
+          )}
 
-        {/* Rodapé explicativo */}
-        <div className="px-6 py-3.5 bg-zinc-950/80 border-t border-zinc-800/80 text-center">
-          <p className="text-[11px] text-zinc-400">
-            O FatosBR protege suas fontes e preferências com criptografia de ponta e isolamento RLS.
-          </p>
+          {view === 'new-password' && (
+            <form onSubmit={handleUpdatePassword} className="space-y-4">
+              <div>
+                <h4 className="text-lg font-bold text-white">Defina sua nova senha.</h4>
+                <p className="text-xs text-zinc-400 mt-1">Mínimo 8 caracteres com letras e números.</p>
+              </div>
+
+              <input
+                type={showPassword ? 'text' : 'password'}
+                required
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Nova senha"
+                className="w-full min-h-[46px] bg-[#050505] border border-zinc-800 rounded-xl px-3.5 py-2.5 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-zinc-500"
+              />
+
+              <input
+                type={showConfirmPassword ? 'text' : 'password'}
+                required
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                placeholder="Confirmar nova senha"
+                className="w-full min-h-[46px] bg-[#050505] border border-zinc-800 rounded-xl px-3.5 py-2.5 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-zinc-500"
+              />
+
+              <button
+                type="submit"
+                disabled={isLoading}
+                className="w-full min-h-[48px] bg-white hover:bg-zinc-200 text-black font-bold text-sm rounded-xl cursor-pointer disabled:opacity-50"
+              >
+                {isLoading ? 'Salvando...' : 'Salvar nova senha'}
+              </button>
+            </form>
+          )}
         </div>
       </div>
+
+      {legalTab && (
+        <LegalCenterModal
+          isOpen={Boolean(legalTab)}
+          onClose={() => setLegalTab(null)}
+          initialTab={legalTab}
+        />
+      )}
     </div>
   );
 };

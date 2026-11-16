@@ -13,7 +13,7 @@ const getSavedUrl = (): string | undefined => {
       if (stored && stored.trim()) return stored.trim();
     }
   } catch {}
-  return (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.trim();
+  return (import.meta.env?.VITE_SUPABASE_URL as string | undefined)?.trim();
 };
 
 const getSavedAnonKey = (): string | undefined => {
@@ -23,7 +23,7 @@ const getSavedAnonKey = (): string | undefined => {
       if (stored && stored.trim()) return stored.trim();
     }
   } catch {}
-  return (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined)?.trim();
+  return (import.meta.env?.VITE_SUPABASE_ANON_KEY as string | undefined)?.trim();
 };
 
 const rawSupabaseUrl = getSavedUrl();

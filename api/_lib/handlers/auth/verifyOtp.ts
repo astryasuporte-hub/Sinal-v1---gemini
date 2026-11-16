@@ -2,12 +2,12 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  * 
- * Vercel Serverless Function: Auth Verify OTP
+ * Vercel Serverless Function: Auth Verify OTP (Legacy Endpoint Hardened in Auth V3.0)
+ * A verificação oficial de códigos OTP ocorre exclusivamente pelo Supabase Auth (verifyOtp).
  */
 
 import { sendJson, setCorsHeaders, readJsonBody } from '../../common.js';
 import { enforceRateLimit } from '../../rateLimiter.js';
-import { otpStore } from './sendOtp.js';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);
@@ -35,41 +35,10 @@ export default async function handler(req: any, res: any) {
     return sendJson(res, 400, { error: 'E-mail e código são obrigatórios.' });
   }
 
-  const entry = otpStore.get(email);
-  if (!entry) {
-    // Para fins de desenvolvimento resiliente ou código expirado
-    if (code === '123456') {
-      return sendJson(res, 200, {
-        success: true,
-        verified: true,
-        message: 'Código de demonstração validado com sucesso.',
-        token: `token_${Date.now()}`
-      });
-    }
-    return sendJson(res, 400, { error: 'Código expirado ou não solicitado. Peça um novo código.' });
-  }
-
-  if (Date.now() > entry.expiresAt) {
-    otpStore.delete(email);
-    return sendJson(res, 400, { error: 'Código expirado. Peça um novo código.' });
-  }
-
-  entry.attempts += 1;
-  if (entry.attempts > 5) {
-    otpStore.delete(email);
-    return sendJson(res, 429, { error: 'Limite de tentativas excedido. Solicite um novo código.' });
-  }
-
-  if (entry.code !== code && code !== '123456') {
-    return sendJson(res, 401, { error: 'Código incorreto. Verifique os 6 dígitos digitados.' });
-  }
-
-  otpStore.delete(email);
-
-  return sendJson(res, 200, {
-    success: true,
-    verified: true,
-    message: 'Autenticação confirmada com sucesso.',
-    token: `token_${Date.now()}`
+  return sendJson(res, 410, {
+    success: false,
+    verified: false,
+    error: 'LEGACY_OTP_DISABLED',
+    message: 'Validação paralela de OTP desativada na Auth V3.0. Utilize exclusivamente supabase.auth.verifyOtp.'
   });
 }

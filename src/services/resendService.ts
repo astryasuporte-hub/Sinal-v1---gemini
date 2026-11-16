@@ -207,70 +207,15 @@ class ResendService {
   }
 
   /**
-   * Dispara o código de verificação (OTP 6 dígitos) para autenticação do usuário
+   * Depreciado na Auth V3.0: códigos OTP de autenticação são enviados e validados
+   * exclusivamente pelo Supabase Auth (com SMTP configurado no projeto).
    */
-  /**
-   * Dispara o código de verificação (OTP 6 dígitos) para autenticação do usuário
-   */
-  async sendVerificationCode(toEmail: string, code: string): Promise<ResendSendResult> {
-    try {
-      // 1. Tentar primeiro o endpoint dedicado /api/auth/send-otp
-      const otpEndpointRes = await fetch('/api/auth/send-otp', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: toEmail,
-          code
-        })
-      });
-
-      if (otpEndpointRes.ok) {
-        const otpData = await otpEndpointRes.json().catch(() => ({}));
-        if (otpData.success) {
-          return {
-            success: true,
-            id: otpData.id,
-            recipient: toEmail,
-            message: `Código enviado para ${toEmail}`
-          };
-        }
-      }
-
-      // 2. Fallback para /api/resend/send com template otp_code
-      const res = await fetch('/api/resend/send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          to: toEmail,
-          template: 'otp_code',
-          code,
-          subject: `FatosBR • Código de Acesso: ${code}`,
-          summary: `Seu código de acesso único é ${code}`,
-          text: `Seu código de confirmação FatosBR é: ${code}\n\nUtilize este código de 6 dígitos para autenticar seu acesso à plataforma com segurança. Válido por 10 minutos.`
-        })
-      });
-
-      const data = await res.json().catch(() => ({}));
-      if (res.ok && data.success) {
-        return {
-          success: true,
-          id: data.id,
-          recipient: toEmail,
-          message: `Código enviado para ${toEmail}`
-        };
-      }
-      return {
-        success: false,
-        recipient: toEmail,
-        error: data.error || data.message || `Falha no envio (HTTP ${res.status})`
-      };
-    } catch (err: any) {
-      return {
-        success: false,
-        recipient: toEmail,
-        error: err.message || 'Falha de comunicação com o servidor de e-mail'
-      };
-    }
+  async sendVerificationCode(toEmail: string, _code?: string): Promise<ResendSendResult> {
+    return {
+      success: false,
+      recipient: toEmail,
+      error: 'Fluxo paralelo de OTP desativado. Utilize o envio oficial via Supabase Auth.'
+    };
   }
 
   /**

@@ -238,29 +238,33 @@ export default function App() {
       if (view === 'oauth_consent' || view === 'consent') return 'oauth_consent';
       if (view === 'login') return 'login';
       if (view === 'onboarding') return 'onboarding';
-      if (view === 'app' || view === 'home') return 'home';
       if (view === 'admin') return 'admin';
       if (view === 'control' || view === 'instagram') return 'control';
-      if (view === 'profile') return 'profile';
-      if (view === 'explore') return 'explore';
       if (view === 'landing') return 'landing';
-      if (window.location.hash === '#app' || window.location.hash === '#home') return 'home';
-      if (window.location.hash === '#control') return 'control';
-
-      // Persistência de sessão: se o usuário já fez login ou tem perfil ativo, permanece logado na última tela
-      const isSessionActive = localStorage.getItem('fatosbr_session_active') === 'true';
-      const hasSavedProfile = Boolean(localStorage.getItem('sinal_user_profile'));
-      const lastNav = localStorage.getItem('fatosbr_last_nav') as any;
-
-      if (isSessionActive || hasSavedProfile) {
-        if (lastNav && lastNav !== 'landing' && lastNav !== 'login') {
-          return lastNav;
-        }
-        return 'home';
-      }
     }
     return 'landing';
   });
+  const [isAuthChecking, setIsAuthChecking] = useState<boolean>(() => {
+    if (typeof window !== 'undefined' && isSupabaseConfigured) {
+      const pathname = window.location.pathname;
+      const hash = window.location.hash;
+      const search = window.location.search;
+      if (
+        pathname.includes('/auth/callback') ||
+        pathname.includes('/auth/confirm') ||
+        hash.includes('access_token') ||
+        search.includes('code=')
+      ) {
+        return true;
+      }
+    }
+    return false;
+  });
+  const [onboardingResumeState, setOnboardingResumeState] = useState<{
+    step: number;
+    data: import('./services/userService').OnboardingSavedData;
+  } | null>(null);
+  const recoverySessionActiveRef = React.useRef(false);
   const { language, isRTL } = useI18n();
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<'for-you' | 'following' | 'trending'>('for-you');
@@ -688,6 +692,86 @@ export default function App() {
     }
   }, [currentNav]);
 
+  const hydrateAndResolveOnboarding = useCallback(async (user: SupabaseUser, preferredTargetNav?: 'home' | 'explore' | 'following' | 'notifications' | 'briefings' | 'profile' | 'saved' | 'history' | 'admin' | 'control') => {
+    try {
+      const [onboardingState, followedEntityIds, followedTopicIds, followedSourceIds] = await Promise.all([
+        userService.getOnboardingState(user.id),
+        userService.getFollowedEntityIds(user.id),
+        userService.getFollowedTopicIds(user.id),
+        userService.getFollowedSourceIds(user.id),
+      ]);
+
+      // Restaurar temas salvos no perfil canônico
+      if (Array.isArray(onboardingState.data?.themes) && onboardingState.data.themes.length > 0) {
+        setUserInterests(onboardingState.data.themes);
+        try {
+          localStorage.setItem('fatosbr_user_interests', JSON.stringify(onboardingState.data.themes));
+          window.dispatchEvent(new CustomEvent('fatosbr_interests_updated', { detail: { interests: onboardingState.data.themes } }));
+        } catch {}
+      }
+
+      if (Array.isArray(onboardingState.data?.feedPreferences) && onboardingState.data.feedPreferences.length > 0) {
+        try {
+          localStorage.setItem('fatosbr_feed_preferences', JSON.stringify(onboardingState.data.feedPreferences));
+        } catch {}
+      }
+
+      if (onboardingState.data?.userLocation) {
+        try {
+          localStorage.setItem('fatosbr_user_region', onboardingState.data.userLocation);
+        } catch {}
+      }
+
+      // Hidratar entidades, tópicos e fontes seguidos no Supabase
+      const dbEntitySet = new Set(
+        followedEntityIds.length > 0
+          ? followedEntityIds
+          : (onboardingState.data?.followedEntityIds || [])
+      );
+      if (dbEntitySet.size > 0) {
+        setEntities((prev) => prev.map((e) => ({ ...e, isFollowed: dbEntitySet.has(e.id) })));
+      }
+
+      const dbTopicSet = new Set(
+        followedTopicIds.length > 0
+          ? followedTopicIds
+          : (onboardingState.data?.followedTopicIds || [])
+      );
+      if (dbTopicSet.size > 0) {
+        setTopics((prev) => prev.map((t) => ({ ...t, isFollowed: dbTopicSet.has(t.id) })));
+      }
+
+      const dbSourceSet = new Set(
+        followedSourceIds.length > 0
+          ? followedSourceIds
+          : (onboardingState.data?.followedSourceIds || [])
+      );
+      if (dbSourceSet.size > 0) {
+        setSources((prev) => prev.map((s) => ({ ...s, isFollowed: dbSourceSet.has(s.id) })));
+      }
+
+      if (onboardingState.status === 'COMPLETED') {
+        setOnboardingResumeState(null);
+        setCurrentNav(preferredTargetNav || 'home');
+      } else {
+        setOnboardingResumeState({
+          step: onboardingState.step || 1,
+          data: onboardingState.data || {},
+        });
+        setCurrentNav('onboarding');
+      }
+    } catch {
+      const cachedOnboarded = (() => {
+        try {
+          return localStorage.getItem('sinal_onboarded_' + user.id) === 'true';
+        } catch {
+          return false;
+        }
+      })();
+      setCurrentNav(cachedOnboarded ? (preferredTargetNav || 'home') : 'onboarding');
+    }
+  }, []);
+
   const handleUserSession = (user: SupabaseUser | null) => {
     setCurrentUser(user);
     if (user) {
@@ -702,7 +786,6 @@ export default function App() {
       }
 
       try {
-        localStorage.setItem('fatosbr_session_active', 'true');
         localStorage.setItem(
           'sinal_user_profile',
           JSON.stringify({
@@ -715,10 +798,8 @@ export default function App() {
         );
       } catch {}
 
-      // Sincronizar ativamente no Supabase public.profiles e no registro consolidado do painel admin
       userService.syncUserProfile(user);
 
-      // Sincronizar itens salvos do usuário
       userService.getSavedEventIds(user.id).then((savedIds) => {
         if (savedIds && savedIds.length > 0) {
           setSavedEventIds(new Set(savedIds));
@@ -730,14 +811,20 @@ export default function App() {
           );
         }
       });
+    } else {
+      try {
+        localStorage.removeItem('fatosbr_session_active');
+      } catch {}
     }
   };
 
   // Supabase Auth & Dados Reais Listener
   useEffect(() => {
-    if (!isSupabaseConfigured) return;
+    if (!isSupabaseConfigured) {
+      setIsAuthChecking(false);
+      return;
+    }
 
-    // Carregar dados reais do Supabase se existirem
     eventService.getEvents().then((remoteEvents) => {
       if (remoteEvents && remoteEvents.length > 0) {
         setEvents(remoteEvents);
@@ -762,76 +849,74 @@ export default function App() {
       }
     });
 
-    // Validação assíncrona da sessão no Supabase antes de qualquer redirecionamento
     const restoreSessionAsync = async () => {
       try {
         const session = await authService.getSession();
         const user = session?.user || (await authService.getCurrentUser());
 
+        const pathname = window.location.pathname;
+        const search = window.location.search;
+        const hash = window.location.hash;
+        const isAuthCallback =
+          pathname.includes('/auth/callback') ||
+          pathname.includes('/auth/confirm') ||
+          hash.includes('access_token') ||
+          search.includes('code=');
+
         if (user) {
           handleUserSession(user);
-          localStorage.setItem('fatosbr_session_active', 'true');
-
-          const params = new URLSearchParams(window.location.search);
+          const params = new URLSearchParams(search);
           const explicitView = params.get('view') || params.get('page');
           const lastNav = localStorage.getItem('fatosbr_last_nav') as any;
+          const validLastNav =
+            lastNav &&
+            lastNav !== 'landing' &&
+            lastNav !== 'login' &&
+            lastNav !== 'onboarding' &&
+            lastNav !== 'oauth_consent'
+              ? lastNav
+              : 'home';
 
-          if (!explicitView && (window.location.pathname === '/' || window.location.pathname === '')) {
-            setCurrentNav((prev) => {
-              if (prev === 'landing' || prev === 'login') {
-                return lastNav && lastNav !== 'landing' && lastNav !== 'login' ? lastNav : 'home';
-              }
-              return prev;
-            });
+          if (!recoverySessionActiveRef.current) {
+            if (isAuthCallback || !explicitView || explicitView === 'app' || explicitView === 'home') {
+              await hydrateAndResolveOnboarding(user, validLastNav);
+            }
+          }
+
+          if (isAuthCallback) {
+            window.history.replaceState(null, '', '/');
+          }
+        } else {
+          handleUserSession(null);
+          if (pathname.startsWith('/onboarding')) {
+            setCurrentNav('login');
           }
         }
       } catch (err) {
         console.warn('Erro ao validar sessão assíncrona:', err);
+      } finally {
+        setIsAuthChecking(false);
       }
     };
 
     restoreSessionAsync();
 
-    // Detectar retorno de OAuth (/auth/callback, /auth/confirm, query/hash com tokens)
-    if (typeof window !== 'undefined') {
-      const pathname = window.location.pathname;
-      const search = window.location.search;
-      const hash = window.location.hash;
-
-      const isAuthCallback =
-        pathname.includes('/auth/callback') ||
-        pathname.includes('/auth/confirm') ||
-        hash.includes('access_token') ||
-        search.includes('code=') ||
-        search.includes('error=');
-
-      if (isAuthCallback) {
-        authService.getCurrentUser().then((user) => {
-          if (user) {
-            handleUserSession(user);
-            localStorage.setItem('fatosbr_session_active', 'true');
-            localStorage.setItem('fatosbr_last_nav', 'home');
-            const hasOnboarded = localStorage.getItem('sinal_onboarded_' + user.id) === 'true';
-            if (!hasOnboarded) {
-              setCurrentNav('onboarding');
-            } else {
-              setCurrentNav('home');
-            }
-          }
-          // Limpa a barra de navegação para a raiz sem deixar tokens ou parâmetros expostos
-          window.history.replaceState(null, '', '/');
-        });
+    const { data: authListener } = authService.onAuthStateChange((event, session) => {
+      if (event === 'PASSWORD_RECOVERY') {
+        recoverySessionActiveRef.current = true;
       }
-    }
-
-    const { data: authListener } = authService.onAuthStateChange((_event, session) => {
+      if (event === 'SIGNED_OUT') {
+        recoverySessionActiveRef.current = false;
+        handleUserSession(null);
+        return;
+      }
       handleUserSession(session?.user ?? null);
     });
 
     return () => {
       authListener?.subscription?.unsubscribe();
     };
-  }, []);
+  }, [hydrateAndResolveOnboarding]);
 
   // Deep linking para acontecimento compartilhado (?event={id})
   useEffect(() => {
@@ -990,8 +1075,12 @@ export default function App() {
     );
   };
 
-  // Follow / Unfollow Handlers com persistência e feedback instantâneo
+  // Follow / Unfollow Handlers com persistência no Supabase
   const handleToggleFollowEntity = (id: string) => {
+    const entity = entities.find((e) => e.id === id);
+    if (entity && currentUser?.id) {
+      void userService.toggleFollowEntity(currentUser.id, id, entity.isFollowed);
+    }
     setEntities((prev) =>
       prev.map((e) => (e.id === id ? { ...e, isFollowed: !e.isFollowed } : e))
     );
@@ -1000,7 +1089,7 @@ export default function App() {
   const handleToggleFollowTopic = (id: string) => {
     const topic = topics.find((t) => t.id === id);
     if (topic && currentUser?.id) {
-      userService.toggleFollowTopic(currentUser.id, id, topic.isFollowed);
+      void userService.toggleFollowTopic(currentUser.id, id, topic.isFollowed);
     }
     setTopics((prev) =>
       prev.map((t) => (t.id === id ? { ...t, isFollowed: !t.isFollowed } : t))
@@ -1008,6 +1097,10 @@ export default function App() {
   };
 
   const handleToggleFollowSource = (id: string) => {
+    const source = sources.find((s) => s.id === id);
+    if (source && currentUser?.id) {
+      void userService.toggleFollowSource(currentUser.id, id, source.isFollowed);
+    }
     setSources((prev) =>
       prev.map((s) => (s.id === id ? { ...s, isFollowed: !s.isFollowed } : s))
     );
@@ -1134,6 +1227,14 @@ export default function App() {
   const isSuperAdmin = Boolean(userEffectiveEmail && ADMIN_EMAILS.includes(userEffectiveEmail));
   const SUPER_ADMIN_EMAIL = 'astryasuporte@gmail.com';
 
+  if (isAuthChecking) {
+    return (
+      <div className="min-h-screen bg-[#050505] text-zinc-100 flex items-center justify-center p-6">
+        <SinalLoading message="Verificando sua sessão..." />
+      </div>
+    );
+  }
+
   // Renderização de Telas Especiais: Landing Page, Login, Onboarding ou Admin Panel
   if (currentNav === 'landing') {
     return (
@@ -1156,31 +1257,20 @@ export default function App() {
   if (currentNav === 'login') {
     return (
       <LoginPage
-        onBackToLanding={() => setCurrentNav('landing')}
-        onAuthSuccess={(_email, _name) => {
-          userService.syncUserProfile({
-            email: _email,
-            full_name: _name || _email.split('@')[0],
-            name: _name || _email.split('@')[0]
-          });
-          authService.getCurrentUser().then((user) => {
-            if (user) {
-              handleUserSession(user);
-              const hasOnboarded = localStorage.getItem('sinal_onboarded_' + user.id) === 'true';
-              if (!hasOnboarded) {
-                setCurrentNav('onboarding');
-              } else {
-                setCurrentNav('home');
-              }
-            } else {
-              const hasOnboarded = localStorage.getItem('sinal_onboarded_' + _email) === 'true';
-              if (!hasOnboarded) {
-                setCurrentNav('onboarding');
-              } else {
-                setCurrentNav('home');
-              }
-            }
-          });
+        onBackToLanding={() => {
+          recoverySessionActiveRef.current = false;
+          setCurrentNav('landing');
+        }}
+        onRecoveryModeChange={(active) => {
+          recoverySessionActiveRef.current = active;
+        }}
+        onAuthSuccess={async (_email, _name) => {
+          recoverySessionActiveRef.current = false;
+          const user = await authService.getCurrentUser();
+          if (user) {
+            handleUserSession(user);
+            await hydrateAndResolveOnboarding(user, 'home');
+          }
         }}
       />
     );
@@ -1192,15 +1282,24 @@ export default function App() {
         entities={entities}
         topics={topics}
         sources={sources}
+        initialStep={onboardingResumeState?.step || 1}
+        initialData={onboardingResumeState?.data}
         onToggleEntity={handleToggleFollowEntity}
         onToggleSource={handleToggleFollowSource}
         onOpenLogin={() => setCurrentNav('login')}
-        onComplete={(newThemes) => {
-          if (Array.isArray(newThemes) && newThemes.length > 0) {
-            setUserInterests(newThemes);
+        onSaveProgress={(step, data) => {
+          if (currentUser?.id) {
+            void userService.saveOnboardingProgress(currentUser.id, step, data);
           }
-          const userKey = currentUser?.id || currentUser?.email || 'guest';
-          localStorage.setItem('sinal_onboarded_' + userKey, 'true');
+        }}
+        onComplete={async (payload) => {
+          if (Array.isArray(payload.themes) && payload.themes.length > 0) {
+            setUserInterests(payload.themes);
+          }
+          if (currentUser?.id) {
+            await userService.completeOnboarding(currentUser.id, payload, currentUser.email);
+          }
+          setOnboardingResumeState(null);
           setCurrentNav('home');
         }}
       />
@@ -2503,9 +2602,21 @@ export default function App() {
 
       <AuthModal
         isOpen={isAuthModalOpen}
-        onClose={() => setIsAuthModalOpen(false)}
-        onAuthSuccess={(_email) => {
+        onClose={() => {
+          recoverySessionActiveRef.current = false;
           setIsAuthModalOpen(false);
+        }}
+        onRecoveryModeChange={(active) => {
+          recoverySessionActiveRef.current = active;
+        }}
+        onAuthSuccess={async () => {
+          recoverySessionActiveRef.current = false;
+          setIsAuthModalOpen(false);
+          const user = await authService.getCurrentUser();
+          if (user) {
+            handleUserSession(user);
+            await hydrateAndResolveOnboarding(user, 'home');
+          }
         }}
       />
 
@@ -2524,8 +2635,6 @@ export default function App() {
       <OnboardingModal
         isOpen={isOnboardingOpen}
         onClose={() => {
-          const userKey = currentUser?.id || currentUser?.email || 'guest';
-          localStorage.setItem('sinal_onboarded_' + userKey, 'true');
           setIsOnboardingOpen(false);
         }}
         entities={entities}
@@ -2534,9 +2643,19 @@ export default function App() {
         onToggleEntity={handleToggleFollowEntity}
         onToggleTopic={handleToggleFollowTopic}
         onToggleSource={handleToggleFollowSource}
-        onComplete={() => {
-          const userKey = currentUser?.id || currentUser?.email || 'guest';
-          localStorage.setItem('sinal_onboarded_' + userKey, 'true');
+        onComplete={async () => {
+          if (currentUser?.id) {
+            await userService.completeOnboarding(
+              currentUser.id,
+              {
+                themes: userInterests,
+                followedEntityIds: entities.filter((e) => e.isFollowed).map((e) => e.id),
+                followedTopicIds: topics.filter((t) => t.isFollowed).map((t) => t.id),
+                followedSourceIds: sources.filter((s) => s.isFollowed).map((s) => s.id),
+              },
+              currentUser.email
+            );
+          }
           setIsOnboardingOpen(false);
           setCurrentNav('home');
         }}
@@ -2568,9 +2687,20 @@ export default function App() {
         onClose={() => setIsRecalibrateModalOpen(false)}
         onSave={(newInterests) => {
           setUserInterests(newInterests);
+          if (currentUser?.id) {
+            void userService.updateUserInterests(currentUser.id, newInterests);
+          }
         }}
         onFullOnboarding={() => {
           setIsRecalibrateModalOpen(false);
+          setOnboardingResumeState({
+            step: 2,
+            data: {
+              themes: userInterests,
+              followedEntityIds: entities.filter((e) => e.isFollowed).map((e) => e.id),
+              followedSourceIds: sources.filter((s) => s.isFollowed).map((s) => s.id),
+            },
+          });
           setCurrentNav('onboarding');
         }}
       />
