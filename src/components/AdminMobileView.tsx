@@ -60,7 +60,7 @@ import {
   MessageSquare
 } from 'lucide-react';
 import { Event, Source, Topic, Entity } from '../types/sinal';
-import { AdminUser, AdminMetrics, SystemLog } from '../services/adminService';
+import { adminService, AdminUser, AdminMetrics, SystemLog } from '../services/adminService';
 import { useI18n, useTranslation, SUPPORTED_LANGUAGES, LanguageCode } from '../i18n';
 import { isSupabaseConfigured, checkSupabaseConnection, saveSupabaseCredentials } from '../lib/supabase';
 import { AdminFinancialDashboard } from './AdminFinancialDashboard';
@@ -1891,9 +1891,13 @@ export const AdminMobileView: React.FC<AdminMobileViewProps> = ({
                   className="p-3.5 rounded-2xl bg-[#07111D] border border-[#183047] flex items-center justify-between gap-3"
                 >
                   <div className="flex items-center gap-3 min-w-0">
-                    <div className="w-10 h-10 rounded-xl bg-[#0A1726] border border-[#183047] p-1 flex items-center justify-center shrink-0">
-                      {ent.logoUrl ? (
-                        <img src={ent.logoUrl} alt={ent.name} className="w-full h-full object-contain" />
+                    <div className="w-10 h-10 rounded-xl bg-[#0A1726] border border-[#183047] p-1 flex items-center justify-center shrink-0 overflow-hidden">
+                      {(ent.imageUrl || ent.logoUrl || ent.avatarUrl) ? (
+                        <img
+                          src={ent.imageUrl || ent.logoUrl || ent.avatarUrl}
+                          alt={ent.name}
+                          className={`w-full h-full ${ent.type === 'person' ? 'object-cover' : 'object-contain'}`}
+                        />
                       ) : (
                         <Building2 className="w-5 h-5 text-[#41C8F4]" />
                       )}
@@ -1909,24 +1913,28 @@ export const AdminMobileView: React.FC<AdminMobileViewProps> = ({
                       <span>PNG</span>
                       <input
                         type="file"
-                        accept="image/png,image/jpeg,image/webp"
+                        accept="image/png"
                         className="hidden"
-                        onChange={(e) => {
+                        onChange={async (e) => {
                           const file = e.target.files?.[0];
+                          e.target.value = '';
                           if (!file) return;
-                          if (file.size > 6 * 1024 * 1024) {
-                            onShowToast('Arquivo excede limite de 6MB.');
+                          if (file.size > 4 * 1024 * 1024) {
+                            onShowToast('Arquivo excede limite de 4MB.');
                             return;
                           }
-                          const reader = new FileReader();
-                          reader.onload = (ev) => {
-                            const b64 = ev.target?.result as string;
-                            if (onUpdateEntityLogo) {
-                              onUpdateEntityLogo(ent.id, b64);
-                              onShowToast(`Logotipo de ${ent.name} atualizado!`);
-                            }
-                          };
-                          reader.readAsDataURL(file);
+                          const res = await adminService.uploadCompanyLogo(
+                            ent.id,
+                            file,
+                            ent.type === 'person' ? 'PERSON' : 'COMPANY'
+                          );
+                          if (res.success && res.logoUrl) {
+                            onUpdateEntityLogo?.(ent.id, res.logoUrl);
+                            window.dispatchEvent(new CustomEvent('fatosbr_entities_updated'));
+                            onShowToast(`Imagem de ${ent.name} salva no Supabase!`);
+                          } else {
+                            onShowToast(res.error || `Falha ao enviar imagem de ${ent.name}.`);
+                          }
                         }}
                       />
                     </label>

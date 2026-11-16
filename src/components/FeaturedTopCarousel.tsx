@@ -156,7 +156,9 @@ export const FeaturedTopCarousel: React.FC<FeaturedTopCarouselProps> = ({
                     name={primaryEntity.name}
                     brandColor={primaryEntity.brandColor}
                     type={primaryEntity.type}
-                    logoUrl={primaryEntity.logoUrl}
+                    imageUrl={primaryEntity.imageUrl}
+                    logoUrl={primaryEntity.logoUrl || primaryEntity.avatarUrl}
+                    website={primaryEntity.website}
                   />
                 )}
                 <span>•</span>

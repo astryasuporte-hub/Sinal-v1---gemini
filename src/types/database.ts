@@ -231,12 +231,14 @@ export interface Database {
         Row: {
           id: string;
           name: string;
-          type: 'company' | 'person' | 'organization';
+          slug?: string | null;
+          type: 'company' | 'person' | 'organization' | 'COMPANY' | 'PERSON' | 'ORGANIZATION';
           description: string | null;
           sector: string | null;
           role: string | null;
           organization: string | null;
           website: string | null;
+          image_url?: string | null;
           avatar_url: string | null;
           brand_color: string | null;
           created_at: string;
@@ -244,24 +246,28 @@ export interface Database {
         Insert: {
           id: string;
           name: string;
-          type: 'company' | 'person' | 'organization';
+          slug?: string | null;
+          type: 'company' | 'person' | 'organization' | 'COMPANY' | 'PERSON' | 'ORGANIZATION';
           description?: string | null;
           sector?: string | null;
           role?: string | null;
           organization?: string | null;
           website?: string | null;
+          image_url?: string | null;
           avatar_url?: string | null;
           brand_color?: string | null;
           created_at?: string;
         };
         Update: {
           name?: string;
-          type?: 'company' | 'person' | 'organization';
+          slug?: string | null;
+          type?: 'company' | 'person' | 'organization' | 'COMPANY' | 'PERSON' | 'ORGANIZATION';
           description?: string | null;
           sector?: string | null;
           role?: string | null;
           organization?: string | null;
           website?: string | null;
+          image_url?: string | null;
           avatar_url?: string | null;
           brand_color?: string | null;
         };

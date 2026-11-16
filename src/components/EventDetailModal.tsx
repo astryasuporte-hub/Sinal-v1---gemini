@@ -6,6 +6,7 @@
 import React, { useState, useEffect } from 'react';
 import { Event, Entity } from '../types/sinal';
 import { FatosBrLogo } from './FatosBrLogo';
+import { EntityAvatar } from './EntityAvatar';
 import {
   ArrowLeft,
   Bookmark,
@@ -429,6 +430,36 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
             )}
           </article>
 
+          {/* Entidades Relacionadas ao Fato */}
+          {event.entities && event.entities.length > 0 && (
+            <section className="mt-8 pt-6 border-t border-zinc-900 space-y-3">
+              <h3 className="text-[11px] font-mono uppercase tracking-[0.12em] text-zinc-400 font-semibold">
+                Entidades e personalidades citadas
+              </h3>
+              <div className="flex flex-wrap gap-2">
+                {event.entities.map((ent) => (
+                  <button
+                    key={ent.id}
+                    type="button"
+                    onClick={() => onOpenEntity?.(ent)}
+                    className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[#0c0d11] hover:bg-zinc-900 border border-zinc-800/80 hover:border-zinc-700 text-xs text-zinc-200 transition cursor-pointer"
+                  >
+                    <EntityAvatar
+                      name={ent.name}
+                      type={ent.type}
+                      imageUrl={ent.imageUrl}
+                      logoUrl={ent.logoUrl || ent.avatarUrl}
+                      website={ent.website}
+                      brandColor={ent.brandColor}
+                      size="xs"
+                    />
+                    <span className="font-medium">{ent.name}</span>
+                  </button>
+                ))}
+              </div>
+            </section>
+          )}
+
           {/* Fontes Jornalísticas Verificadas */}
           {event.sources && event.sources.length > 0 && (
             <section className="mt-10 pt-7 border-t border-zinc-900 space-y-3.5">
@@ -444,11 +475,20 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
                     rel="noopener noreferrer"
                     className="flex items-center justify-between gap-3 px-4 py-3 rounded-xl bg-[#0c0d11] hover:bg-zinc-900 border border-zinc-800/80 hover:border-zinc-700 text-xs text-zinc-300 hover:text-white transition cursor-pointer"
                   >
-                    <div className="min-w-0">
-                      <div className="font-semibold text-white truncate">{src.sourceName}</div>
-                      {src.domain && (
-                        <div className="text-zinc-500 font-mono text-[11px] truncate">{src.domain}</div>
-                      )}
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <EntityAvatar
+                        name={src.sourceName}
+                        type="source"
+                        logoUrl={src.logoUrl}
+                        domain={src.domain}
+                        size="sm"
+                      />
+                      <div className="min-w-0">
+                        <div className="font-semibold text-white truncate">{src.sourceName}</div>
+                        {src.domain && (
+                          <div className="text-zinc-500 font-mono text-[11px] truncate">{src.domain}</div>
+                        )}
+                      </div>
                     </div>
                     <ExternalLink className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
                   </a>

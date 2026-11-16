@@ -74,9 +74,28 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
     { id: 'Organizações', label: 'Organizações' },
     { id: 'Fontes', label: 'Fontes' }
   ];
-  // Helper para renderizar logo com monograma ou ícone oficial
-  const renderEntityLogo = (name: string, brandColor?: string, customType?: string) => {
-    return <CompanyLogoBadge name={name} brandColor={brandColor} type={customType} size="md" />;
+  // Helper para renderizar logo oficial ou avatar com fallback de monograma
+  const renderEntityLogo = (
+    name: string,
+    brandColor?: string,
+    customType?: string,
+    imageUrl?: string,
+    logoUrl?: string,
+    website?: string,
+    domain?: string
+  ) => {
+    return (
+      <CompanyLogoBadge
+        name={name}
+        brandColor={brandColor}
+        type={customType}
+        imageUrl={imageUrl}
+        logoUrl={logoUrl}
+        website={website}
+        domain={domain}
+        size="md"
+      />
+    );
   };
 
   // Helper para ícones de categorias
@@ -154,17 +173,40 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
     };
   }, [searchQuery, companies, people, organizations, topics, sources, events]);
 
-  // Trending items list
+  // Trending items list (sincronizado com catálogo real do Supabase para exibir logos/avatares atualizados)
   const trendingList = EXPLORE_TRENDING_ITEMS.map((item) => {
-    // sincroniza follow state
-    const foundEntity = entities.find((e) => e.id === item.id);
-    const foundTopic = topics.find((t) => t.id === item.id);
-    const isFollowed = foundEntity ? foundEntity.isFollowed : foundTopic ? foundTopic.isFollowed : item.isFollowed;
-    return { ...item, isFollowed };
+    const normName = item.name.trim().toLowerCase();
+    const foundEntity = entities.find((e) => e.id === item.id || e.name.trim().toLowerCase() === normName);
+    const foundTopic = topics.find((t) => t.id === item.id || t.name.trim().toLowerCase() === normName);
+    const foundSource = sources.find((s) => s.id === item.id || s.name.trim().toLowerCase() === normName);
+    const isFollowed = foundEntity
+      ? foundEntity.isFollowed
+      : foundTopic
+      ? foundTopic.isFollowed
+      : foundSource
+      ? foundSource.isFollowed
+      : item.isFollowed;
+    return {
+      ...item,
+      resolvedEntity: foundEntity,
+      resolvedTopic: foundTopic,
+      resolvedSource: foundSource,
+      imageUrl: foundEntity?.imageUrl || foundEntity?.logoUrl || foundSource?.logoUrl,
+      website: foundEntity?.website,
+      domain: foundSource?.domain,
+      entityType: foundEntity?.type || (foundSource ? 'source' : item.type),
+      isFollowed
+    };
   });
 
   const handleToggleTrending = (item: typeof trendingList[0]) => {
-    if (item.id.startsWith('ent-')) {
+    if (item.resolvedEntity) {
+      onToggleFollowEntity(item.resolvedEntity.id);
+    } else if (item.resolvedTopic) {
+      onToggleFollowTopic(item.resolvedTopic.id);
+    } else if (item.resolvedSource) {
+      onToggleFollowSource(item.resolvedSource.id);
+    } else if (item.id.startsWith('ent-')) {
       onToggleFollowEntity(item.id);
     } else if (item.id.startsWith('top-')) {
       onToggleFollowTopic(item.id);
@@ -256,7 +298,7 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
                           onClick={() => onOpenEntity(c)}
                           className="flex items-center space-x-3 cursor-pointer overflow-hidden"
                         >
-                          {renderEntityLogo(c.name, c.brandColor)}
+                          {renderEntityLogo(c.name, c.brandColor, c.type, c.imageUrl, c.logoUrl, c.website)}
                           <div className="overflow-hidden">
                             <div className="text-xs font-bold text-white truncate">{c.name}</div>
                             <div className="text-[11px] text-zinc-400 truncate">{c.sector}</div>
@@ -294,7 +336,7 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
                           onClick={() => onOpenEntity(p)}
                           className="flex items-center space-x-3 cursor-pointer overflow-hidden"
                         >
-                          {renderEntityLogo(p.name, p.brandColor)}
+                          {renderEntityLogo(p.name, p.brandColor, p.type, p.imageUrl, p.logoUrl || p.avatarUrl, p.website)}
                           <div className="overflow-hidden">
                             <div className="text-xs font-bold text-white truncate">{p.name}</div>
                             <div className="text-[11px] text-zinc-400 truncate">{p.sector || p.role}</div>
@@ -364,7 +406,7 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
                         className="p-3.5 rounded-xl border border-[#1e2026] bg-[#111215] flex items-center justify-between hover:border-zinc-700 transition"
                       >
                         <div className="flex items-center space-x-3 overflow-hidden">
-                          {renderEntityLogo(s.name, s.brandColor)}
+                          {renderEntityLogo(s.name, s.brandColor, 'source', s.logoUrl, s.logoUrl, undefined, s.domain)}
                           <div className="overflow-hidden">
                             <div className="text-xs font-bold text-white truncate">{s.name}</div>
                             <div className="text-[11px] text-zinc-400 truncate">{s.domain}</div>
@@ -421,7 +463,15 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
                   </div>
 
                   <div className="flex flex-col items-center space-y-1.5">
-                    {renderEntityLogo(item.name, item.brandColor, item.type)}
+                    {renderEntityLogo(
+                      item.name,
+                      item.brandColor,
+                      item.entityType,
+                      item.imageUrl,
+                      item.imageUrl,
+                      item.website,
+                      item.domain
+                    )}
                     <div>
                       <div className="text-xs font-bold text-white truncate max-w-[120px]">
                         {item.name}
@@ -472,7 +522,15 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
                     <span className="font-mono text-xs font-bold text-zinc-500 w-4 text-center">
                       {item.rank}
                     </span>
-                    {renderEntityLogo(item.name, item.brandColor, item.type)}
+                    {renderEntityLogo(
+                      item.name,
+                      item.brandColor,
+                      item.entityType,
+                      item.imageUrl,
+                      item.imageUrl,
+                      item.website,
+                      item.domain
+                    )}
                     <div className="overflow-hidden">
                       <div className="text-xs font-bold text-white truncate">{item.name}</div>
                       <div className="text-[10px] text-zinc-400">
@@ -541,7 +599,7 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
                   { id: 'companies', label: 'Empresas' },
                   { id: 'people', label: 'Pessoas' },
                   { id: 'organizations', label: 'Organizações' },
-                  { id: 'fontes', label: 'Fontes' },
+                  { id: 'sources', label: 'Fontes' },
                   { id: 'topics', label: 'Temas' }
                 ]}
                 activeTabId={selectedSubTab}
@@ -553,7 +611,7 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
                 {selectedSubTab === 'companies' && `${companies.length} empresas`}
                 {selectedSubTab === 'people' && `${people.length} pessoas`}
                 {selectedSubTab === 'organizations' && `${organizations.length} organizações`}
-                {selectedSubTab === ('fontes' as any) && `${sources.length} fontes`}
+                {selectedSubTab === 'sources' && `${sources.length} fontes`}
                 {selectedSubTab === 'topics' && `${topics.length} temas`}
               </span>
             </div>
@@ -572,7 +630,14 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
                       onClick={() => onOpenEntity(company)}
                       className="flex items-center space-x-3 cursor-pointer overflow-hidden flex-1"
                     >
-                      {renderEntityLogo(company.name, company.brandColor)}
+                      {renderEntityLogo(
+                        company.name,
+                        company.brandColor,
+                        company.type,
+                        company.imageUrl,
+                        company.logoUrl,
+                        company.website
+                      )}
                       <div className="overflow-hidden">
                         <div className="text-xs font-bold text-white truncate">{company.name}</div>
                         <div className="text-[11px] text-zinc-400 truncate">{company.sector}</div>
@@ -606,7 +671,14 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
                       onClick={() => onOpenEntity(person)}
                       className="flex items-center space-x-3 cursor-pointer overflow-hidden flex-1"
                     >
-                      {renderEntityLogo(person.name, person.brandColor)}
+                      {renderEntityLogo(
+                        person.name,
+                        person.brandColor,
+                        person.type,
+                        person.imageUrl,
+                        person.logoUrl || person.avatarUrl,
+                        person.website
+                      )}
                       <div className="overflow-hidden">
                         <div className="text-xs font-bold text-white truncate">{person.name}</div>
                         <div className="text-[11px] text-zinc-400 truncate">{person.role || person.sector}</div>
@@ -640,7 +712,14 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
                       onClick={() => onOpenEntity(org)}
                       className="flex items-center space-x-3 cursor-pointer overflow-hidden flex-1"
                     >
-                      {renderEntityLogo(org.name, org.brandColor)}
+                      {renderEntityLogo(
+                        org.name,
+                        org.brandColor,
+                        org.type,
+                        org.imageUrl,
+                        org.logoUrl,
+                        org.website
+                      )}
                       <div className="overflow-hidden">
                         <div className="text-xs font-bold text-white truncate">{org.name}</div>
                         <div className="text-[11px] text-zinc-400 truncate">{org.sector}</div>
@@ -664,14 +743,22 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
                 ))}
 
               {/* Fontes */}
-              {selectedSubTab === ('fontes' as any) &&
+              {selectedSubTab === 'sources' &&
                 sources.map((src) => (
                   <div
                     key={src.id}
                     className="p-3.5 rounded-2xl border border-[#1e2026] bg-[#111215] hover:border-zinc-700/80 transition flex items-center justify-between"
                   >
                     <div className="flex items-center space-x-3 overflow-hidden flex-1">
-                      {renderEntityLogo(src.name, src.brandColor)}
+                      {renderEntityLogo(
+                        src.name,
+                        src.brandColor,
+                        'source',
+                        src.logoUrl,
+                        src.logoUrl,
+                        undefined,
+                        src.domain
+                      )}
                       <div className="overflow-hidden">
                         <div className="text-xs font-bold text-white truncate">{src.name}</div>
                         <div className="text-[11px] text-zinc-400 truncate">{src.domain}</div>

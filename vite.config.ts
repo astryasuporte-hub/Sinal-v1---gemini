@@ -250,7 +250,7 @@ function apiProxyPlugin(): Plugin {
           !req.url?.startsWith('/api/resend') &&
           !req.url?.startsWith('/api/instagram') &&
           !req.url?.startsWith('/api/avatar') &&
-          !req.url?.startsWith('/api/admin/company-logo') &&
+          !req.url?.startsWith('/api/admin/') &&
           !req.url?.startsWith('/api/zynpay') &&
           !req.url?.startsWith('/api/notifications')
         ) {
@@ -272,6 +272,16 @@ function apiProxyPlugin(): Plugin {
               })
             );
             return;
+          }
+
+          // 0.5. Catálogo, Eventos e Feed canônicos
+          if (
+            req.url.startsWith('/api/proxy/events') ||
+            req.url.startsWith('/api/proxy/feed') ||
+            req.url.startsWith('/api/proxy/catalog')
+          ) {
+            const { default: eventsProxyHandler } = await import('./api/_lib/handlers/proxy/events');
+            return await eventsProxyHandler(req, res);
           }
 
           // 1. GNews Proxy
@@ -1284,76 +1294,10 @@ function apiProxyPlugin(): Plugin {
               return;
             }
 
-            // ================= 11. COMPANY LOGO UPLOAD & TRANSPARENCY VALIDATION =================
-            if (req.url === '/api/admin/company-logo' || req.url?.startsWith('/api/admin/company-logo')) {
-              const urlObj = new URL(req.url, 'http://localhost:3000');
-              
-              if (req.method === 'POST') {
-                const buffers: any[] = [];
-                for await (const chunk of req) {
-                  buffers.push(chunk);
-                }
-                const bodyStr = Buffer.concat(buffers).toString();
-                let parsedBody: any = {};
-                try {
-                  parsedBody = JSON.parse(bodyStr);
-                } catch {
-                  res.setHeader('Content-Type', 'application/json');
-                  res.statusCode = 400;
-                  res.end(JSON.stringify({ success: false, error: 'Payload JSON malformatado.' }));
-                  return;
-                }
-
-                const entityId = String(parsedBody.entityId || '').trim();
-                const rawBase64 = String(parsedBody.base64 || parsedBody.dataUrl || '').trim();
-                const fileName = String(parsedBody.fileName || `${entityId || 'company'}.png`).trim();
-
-                if (!entityId || !rawBase64) {
-                  res.setHeader('Content-Type', 'application/json');
-                  res.statusCode = 400;
-                  res.end(JSON.stringify({
-                    success: false,
-                    error: 'ID da empresa (entityId) e dados binários em Base64 são obrigatórios.'
-                  }));
-                  return;
-                }
-
-                const result = await saveCompanyLogoUpload(entityId, rawBase64, fileName);
-
-                res.setHeader('Content-Type', 'application/json');
-                res.statusCode = result.valid ? 200 : 422;
-                res.end(
-                  JSON.stringify({
-                    success: result.valid,
-                    logoUrl: result.storageUrl || result.cleanDataUrl,
-                    details: result,
-                    error: result.error
-                  })
-                );
-                return;
-              }
-
-              if (req.method === 'DELETE') {
-                const entityId = urlObj.searchParams.get('entityId') || urlObj.searchParams.get('id');
-                if (entityId) {
-                  try {
-                    const filePath = path.resolve(process.cwd(), 'public', 'logos', `${entityId.toLowerCase()}.png`);
-                    if (fs.existsSync(filePath)) {
-                      fs.unlinkSync(filePath);
-                    }
-                  } catch {}
-                }
-
-                res.setHeader('Content-Type', 'application/json');
-                res.statusCode = 200;
-                res.end(JSON.stringify({ success: true, message: 'Logotipo removido com sucesso.' }));
-                return;
-              }
-
-              res.setHeader('Content-Type', 'application/json');
-              res.statusCode = 405;
-              res.end(JSON.stringify({ error: 'Método não permitido. Utilize POST ou DELETE.' }));
-              return;
+            // ================= 11. ADMIN CONSOLIDATED ROUTER (COMPANY LOGO & IMAGE LIBRARY ZIP) =================
+            if (req.url?.startsWith('/api/admin/')) {
+              const { default: adminRouter } = await import('./api/admin/[...action]');
+              return await adminRouter(req, res);
             }
 
             // ================= 12. ZYNPAY PIX GATEWAY ROUTES =================

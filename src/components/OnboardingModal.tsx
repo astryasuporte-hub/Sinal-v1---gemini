@@ -531,7 +531,8 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                           <EntityAvatar
                             name={ent.name}
                             type={ent.type}
-                            logoUrl={ent.avatarUrl || ent.logoUrl}
+                            imageUrl={ent.imageUrl}
+                            logoUrl={ent.imageUrl || ent.logoUrl || ent.avatarUrl}
                             website={ent.website}
                             brandColor={ent.brandColor}
                             size="sm"
@@ -586,7 +587,17 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                             : 'bg-[#0f1015] border-[#1e2029] text-zinc-400 hover:border-zinc-700 hover:text-zinc-200'
                         }`}
                       >
-                        <span className="truncate pr-1">{src.name}</span>
+                        <div className="flex items-center gap-2 min-w-0 pr-1">
+                          <EntityAvatar
+                            name={src.name}
+                            type="source"
+                            logoUrl={src.logoUrl}
+                            domain={src.domain}
+                            brandColor={src.brandColor}
+                            size="xs"
+                          />
+                          <span className="truncate">{src.name}</span>
+                        </div>
                         <div
                           className={`w-3.5 h-3.5 rounded flex items-center justify-center border shrink-0 ${
                             isFollowed ? 'bg-white border-white text-black' : 'border-zinc-700 bg-transparent'

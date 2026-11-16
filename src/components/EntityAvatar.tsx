@@ -11,13 +11,14 @@
  * 4. Tratamento resiliente de erro com fallback instantâneo e sem layout shift
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 
 export type EntityType = 'company' | 'person' | 'organization' | 'topic' | 'source' | string;
 
 export interface EntityAvatarProps {
   name: string;
   type?: EntityType;
+  imageUrl?: string;
   logoUrl?: string;
   website?: string;
   domain?: string;
@@ -92,6 +93,7 @@ export function getVerifiedCompanyLogo(name: string, website?: string, domain?: 
 export const EntityAvatar: React.FC<EntityAvatarProps> = ({
   name = '',
   type = 'company',
+  imageUrl,
   logoUrl,
   website,
   domain,
@@ -119,20 +121,28 @@ export const EntityAvatar: React.FC<EntityAvatarProps> = ({
   }[size];
 
   // Regra de Integridade: Não usar logos de empresas para pessoas
-  const isPerson = type === 'person';
+  const normalizedType = String(type || 'company').trim().toLowerCase();
+  const isPerson = normalizedType === 'person';
+  const explicitUrl = imageUrl || logoUrl;
 
-  // Resolução da URL da imagem
+  // Resolução da URL da imagem (priorizando imagem oficial persistida no Supabase)
   let resolvedUrl: string | null = null;
   if (!isPerson) {
-    if (logoUrl) {
-      resolvedUrl = logoUrl;
+    if (explicitUrl) {
+      resolvedUrl = explicitUrl;
     } else {
       resolvedUrl = getVerifiedCompanyLogo(name, website, domain);
     }
-  } else if (logoUrl && (logoUrl.startsWith('data:') || logoUrl.startsWith('http') || logoUrl.startsWith('/'))) {
-    // Foto pessoal verificada
-    resolvedUrl = logoUrl;
+  } else if (
+    explicitUrl &&
+    (explicitUrl.startsWith('data:') || explicitUrl.startsWith('http') || explicitUrl.startsWith('/'))
+  ) {
+    resolvedUrl = explicitUrl;
   }
+
+  useEffect(() => {
+    setImageFailed(false);
+  }, [resolvedUrl]);
 
   const borderClass = showBorder ? 'border border-[#262832]' : '';
 
@@ -140,14 +150,14 @@ export const EntityAvatar: React.FC<EntityAvatarProps> = ({
   if (resolvedUrl && !imageFailed) {
     return (
       <div
-        className={`${sizeClasses} ${iconPadding} ${borderClass} flex items-center justify-center shrink-0 bg-[#0d0e12] overflow-hidden select-none transition-colors ${className}`}
+        className={`${sizeClasses} ${isPerson ? 'p-0' : iconPadding} ${borderClass} flex items-center justify-center shrink-0 bg-[#0d0e12] overflow-hidden select-none transition-colors ${className}`}
         title={name}
       >
         <img
           src={resolvedUrl}
           alt={name}
           loading="lazy"
-          className="w-full h-full object-contain"
+          className={`w-full h-full ${isPerson ? 'object-cover' : 'object-contain'}`}
           onError={() => setImageFailed(true)}
         />
       </div>

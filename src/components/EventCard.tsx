@@ -198,7 +198,9 @@ export const EventCard: React.FC<EventCardProps> = ({
                   name={primaryEntity.name}
                   brandColor={primaryEntity.brandColor}
                   type={primaryEntity.type}
-                  logoUrl={primaryEntity.logoUrl}
+                  imageUrl={primaryEntity.imageUrl}
+                  logoUrl={primaryEntity.logoUrl || primaryEntity.avatarUrl}
+                  website={primaryEntity.website}
                   size="sm"
                 />
                 <span className="text-xs font-semibold text-zinc-300 hover:text-white truncate">
@@ -350,11 +352,28 @@ export const EventCard: React.FC<EventCardProps> = ({
               {event.sources?.length || 1} fontes
             </span>
 
-            {/* Mini Logos / Badges dos Veículos Jornalísticos (Monocromáticos) */}
+            {/* Mini Logos / Badges dos Veículos Jornalísticos */}
             <div className="flex items-center -space-x-1 ml-0.5 overflow-hidden">
-              {event.featuredSourceLogos?.slice(0, 3).map((srcLogo, i) =>
-                renderSourceBadge(srcLogo, i)
-              )}
+              {event.sources && event.sources.some((s) => Boolean(s.logoUrl))
+                ? event.sources.slice(0, 3).map((src, i) =>
+                    src.logoUrl ? (
+                      <div
+                        key={src.id || i}
+                        title={src.sourceName}
+                        className="w-5 h-5 rounded-full flex items-center justify-center shrink-0 shadow-sm border border-zinc-700 bg-zinc-900 overflow-hidden p-0.5"
+                      >
+                        <img src={src.logoUrl} alt={src.sourceName} className="w-full h-full object-contain" />
+                      </div>
+                    ) : (
+                      renderSourceBadge(
+                        { name: src.sourceName, label: src.sourceName.slice(0, 2).toUpperCase() },
+                        i
+                      )
+                    )
+                  )
+                : event.featuredSourceLogos?.slice(0, 3).map((srcLogo, i) =>
+                    renderSourceBadge(srcLogo, i)
+                  )}
               {(event.sources?.length || 0) > 3 && (
                 <div className="w-5 h-5 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-[9px] text-zinc-300 font-mono font-medium shrink-0">
                   +{event.sources.length - 3}

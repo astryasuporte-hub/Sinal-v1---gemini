@@ -237,6 +237,7 @@ interface AdminPanelProps {
   onDeleteSource?: (sourceId: string) => void;
   onUpdateEntityLogo?: (entityId: string, logoUrl: string | null) => void;
   onAddEntity?: (newEntity: Entity) => void;
+  onRefreshCatalog?: () => void | Promise<void>;
 }
 
 export const AdminPanel: React.FC<AdminPanelProps> = ({
@@ -253,7 +254,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   onAddSource,
   onDeleteSource,
   onUpdateEntityLogo,
-  onAddEntity
+  onAddEntity,
+  onRefreshCatalog
 }) => {
   const [activeAdminTab, setActiveAdminTab] = useState<AdminTab>('overview');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -3087,8 +3089,10 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
         {activeAdminTab === 'companies' && (
           <AdminCompanyManager
             entities={entities}
+            sources={sources}
             onUpdateEntityLogo={onUpdateEntityLogo}
             onAddEntity={onAddEntity}
+            onRefreshCatalog={onRefreshCatalog}
             onShowToast={showToast}
           />
         )}

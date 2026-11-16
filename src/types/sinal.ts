@@ -8,6 +8,7 @@ export type EntityType = 'company' | 'person' | 'organization';
 export interface Entity {
   id: string;
   name: string;
+  slug?: string;
   type: EntityType;
   description: string;
   sector?: string;
@@ -16,6 +17,7 @@ export interface Entity {
   website?: string;
   avatarUrl?: string;
   logoUrl?: string;
+  imageUrl?: string;
   isFollowed: boolean;
   interestCount?: string;
   brandColor?: string;
@@ -37,8 +39,10 @@ export interface Topic {
 export interface Source {
   id: string;
   name: string;
+  slug?: string;
   domain: string;
   category: string;
+  logoUrl?: string;
   isFollowed: boolean;
   interestCount?: string;
   brandColor?: string;
@@ -49,6 +53,7 @@ export interface SourceReference {
   id: string;
   sourceName: string;
   domain: string;
+  logoUrl?: string;
   headline: string;
   url: string;
   publishedAt: string;

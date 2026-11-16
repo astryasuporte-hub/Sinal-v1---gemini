@@ -28,8 +28,13 @@ export default async function handler(req: any, res: any) {
     const urlObj = new URL(req.url, 'http://localhost');
     const pathname = urlObj.pathname;
 
-    // Rota 1: Eventos, Feed e Ingestão (Core do Motor de Notícias)
-    if (pathname.includes('/events') || pathname.includes('/feed') || pathname.includes('/ingest')) {
+    // Rota 1: Eventos, Feed, Catálogo e Ingestão (Core do Motor de Notícias)
+    if (
+      pathname.includes('/events') ||
+      pathname.includes('/feed') ||
+      pathname.includes('/ingest') ||
+      pathname.includes('/catalog')
+    ) {
       return await eventsHandler(req, res);
     }
 

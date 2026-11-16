@@ -152,7 +152,9 @@ export const QuickSearchModal: React.FC<QuickSearchModalProps> = ({
                       <EntityAvatar
                         name={ent.name}
                         type={ent.type as any}
-                        logoUrl={ent.logoUrl}
+                        imageUrl={ent.imageUrl}
+                        logoUrl={ent.imageUrl || ent.logoUrl || ent.avatarUrl}
+                        website={ent.website}
                         size="sm"
                       />
                       <div className="min-w-0">

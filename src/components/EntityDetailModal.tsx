@@ -245,10 +245,11 @@ export const EntityDetailModal: React.FC<EntityDetailModalProps> = ({
 
   // Ícone / Monograma da Entidade
   const renderEntityLogo = () => {
-    if (entity.avatarUrl) {
+    const resolvedPhoto = entity.type === 'person' ? (entity.imageUrl || entity.avatarUrl || entity.logoUrl) : entity.avatarUrl;
+    if (resolvedPhoto) {
       return (
         <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-2xl overflow-hidden border border-zinc-700 bg-zinc-900 shrink-0 shadow-xl">
-          <img src={entity.avatarUrl} alt={entity.name} className="w-full h-full object-cover" />
+          <img src={resolvedPhoto} alt={entity.name} className="w-full h-full object-cover" />
         </div>
       );
     }
@@ -258,7 +259,9 @@ export const EntityDetailModal: React.FC<EntityDetailModalProps> = ({
         name={entity.name}
         brandColor={entity.brandColor}
         type={entity.type}
+        imageUrl={entity.imageUrl}
         logoUrl={entity.logoUrl}
+        website={entity.website}
         size="xl"
       />
     );

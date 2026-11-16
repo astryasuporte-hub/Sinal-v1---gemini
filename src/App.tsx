@@ -346,22 +346,57 @@ export default function App() {
     };
   }, []);
 
-  // Sincronização em tempo real de logotipos de empresas cadastrados via AdminPanel
+  // Catálogo oficial (entidades, fontes e eventos) atualizado a partir do Supabase
+  const refreshCatalogFromSupabase = useCallback(async () => {
+    try {
+      const [remoteEntities, remoteSources, remoteEvents] = await Promise.all([
+        eventService.getEntities().catch(() => []),
+        eventService.getSources().catch(() => []),
+        eventService.getEvents().catch(() => [])
+      ]);
+
+      if (Array.isArray(remoteEntities) && remoteEntities.length > 0) {
+        setEntities((prev) => {
+          const prevFollowById = new Map(prev.map((e) => [e.id, e.isFollowed]));
+          const prevFollowByName = new Map(prev.map((e) => [e.name.trim().toLowerCase(), e.isFollowed]));
+          return remoteEntities.map((ent) => ({
+            ...ent,
+            isFollowed:
+              prevFollowById.get(ent.id) ??
+              prevFollowByName.get(ent.name.trim().toLowerCase()) ??
+              ent.isFollowed
+          }));
+        });
+      }
+
+      if (Array.isArray(remoteSources) && remoteSources.length > 0) {
+        setSources((prev) => {
+          const prevFollowById = new Map(prev.map((s) => [s.id, s.isFollowed]));
+          const prevFollowByDomain = new Map(prev.map((s) => [s.domain.trim().toLowerCase(), s.isFollowed]));
+          return remoteSources.map((src) => ({
+            ...src,
+            isFollowed:
+              prevFollowById.get(src.id) ??
+              prevFollowByDomain.get(src.domain.trim().toLowerCase()) ??
+              src.isFollowed
+          }));
+        });
+      }
+
+      if (Array.isArray(remoteEvents) && remoteEvents.length > 0) {
+        setEvents(remoteEvents);
+      }
+    } catch {}
+  }, []);
+
+  // Sincronização em tempo real do catálogo quando houver importação ou alteração de imagens
   useEffect(() => {
     const handleEntitiesUpdated = () => {
-      setEntities((prev) =>
-        prev.map((ent) => {
-          try {
-            const savedLogo = localStorage.getItem('fatosbr_company_logo_' + ent.id);
-            if (savedLogo) return { ...ent, logoUrl: savedLogo };
-          } catch {}
-          return ent;
-        })
-      );
+      void refreshCatalogFromSupabase();
     };
     window.addEventListener('fatosbr_entities_updated', handleEntitiesUpdated);
     return () => window.removeEventListener('fatosbr_entities_updated', handleEntitiesUpdated);
-  }, []);
+  }, [refreshCatalogFromSupabase]);
 
   // Notificações Push Editoriais (Desativadas visualmente)
 
@@ -404,15 +439,7 @@ export default function App() {
   });
   const [isFeedRefreshing, setIsFeedRefreshing] = useState(false);
   const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
-  const [entities, setEntities] = useState<Entity[]>(() => {
-    return INITIAL_ENTITIES.map((ent) => {
-      try {
-        const savedLogo = localStorage.getItem('fatosbr_company_logo_' + ent.id);
-        if (savedLogo) return { ...ent, logoUrl: savedLogo };
-      } catch {}
-      return ent;
-    });
-  });
+  const [entities, setEntities] = useState<Entity[]>(INITIAL_ENTITIES);
   const [topics, setTopics] = useState<Topic[]>(INITIAL_TOPICS);
   const [sources, setSources] = useState<Source[]>(INITIAL_SOURCES);
   const [subscription, setSubscription] = useState<UserSubscription>(INITIAL_SUBSCRIPTION);
@@ -827,6 +854,11 @@ export default function App() {
     }
   };
 
+  // Carrega catálogo público via proxy mesmo quando anon key não estiver configurada no cliente
+  useEffect(() => {
+    void refreshCatalogFromSupabase();
+  }, [refreshCatalogFromSupabase]);
+
   // Supabase Auth & Dados Reais Listener
   useEffect(() => {
     if (!isSupabaseConfigured) {
@@ -834,27 +866,9 @@ export default function App() {
       return;
     }
 
-    eventService.getEvents().then((remoteEvents) => {
-      if (remoteEvents && remoteEvents.length > 0) {
-        setEvents(remoteEvents);
-      }
-    });
-
     eventService.getTopics().then((remoteTopics) => {
       if (remoteTopics && remoteTopics.length > 0) {
         setTopics(remoteTopics);
-      }
-    });
-
-    eventService.getSources().then((remoteSources) => {
-      if (remoteSources && remoteSources.length > 0) {
-        setSources(remoteSources);
-      }
-    });
-
-    eventService.getEntities().then((remoteEntities) => {
-      if (remoteEntities && remoteEntities.length > 0) {
-        setEntities(remoteEntities);
       }
     });
 
@@ -1516,9 +1530,19 @@ export default function App() {
           onDeleteSource={(sourceId) => setSources((prev) => prev.filter((s) => s.id !== sourceId))}
           onUpdateEntityLogo={(entityId, logoUrl) => {
             setEntities((prev) =>
-              prev.map((e) => (e.id === entityId ? { ...e, logoUrl: logoUrl || undefined } : e))
+              prev.map((e) =>
+                e.id === entityId
+                  ? {
+                      ...e,
+                      imageUrl: logoUrl || undefined,
+                      logoUrl: logoUrl || undefined,
+                      avatarUrl: e.type === 'person' ? logoUrl || undefined : e.avatarUrl
+                    }
+                  : e
+              )
             );
           }}
+          onRefreshCatalog={refreshCatalogFromSupabase}
           onAddEntity={(newEntity) => {
             setEntities((prev) => [newEntity, ...prev]);
           }}

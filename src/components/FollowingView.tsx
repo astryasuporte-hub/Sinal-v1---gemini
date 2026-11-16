@@ -47,7 +47,10 @@ export interface FollowedItem {
   description: string;
   recentEventsCount: number;
   brandColor?: string;
+  imageUrl?: string;
+  logoUrl?: string;
   website?: string;
+  domain?: string;
   notificationsEnabled: boolean;
   briefingEnabled: boolean;
   originalRef: Entity | Topic | Source;
@@ -108,6 +111,8 @@ export const FollowingView: React.FC<FollowingViewProps> = ({
           description: e.description,
           recentEventsCount: e.recentEventsCount || 12,
           brandColor: e.brandColor,
+          imageUrl: e.imageUrl,
+          logoUrl: e.logoUrl || e.avatarUrl,
           website: e.website,
           notificationsEnabled: notif.alerts,
           briefingEnabled: notif.briefing,
@@ -149,6 +154,8 @@ export const FollowingView: React.FC<FollowingViewProps> = ({
           description: `Veículo jornalístico • ${s.domain}`,
           recentEventsCount: s.recentEventsCount || 50,
           brandColor: s.brandColor,
+          logoUrl: s.logoUrl,
+          domain: s.domain,
           notificationsEnabled: notif.alerts,
           briefingEnabled: notif.briefing,
           originalRef: s
@@ -202,12 +209,12 @@ export const FollowingView: React.FC<FollowingViewProps> = ({
   const confirmUnfollow = () => {
     if (!unfollowTarget) return;
 
-    if (unfollowTarget.id.startsWith('ent-')) {
-      onToggleFollowEntity(unfollowTarget.id);
-    } else if (unfollowTarget.id.startsWith('top-')) {
+    if (unfollowTarget.itemType === 'topic') {
       onToggleFollowTopic(unfollowTarget.id);
-    } else if (unfollowTarget.id.startsWith('src-')) {
+    } else if (unfollowTarget.itemType === 'source') {
       onToggleFollowSource(unfollowTarget.id);
+    } else {
+      onToggleFollowEntity(unfollowTarget.id);
     }
 
     setUnfollowTarget(null);
@@ -220,6 +227,10 @@ export const FollowingView: React.FC<FollowingViewProps> = ({
         name={item.name}
         brandColor={item.brandColor}
         type={item.itemType}
+        imageUrl={item.imageUrl}
+        logoUrl={item.logoUrl}
+        website={item.website}
+        domain={item.domain}
         size="md"
       />
     );
@@ -399,7 +410,11 @@ export const FollowingView: React.FC<FollowingViewProps> = ({
                 {/* Lado Esquerdo: Logo, Nome, Categoria e Descrição */}
                 <div
                   onClick={() => {
-                    if (item.id.startsWith('ent-')) {
+                    if (
+                      item.itemType === 'company' ||
+                      item.itemType === 'person' ||
+                      item.itemType === 'organization'
+                    ) {
                       onOpenEntity(item.originalRef as Entity);
                     }
                   }}
@@ -462,7 +477,9 @@ export const FollowingView: React.FC<FollowingViewProps> = ({
                         className="absolute right-0 top-9 w-52 rounded-xl border border-zinc-800 bg-[#0e0f13] shadow-2xl p-1.5 z-30 text-xs space-y-0.5"
                         onClick={(e) => e.stopPropagation()}
                       >
-                        {item.id.startsWith('ent-') && (
+                        {(item.itemType === 'company' ||
+                          item.itemType === 'person' ||
+                          item.itemType === 'organization') && (
                           <button
                             onClick={() => {
                               setActiveMenuId(null);

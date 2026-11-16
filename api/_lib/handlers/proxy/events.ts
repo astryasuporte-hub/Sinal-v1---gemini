@@ -135,7 +135,114 @@ export default async function handler(req: any, res: any) {
   }
 
   // ===========================================================================
-  // ROTA 2: CONSULTA CANÔNICA DE ACONTECIMENTOS (GET /api/proxy/events ou /feed)
+  // ROTA 2: CATÁLOGO PÚBLICO DE ENTIDADES & FONTES COM IMAGENS DO SUPABASE
+  // ===========================================================================
+  if (req.method === 'GET' && pathname.includes('/catalog')) {
+    const rateLimitAllowed = await enforceRateLimit(req, res, 'general');
+    if (!rateLimitAllowed) return;
+
+    try {
+      let entities: any[] = [];
+      let sources: any[] = [];
+
+      if (isPostgresConfigured()) {
+        try {
+          const [entRes, srcRes] = await Promise.all([
+            executeSql(`SELECT * FROM public.entities ORDER BY name ASC`),
+            executeSql(`SELECT * FROM public.news_sources ORDER BY name ASC`)
+          ]);
+          entities = (entRes.rows || []).map((e: any) => {
+            const normType = String(e.type || 'company').trim().toLowerCase();
+            const imageUrl = e.image_url || e.logo_url || e.avatar_url || undefined;
+            return {
+              id: String(e.id),
+              name: e.name,
+              slug: e.slug || undefined,
+              type: normType === 'person' ? 'person' : normType === 'organization' ? 'organization' : 'company',
+              description: e.description || '',
+              sector: e.sector || undefined,
+              role: e.role || undefined,
+              organization: e.organization || undefined,
+              website: e.website || undefined,
+              imageUrl,
+              logoUrl: imageUrl,
+              avatarUrl: normType === 'person' ? imageUrl : e.avatar_url || undefined,
+              brandColor: e.brand_color || '#10b981',
+              isFollowed: false
+            };
+          });
+          sources = (srcRes.rows || []).map((s: any) => ({
+            id: String(s.id),
+            name: s.name,
+            slug: s.slug || undefined,
+            domain: s.domain,
+            category: s.category || 'Notícias',
+            logoUrl: s.logo_url || undefined,
+            brandColor: s.brand_color || '#64748b',
+            isFollowed: false
+          }));
+        } catch (pgErr: any) {
+          console.warn('[Catalog API] Erro PostgreSQL:', pgErr?.message);
+        }
+      }
+
+      if (entities.length === 0 && sources.length === 0 && isDatabaseConfigured()) {
+        try {
+          const client = getServerSupabase();
+          const [entRes, srcRes] = await Promise.all([
+            client.from('entities').select('*').order('name'),
+            client.from('news_sources').select('*').order('name')
+          ]);
+          entities = (entRes.data || []).map((e: any) => {
+            const normType = String(e.type || 'company').trim().toLowerCase();
+            const imageUrl = e.image_url || e.logo_url || e.avatar_url || undefined;
+            return {
+              id: String(e.id),
+              name: e.name,
+              slug: e.slug || undefined,
+              type: normType === 'person' ? 'person' : normType === 'organization' ? 'organization' : 'company',
+              description: e.description || '',
+              sector: e.sector || undefined,
+              role: e.role || undefined,
+              organization: e.organization || undefined,
+              website: e.website || undefined,
+              imageUrl,
+              logoUrl: imageUrl,
+              avatarUrl: normType === 'person' ? imageUrl : e.avatar_url || undefined,
+              brandColor: e.brand_color || '#10b981',
+              isFollowed: false
+            };
+          });
+          sources = (srcRes.data || []).map((s: any) => ({
+            id: String(s.id),
+            name: s.name,
+            slug: s.slug || undefined,
+            domain: s.domain,
+            category: s.category || 'Notícias',
+            logoUrl: s.logo_url || undefined,
+            brandColor: s.brand_color || '#64748b',
+            isFollowed: false
+          }));
+        } catch {}
+      }
+
+      return sendJson(res, 200, {
+        success: true,
+        entities,
+        sources
+      });
+    } catch (err: any) {
+      return sendJson(res, 200, {
+        success: true,
+        entities: [],
+        sources: [],
+        warning: err?.message
+      });
+    }
+  }
+
+  // ===========================================================================
+  // ROTA 3: CONSULTA CANÔNICA DE ACONTECIMENTOS (GET /api/proxy/events ou /feed)
   // ===========================================================================
   if (req.method === 'GET' && (pathname.includes('/events') || pathname.includes('/feed'))) {
     const rateLimitAllowed = await enforceRateLimit(req, res, 'general');
@@ -186,6 +293,7 @@ export default async function handler(req: any, res: any) {
                     'id', ns.id,
                     'sourceName', COALESCE(ns.name, ns.domain, 'Fonte Verificada'),
                     'domain', ns.domain,
+                    'logoUrl', ns.logo_url,
                     'headline', a.title,
                     'url', a.url,
                     'canonicalUrl', a.canonical_url,
@@ -218,6 +326,44 @@ export default async function handler(req: any, res: any) {
           `;
 
           const dbRes = await executeSql(sql, [limit]);
+
+          // Carregar event_entities separadamente para não falhar caso a tabela/colunas variem
+          const entitiesByEventId = new Map<string, any[]>();
+          try {
+            const eventIds = (dbRes.rows || []).map((r: any) => String(r.id));
+            if (eventIds.length > 0) {
+              const eeRes = await executeSql(
+                `SELECT ee.event_id, ent.*
+                 FROM public.event_entities ee
+                 JOIN public.entities ent ON ent.id::text = ee.entity_id::text
+                 WHERE ee.event_id::text = ANY($1::text[])`,
+                [eventIds]
+              );
+              for (const row of eeRes.rows || []) {
+                const evKey = String(row.event_id);
+                const normType = String(row.type || 'company').trim().toLowerCase();
+                const imageUrl = row.image_url || row.logo_url || row.avatar_url || undefined;
+                const list = entitiesByEventId.get(evKey) || [];
+                list.push({
+                  id: String(row.id),
+                  name: row.name,
+                  slug: row.slug || undefined,
+                  type: normType === 'person' ? 'person' : normType === 'organization' ? 'organization' : 'company',
+                  description: row.description || '',
+                  sector: row.sector || undefined,
+                  role: row.role || undefined,
+                  website: row.website || undefined,
+                  imageUrl,
+                  logoUrl: imageUrl,
+                  avatarUrl: normType === 'person' ? imageUrl : row.avatar_url || undefined,
+                  brandColor: row.brand_color || '#10b981',
+                  isFollowed: false
+                });
+                entitiesByEventId.set(evKey, list);
+              }
+            }
+          } catch {}
+
           let mapped = (dbRes.rows || []).map((row: any) => {
             const sources = Array.isArray(row.sources) ? row.sources : [];
             const mainArticle = sources[0] || {};
@@ -237,10 +383,12 @@ export default async function handler(req: any, res: any) {
               updatedAt: row.updated_at,
               relativeTime: 'Recente',
               sourceCountText: `${sources.length || row.article_count || 1} fontes`,
+              entities: entitiesByEventId.get(String(row.id)) || [],
               sources: sources.map((s: any) => ({
                 id: s.id,
                 sourceName: s.sourceName,
                 domain: s.domain,
+                logoUrl: s.logoUrl || undefined,
                 headline: s.headline,
                 url: s.url,
                 description: s.description,
@@ -291,6 +439,7 @@ export default async function handler(req: any, res: any) {
               updatedAt: row.updated_at,
               relativeTime: 'Recente',
               sourceCountText: `${row.article_count || 1} fonte(s)`,
+              entities: [],
               sources: []
             }));
 

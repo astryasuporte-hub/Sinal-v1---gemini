@@ -163,6 +163,7 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
     subtitle: string;
     meta?: string;
     entityType: 'company' | 'person' | 'organization' | 'source';
+    imageUrl?: string;
     logoUrl?: string;
     website?: string;
     domain?: string;
@@ -192,7 +193,8 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
         subtitle: ent.role || ent.sector || defaultSubtitle,
         meta: ent.interestCount || undefined,
         entityType: ent.type === 'person' ? 'person' : ent.type === 'organization' ? 'organization' : 'company',
-        logoUrl: ent.avatarUrl || ent.logoUrl,
+        imageUrl: ent.imageUrl,
+        logoUrl: ent.imageUrl || ent.logoUrl || ent.avatarUrl,
         website: ent.website,
         brandColor: ent.brandColor,
         isFollowedByDefault: Boolean(ent.isFollowed)
@@ -207,6 +209,8 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
       subtitle: src.category || 'Veículo jornalístico',
       meta: src.domain,
       entityType: 'source',
+      imageUrl: src.logoUrl,
+      logoUrl: src.logoUrl,
       domain: src.domain,
       brandColor: src.brandColor,
       isFollowedByDefault: Boolean(src.isFollowed)
@@ -687,6 +691,7 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
                           <EntityAvatar
                             name={item.name}
                             type={item.entityType}
+                            imageUrl={item.imageUrl}
                             logoUrl={item.logoUrl}
                             website={item.website}
                             domain={item.domain}

@@ -595,9 +595,29 @@ export const adminService = {
   },
 
   /**
-   * Upload e validação de logotipo PNG com transparência para uma empresa
+   * Obtém cabeçalhos de autorização com o access_token real do administrador autenticado.
    */
-  async uploadCompanyLogo(entityId: string, file: File): Promise<{ success: boolean; logoUrl?: string; error?: string }> {
+  async getAdminAuthHeaders(): Promise<Record<string, string>> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (isSupabaseConfigured) {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session?.access_token) {
+          headers['Authorization'] = `Bearer ${session.access_token}`;
+        }
+      } catch {}
+    }
+    return headers;
+  },
+
+  /**
+   * Upload e validação de logotipo PNG com transparência para uma empresa (Supabase Storage + entities.image_url)
+   */
+  async uploadCompanyLogo(
+    entityId: string,
+    file: File,
+    targetType: 'COMPANY' | 'PERSON' | 'SOURCE' = 'COMPANY'
+  ): Promise<{ success: boolean; logoUrl?: string; error?: string }> {
     try {
       if (!file.type.includes('png')) {
         return { success: false, error: 'O logotipo deve ser obrigatoriamente um arquivo PNG (.png).' };
@@ -613,11 +633,13 @@ export const adminService = {
         reader.readAsDataURL(file);
       });
 
+      const headers = await this.getAdminAuthHeaders();
       const resp = await fetch('/api/admin/company-logo', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           entityId,
+          targetType,
           base64,
           fileName: file.name
         })
@@ -625,23 +647,13 @@ export const adminService = {
 
       const data = await resp.json().catch(() => null);
       if (!resp.ok || !data?.success) {
-        return { success: false, error: data?.error || 'Erro na validação do logotipo PNG.' };
+        return {
+          success: false,
+          error: data?.error || data?.message || 'Erro na validação do logotipo PNG.'
+        };
       }
 
-      const logoUrl = data.logoUrl;
-
-      if (isSupabaseConfigured && entityId) {
-        try {
-          await supabase.from('entities').update({ logo_url: logoUrl }).eq('id', entityId);
-        } catch (dbErr) {
-          console.warn('Erro ao atualizar logo_url no Supabase:', dbErr);
-        }
-      }
-
-      try {
-        localStorage.setItem(`fatosbr_company_logo_${entityId}`, logoUrl);
-      } catch {}
-
+      const logoUrl = data.imageUrl || data.logoUrl;
       return { success: true, logoUrl };
     } catch (err: any) {
       return { success: false, error: err?.message || 'Falha na conexão ao enviar logotipo.' };
@@ -649,25 +661,248 @@ export const adminService = {
   },
 
   /**
-   * Remove o logotipo customizado de uma empresa
+   * Remove o logotipo customizado de uma empresa no banco (preservando demais campos)
    */
-  async removeCompanyLogo(entityId: string): Promise<boolean> {
+  async removeCompanyLogo(
+    entityId: string,
+    targetType: 'COMPANY' | 'PERSON' | 'SOURCE' = 'COMPANY'
+  ): Promise<boolean> {
     try {
-      await fetch(`/api/admin/company-logo?entityId=${encodeURIComponent(entityId)}`, {
-        method: 'DELETE'
-      });
-
-      if (isSupabaseConfigured && entityId) {
-        await supabase.from('entities').update({ logo_url: null }).eq('id', entityId);
-      }
-
-      try {
-        localStorage.removeItem(`fatosbr_company_logo_${entityId}`);
-      } catch {}
-
-      return true;
+      const headers = await this.getAdminAuthHeaders();
+      const resp = await fetch(
+        `/api/admin/company-logo?entityId=${encodeURIComponent(entityId)}&targetType=${targetType}`,
+        {
+          method: 'DELETE',
+          headers
+        }
+      );
+      return resp.ok;
     } catch {
       return false;
     }
+  },
+
+  /**
+   * Passo 1 (Dry-Run): Envia pacote ZIP para pré-visualização e matching sem alterar entidades/fontes.
+   * Usa Signed Upload URL automaticamente para pacotes maiores que 2,5 MB (respeitando limite da Vercel).
+   */
+  async previewImageLibraryZip(file: File): Promise<{
+    success: boolean;
+    error?: string;
+    errorCode?: string;
+    batch?: ImageImportBatchDto;
+  }> {
+    try {
+      if (!file.name.toLowerCase().endsWith('.zip')) {
+        return { success: false, error: 'Selecione um pacote válido no formato .zip.' };
+      }
+      if (file.size > 25 * 1024 * 1024) {
+        return { success: false, error: 'O pacote ZIP excede o limite máximo de 25 MB.' };
+      }
+
+      const headers = await this.getAdminAuthHeaders();
+
+      // Para arquivos > 2.5MB, envia direto ao Supabase Storage via Signed Upload URL
+      if (file.size > 2.5 * 1024 * 1024) {
+        const initRes = await fetch('/api/admin/image-library?action=init-upload', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ fileName: file.name, fileSizeBytes: file.size })
+        });
+        const initData = await initRes.json().catch(() => null);
+        if (!initRes.ok || !initData?.success || !initData?.signedUrl) {
+          return {
+            success: false,
+            error: initData?.error || initData?.message || 'Falha ao iniciar upload seguro do pacote ZIP.'
+          };
+        }
+
+        const putRes = await fetch(initData.signedUrl, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/zip' },
+          body: file
+        });
+        if (!putRes.ok) {
+          return { success: false, error: 'Falha ao transferir pacote ZIP para área temporária no Storage.' };
+        }
+
+        const previewRes = await fetch('/api/admin/image-library?action=preview', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ fileName: file.name, storagePath: initData.storagePath })
+        });
+        const previewData = await previewRes.json().catch(() => null);
+        if (!previewRes.ok || !previewData?.success) {
+          return {
+            success: false,
+            errorCode: previewData?.errorCode,
+            error: previewData?.error || previewData?.message || 'Falha na validação do pacote ZIP.'
+          };
+        }
+        return { success: true, batch: previewData.batch };
+      }
+
+      // Pacotes até 2.5MB: leitura direta em Base64
+      const zipBase64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+
+      const resp = await fetch('/api/admin/image-library?action=preview', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ fileName: file.name, zipBase64 })
+      });
+
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok || !data?.success) {
+        return {
+          success: false,
+          errorCode: data?.errorCode,
+          error: data?.error || data?.message || 'Falha ao validar pacote ZIP.'
+        };
+      }
+
+      return { success: true, batch: data.batch };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Erro de comunicação com o servidor.' };
+    }
+  },
+
+  /**
+   * Passo 2: Confirma explicitamente e aplica as imagens aprovadas no Storage e Banco.
+   */
+  async applyImageLibraryBatch(
+    batchId: string,
+    selectedItemIds?: string[]
+  ): Promise<{ success: boolean; error?: string; batch?: ImageImportBatchDto }> {
+    try {
+      const headers = await this.getAdminAuthHeaders();
+      const resp = await fetch('/api/admin/image-library?action=apply', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          batchId,
+          confirmed: true,
+          selectedItemIds
+        })
+      });
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok || !data?.success) {
+        return {
+          success: false,
+          error: data?.error || data?.message || 'Falha ao aplicar lote de imagens.'
+        };
+      }
+      return { success: true, batch: data.batch };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Erro de rede ao confirmar importação.' };
+    }
+  },
+
+  /**
+   * Busca histórico de importações ZIP e relatórios de erro.
+   */
+  async getImageImportHistory(limit = 20): Promise<{
+    success: boolean;
+    batches: ImageImportBatchDto[];
+    error?: string;
+  }> {
+    try {
+      const headers = await this.getAdminAuthHeaders();
+      const resp = await fetch(`/api/admin/image-library?action=history&limit=${limit}`, {
+        method: 'GET',
+        headers
+      });
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok || !data?.success) {
+        return {
+          success: false,
+          batches: [],
+          error: data?.error || data?.message || 'Não foi possível carregar o histórico.'
+        };
+      }
+      return { success: true, batches: data.batches || [] };
+    } catch (err: any) {
+      return { success: false, batches: [], error: err?.message || 'Erro ao buscar histórico.' };
+    }
+  },
+
+  /**
+   * Reprocessa apenas os itens que falharam em um lote anterior.
+   */
+  async reprocessImageImportBatch(
+    batchId: string
+  ): Promise<{ success: boolean; error?: string; batch?: ImageImportBatchDto }> {
+    try {
+      const headers = await this.getAdminAuthHeaders();
+      const resp = await fetch('/api/admin/image-library?action=reprocess', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ batchId })
+      });
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok || !data?.success) {
+        return {
+          success: false,
+          error: data?.error || data?.message || 'Falha ao reprocessar itens com erro.'
+        };
+      }
+      return { success: true, batch: data.batch };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Erro de conexão ao reprocessar lote.' };
+    }
   }
 };
+
+export interface ImageImportItemDto {
+  id: string;
+  targetType: 'COMPANY' | 'PERSON' | 'SOURCE';
+  targetId: string | null;
+  targetName: string;
+  targetSlug: string | null;
+  targetDomain: string | null;
+  zipEntryPath: string;
+  mimeType: string | null;
+  byteSize: number;
+  classification: string;
+  requiresBrandReview: boolean;
+  status: 'APPROVED' | 'PENDING_REVIEW' | 'UNMATCHED' | 'INVALID' | 'APPLIED' | 'FAILED' | 'SKIPPED';
+  previousImageUrl: string | null;
+  publicImageUrl: string | null;
+  previewDataUrl?: string | null;
+  errorMessage?: string | null;
+  retryCount: number;
+}
+
+export interface ImageImportBatchDto {
+  batchId: string;
+  status: 'PREVIEW' | 'APPLYING' | 'COMPLETED' | 'PARTIAL_FAILURE' | 'FAILED' | 'CANCELLED';
+  fileName: string;
+  fileSizeBytes: number;
+  uploadedByEmail?: string | null;
+  counts: {
+    totalFound: number;
+    approved: number;
+    pendingReview: number;
+    unmatched: number;
+    invalid: number;
+    applied: number;
+    failed: number;
+    skipped: number;
+  };
+  items: ImageImportItemDto[];
+  errorReport: Array<{
+    itemId: string;
+    zipEntryPath: string;
+    targetName: string;
+    targetType: 'COMPANY' | 'PERSON' | 'SOURCE';
+    error: string;
+  }>;
+  createdAt: string;
+  confirmedAt?: string | null;
+  completedAt?: string | null;
+}
+
