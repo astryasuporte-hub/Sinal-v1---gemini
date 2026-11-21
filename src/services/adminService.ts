@@ -717,13 +717,27 @@ export const adminService = {
           };
         }
 
-        const putRes = await fetch(initData.signedUrl, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/zip' },
-          body: file
-        });
-        if (!putRes.ok) {
-          return { success: false, error: 'Falha ao transferir pacote ZIP para área temporária no Storage.' };
+        let uploadedOk = false;
+        if (isSupabaseConfigured && initData.token && initData.storagePath) {
+          const { error: uploadErr } = await supabase.storage
+            .from('brand-assets-staging')
+            .uploadToSignedUrl(initData.storagePath, initData.token, file, {
+              contentType: 'application/zip'
+            });
+          if (!uploadErr) {
+            uploadedOk = true;
+          }
+        }
+
+        if (!uploadedOk) {
+          const putRes = await fetch(initData.signedUrl, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/zip' },
+            body: file
+          });
+          if (!putRes.ok) {
+            return { success: false, error: 'Falha ao transferir pacote ZIP para área temporária no Storage.' };
+          }
         }
 
         const previewRes = await fetch('/api/admin/image-library?action=preview', {

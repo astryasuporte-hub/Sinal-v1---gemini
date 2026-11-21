@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { Event, Entity } from '../types/sinal';
 import {
   Search,
@@ -16,10 +16,14 @@ import {
   CheckCheck,
   X,
   SlidersHorizontal,
-  ChevronLeft
+  ChevronLeft,
+  AlertCircle,
+  RefreshCw
 } from 'lucide-react';
 import { CompanyLogoBadge } from './CompanyLogoBadge';
 import { notificationService } from '../services/notificationService';
+import { userService } from '../services/userService';
+import { User as SupabaseUser } from '@supabase/supabase-js';
 
 export type NotificationCategory =
   | 'todas'
@@ -42,9 +46,8 @@ export interface SinalNotificationItem {
   thumbnailUrl?: string;
   eventId?: string;
   entityId?: string;
+  metadata?: Record<string, any>;
 }
-
-import { User as SupabaseUser } from '@supabase/supabase-js';
 
 interface NotificationsViewProps {
   events?: Event[];
@@ -52,78 +55,21 @@ interface NotificationsViewProps {
   currentUser?: SupabaseUser | null;
   onOpenEvent?: (event: Event) => void;
   onOpenEntity?: (entity: Entity) => void;
+  onOpenBriefing?: (briefingId?: string) => void;
+  onRequireAuth?: () => void;
   onBack?: () => void;
 }
 
-export function buildDefaultNotifications(events: Event[] = [], entities: Entity[] = []): SinalNotificationItem[] {
-  if (!events || events.length === 0) {
-    return [
-      {
-        id: 'notif-welcome',
-        category: 'atualizacoes',
-        dateGroup: 'Hoje',
-        title: 'Bem-vindo ao FatosBR',
-        subtitle: 'Notícias em tempo real, auditadas e sem ruído visual.',
-        timestamp: 'há 10 min',
-        read: false
-      },
-      {
-        id: 'notif-briefing-ready',
-        category: 'atualizacoes',
-        dateGroup: 'Hoje',
-        title: 'Briefing Executivo Matinal Disponível',
-        subtitle: 'Confira as principais notícias e análises consolidadas do dia.',
-        timestamp: 'há 1 hora',
-        read: false
-      }
-    ];
-  }
+const DEFAULT_NOTIF_SETTINGS = {
+  urgentEvents: true,
+  entityUpdates: true,
+  topicAlerts: true,
+  sourcesDigest: true,
+  dailyBriefings: true,
+  onlyHighRelevance: true
+};
 
-  const items: SinalNotificationItem[] = [];
-
-  // Notificações geradas dos acontecimentos reais mais recentes
-  events.slice(0, 5).forEach((ev, idx) => {
-    items.push({
-      id: `notif-evt-${ev.id}`,
-      category: idx === 0 || idx === 2 ? 'acontecimentos' : 'temas',
-      dateGroup: idx < 3 ? 'Hoje' : 'Ontem',
-      title: ev.title,
-      subtitle: ev.summary,
-      timestamp: ev.relativeTime || (idx === 0 ? 'há 15 min' : idx === 1 ? 'há 1 hora' : 'há 3 horas'),
-      read: idx >= 2,
-      thumbnailUrl: ev.imageUrl,
-      eventId: ev.id
-    });
-  });
-
-  // Notificação corporativa / de entidade se houver
-  const primaryEnt = entities[0] || (events[0]?.entities && events[0].entities[0]);
-  if (primaryEnt) {
-    items.push({
-      id: `notif-ent-${primaryEnt.id}`,
-      category: 'entidades',
-      dateGroup: 'Hoje',
-      title: `${primaryEnt.name}: Nova movimentação registrada`,
-      subtitle: `Cobertura em tempo real de múltiplas fontes verificadas sobre ${primaryEnt.name}.`,
-      timestamp: 'há 2 horas',
-      read: true,
-      entityId: primaryEnt.id
-    });
-  }
-
-  // Notificação de briefing executivo
-  items.push({
-    id: 'notif-briefing-daily',
-    category: 'atualizacoes',
-    dateGroup: 'Hoje',
-    title: 'Briefing Executivo FatosBR pronto',
-    subtitle: 'Síntese das principais notícias com fontes auditadas e sem ruído.',
-    timestamp: 'há 4 horas',
-    read: true
-  });
-
-  return items;
-}
+const PAGE_SIZE = 25;
 
 export const NotificationsView: React.FC<NotificationsViewProps> = ({
   events = [],
@@ -131,32 +77,49 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
   currentUser,
   onOpenEvent,
   onOpenEntity,
+  onOpenBriefing,
+  onRequireAuth,
   onBack
 }) => {
-  // Notificações reais do usuário autenticado via Supabase
-  const [notifications, setNotifications] = useState<SinalNotificationItem[]>(() => {
-    if (!currentUser?.id) return [];
-    try {
-      const cacheKey = notificationService.getUserCacheKey(currentUser.id);
-      const saved = localStorage.getItem(cacheKey);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) return parsed;
-      }
-    } catch {}
-    return [];
-  });
-
+  const [notifications, setNotifications] = useState<SinalNotificationItem[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [sessionExpired, setSessionExpired] = useState(false);
+  const [reloadNonce, setReloadNonce] = useState(0);
+  const [toastMsg, setToastMsg] = useState<{ text: string; isError?: boolean } | null>(null);
 
-  // Consulta ativamente o Supabase sempre que a sessão do usuário estiver ativa
-  React.useEffect(() => {
+  const [activeTab, setActiveTab] = useState<NotificationCategory>('todas');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterOnlyUnread, setFilterOnlyUnread] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isMobileSearchOpen, setIsMobileSearchOpen] = useState(false);
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
+  const [settings, setSettings] = useState(DEFAULT_NOTIF_SETTINGS);
+
+  const showToast = useCallback((text: string, isError = false) => {
+    setToastMsg({ text, isError });
+    setTimeout(() => setToastMsg(null), 4000);
+  }, []);
+
+  // Carrega notificações reais e preferências isoladas do usuário autenticado
+  useEffect(() => {
+    setLoadError(null);
+    setSessionExpired(false);
+    setHasMore(false);
+
     if (!currentUser?.id) {
       setNotifications([]);
+      setSettings(DEFAULT_NOTIF_SETTINGS);
       return;
     }
 
-    // 1. Hidratação imediata do cache local privado do usuário
+    let cancelled = false;
+    setNotifications([]);
+    setSettings(DEFAULT_NOTIF_SETTINGS);
+
+    // 1. Hidratação imediata do cache privado deste usuário
     try {
       const cacheKey = notificationService.getUserCacheKey(currentUser.id);
       const saved = localStorage.getItem(cacheKey);
@@ -164,43 +127,82 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed)) setNotifications(parsed);
       }
+
+      const settingsCacheKey = notificationService.getUserSettingsCacheKey(currentUser.id);
+      const savedSettings = localStorage.getItem(settingsCacheKey);
+      if (savedSettings) {
+        const parsedSettings = JSON.parse(savedSettings);
+        if (parsedSettings && typeof parsedSettings === 'object') {
+          setSettings({ ...DEFAULT_NOTIF_SETTINGS, ...parsedSettings });
+        }
+      }
     } catch {}
 
-    // 2. Consulta real no Supabase
+    // 2. Consulta paginada real no Supabase
     setIsLoading(true);
-    notificationService.getUserNotifications(currentUser.id)
-      .then((items: any[]) => {
-        setNotifications(items);
-      })
-      .catch((err) => {
-        console.warn('[NotificationsView] Falha ao carregar notificações reais:', err);
+    notificationService.getUserNotificationsDetailed(currentUser.id, { limit: PAGE_SIZE, offset: 0 })
+      .then((res) => {
+        if (cancelled) return;
+        if (res.error) {
+          setLoadError(res.error);
+          setSessionExpired(Boolean(res.sessionExpired));
+          return;
+        }
+        setNotifications(res.items);
+        setHasMore(res.hasMore);
       })
       .finally(() => {
-        setIsLoading(false);
+        if (!cancelled) setIsLoading(false);
       });
-  }, [currentUser?.id]);
 
-  const [activeTab, setActiveTab] = useState<NotificationCategory>('todas');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [filterOnlyUnread, setFilterOnlyUnread] = useState(false);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [isMobileSearchOpen, setIsMobileSearchOpen] = useState(false);
+    // 3. Sincroniza preferências de alerta do usuário no Supabase
+    userService.getUserPreferencesDetailed(currentUser.id)
+      .then((res) => {
+        if (cancelled || !res.data) return;
+        const remoteSettings = res.data.notification_settings;
+        if (remoteSettings && typeof remoteSettings === 'object') {
+          const merged = { ...DEFAULT_NOTIF_SETTINGS, ...remoteSettings };
+          setSettings(merged);
+          try {
+            localStorage.setItem(
+              notificationService.getUserSettingsCacheKey(currentUser.id),
+              JSON.stringify(merged)
+            );
+          } catch {}
+        } else if (typeof res.data.email_breaking_alerts === 'boolean') {
+          setSettings((prev) => ({ ...prev, urgentEvents: res.data.email_breaking_alerts }));
+        }
+      })
+      .catch(() => {});
 
-  // Settings State
-  const [settings, setSettings] = useState(() => {
-    try {
-      const saved = localStorage.getItem('sinal_notif_settings');
-      if (saved) return JSON.parse(saved);
-    } catch {}
-    return {
-      urgentEvents: true,
-      entityUpdates: true,
-      topicAlerts: true,
-      sourcesDigest: true,
-      dailyBriefings: true,
-      onlyHighRelevance: true
+    return () => {
+      cancelled = true;
     };
-  });
+  }, [currentUser?.id, reloadNonce]);
+
+  const handleLoadMore = async () => {
+    if (!currentUser?.id || isLoadingMore || !hasMore) return;
+    setIsLoadingMore(true);
+    try {
+      const res = await notificationService.getUserNotificationsDetailed(currentUser.id, {
+        limit: PAGE_SIZE,
+        offset: notifications.length
+      });
+      if (res.error) {
+        showToast(res.error, true);
+        if (res.sessionExpired) setSessionExpired(true);
+        return;
+      }
+      setNotifications((prev) => {
+        const existingIds = new Set(prev.map((p) => p.id));
+        const nextOnes = res.items.filter((it: SinalNotificationItem) => !existingIds.has(it.id));
+        return [...prev, ...nextOnes];
+      });
+      setHasMore(res.hasMore);
+    } finally {
+      setIsLoadingMore(false);
+    }
+  };
 
   const unreadCount = useMemo(() => {
     return notifications.filter((n) => !n.read).length;
@@ -217,59 +219,127 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
     };
   }, [notifications]);
 
-  const handleItemClick = (item: SinalNotificationItem) => {
-    // 1. Atualização otimista
-    const updated = notifications.map((n) => (n.id === item.id ? { ...n, read: true } : n));
-    setNotifications(updated);
+  const handleItemClick = async (item: SinalNotificationItem) => {
+    const previousList = notifications;
 
-    // 2. Persistência no Supabase associada ao usuário autenticado
-    if (currentUser?.id) {
-      notificationService.markAsRead(item.id, currentUser.id).catch(() => {});
-      try {
-        const cacheKey = notificationService.getUserCacheKey(currentUser.id);
-        localStorage.setItem(cacheKey, JSON.stringify(updated));
-      } catch {}
+    // 1. Atualização otimista com rollback caso o Supabase rejeite
+    if (!item.read) {
+      const updated = notifications.map((n) => (n.id === item.id ? { ...n, read: true } : n));
+      setNotifications(updated);
+
+      if (currentUser?.id) {
+        try {
+          localStorage.setItem(notificationService.getUserCacheKey(currentUser.id), JSON.stringify(updated));
+        } catch {}
+
+        const res = await notificationService.markAsReadDetailed(item.id, currentUser.id);
+        if (!res.success) {
+          setNotifications(previousList);
+          try {
+            localStorage.setItem(notificationService.getUserCacheKey(currentUser.id), JSON.stringify(previousList));
+          } catch {}
+          showToast(res.error || 'Não foi possível marcar a notificação como lida.', true);
+          if (res.sessionExpired) {
+            setSessionExpired(true);
+            onRequireAuth?.();
+          }
+          return;
+        }
+      }
     }
 
-    if (item.eventId && onOpenEvent) {
+    // 2. Navegação segura para destinos reais
+    if (item.eventId) {
       const foundEvent = events.find((e) => e.id === item.eventId);
-      if (foundEvent) {
+      if (foundEvent && onOpenEvent) {
         onOpenEvent(foundEvent);
         return;
       }
+      showToast('Este acontecimento não está mais disponível no catálogo atual.', true);
+      return;
     }
 
-    if (item.entityId && onOpenEntity) {
+    if (item.entityId) {
       const foundEntity = entities.find((e) => e.id === item.entityId);
-      if (foundEntity) {
+      if (foundEntity && onOpenEntity) {
         onOpenEntity(foundEntity);
+        return;
+      }
+      showToast('Esta entidade não está disponível no momento.', true);
+      return;
+    }
+
+    if (item.metadata?.briefingId || item.category === 'atualizacoes') {
+      if (onOpenBriefing) {
+        onOpenBriefing(item.metadata?.briefingId);
         return;
       }
     }
   };
 
-  const handleMarkAllAsRead = () => {
-    // 1. Atualização otimista
+  const handleMarkAllAsRead = async () => {
+    if (!currentUser?.id) {
+      onRequireAuth?.();
+      return;
+    }
+
+    const previousList = notifications;
     const updated = notifications.map((n) => ({ ...n, read: true }));
     setNotifications(updated);
 
-    // 2. Persistência no Supabase para o usuário logado
-    if (currentUser?.id) {
-      notificationService.markAllAsRead(currentUser.id).catch(() => {});
+    try {
+      localStorage.setItem(notificationService.getUserCacheKey(currentUser.id), JSON.stringify(updated));
+    } catch {}
+
+    const res = await notificationService.markAllAsReadDetailed(currentUser.id);
+    if (!res.success) {
+      setNotifications(previousList);
       try {
-        const cacheKey = notificationService.getUserCacheKey(currentUser.id);
-        localStorage.setItem(cacheKey, JSON.stringify(updated));
+        localStorage.setItem(notificationService.getUserCacheKey(currentUser.id), JSON.stringify(previousList));
       } catch {}
+      showToast(res.error || 'Não foi possível marcar todas como lidas.', true);
+      if (res.sessionExpired) {
+        setSessionExpired(true);
+        onRequireAuth?.();
+      }
+      return;
     }
 
     setFilterOnlyUnread(false);
+    showToast('Todas as notificações foram marcadas como lidas.');
   };
 
-  const handleSaveSettings = () => {
+  const handleSaveSettings = async () => {
+    if (!currentUser?.id) {
+      onRequireAuth?.();
+      return;
+    }
+
+    setIsSavingSettings(true);
     try {
-      localStorage.setItem('sinal_notif_settings', JSON.stringify(settings));
-    } catch {}
-    setIsSettingsOpen(false);
+      const res = await userService.updateUserPreferencesDetailed(currentUser.id, {
+        email_breaking_alerts: settings.urgentEvents,
+        notification_settings: settings
+      });
+
+      if (!res.success) {
+        showToast(res.error || 'Não foi possível salvar preferências de alerta.', true);
+        if (res.sessionExpired) onRequireAuth?.();
+        return;
+      }
+
+      try {
+        localStorage.setItem(
+          notificationService.getUserSettingsCacheKey(currentUser.id),
+          JSON.stringify(settings)
+        );
+      } catch {}
+
+      setIsSettingsOpen(false);
+      showToast('Preferências de alerta salvas!');
+    } finally {
+      setIsSavingSettings(false);
+    }
   };
 
   // Filtragem
@@ -307,9 +377,24 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
   const dateGroupKeys = Object.keys(groupedByDate);
 
   return (
-    <div className="flex-1 flex flex-col lg:flex-row w-full max-w-7xl mx-auto text-zinc-100">
+    <div className="flex-1 flex flex-col lg:flex-row w-full max-w-7xl mx-auto text-zinc-100 overflow-x-hidden">
+      {/* Toast de feedback */}
+      {toastMsg && (
+        <div
+          role="status"
+          className={`fixed top-5 right-5 z-50 border px-4 py-2.5 rounded-xl shadow-2xl text-xs flex items-center gap-2 animate-fade-in font-medium max-w-[90vw] ${
+            toastMsg.isError
+              ? 'bg-[#1a1114] border-red-800/70 text-red-100'
+              : 'bg-[#161820] border-zinc-700 text-white'
+          }`}
+        >
+          {toastMsg.isError ? <AlertCircle className="w-4 h-4 text-red-400 shrink-0" /> : <Check className="w-4 h-4 text-white shrink-0" />}
+          <span>{toastMsg.text}</span>
+        </div>
+      )}
+
       {/* ================= COLUNA PRINCIPAL ================= */}
-      <main className="flex-1 max-w-3xl w-full mx-auto px-4 sm:px-6 py-4 sm:py-6 space-y-6">
+      <main className="flex-1 max-w-3xl w-full mx-auto px-4 sm:px-6 py-4 sm:py-6 space-y-6 min-w-0">
         {/* Voltar ao feed (Mobile & Desktop) */}
         {onBack && (
           <button
@@ -333,8 +418,50 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
             </p>
           </div>
 
+          {/* Ações Mobile */}
+          <div className="flex sm:hidden items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setIsMobileSearchOpen((v) => !v)}
+              className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl bg-[#111216] border border-[#1e2026] text-zinc-300 hover:text-white transition cursor-pointer"
+              aria-label="Buscar notificações"
+            >
+              <Search className="w-4 h-4" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setReloadNonce((n) => n + 1)}
+              disabled={isLoading}
+              className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl bg-[#111216] border border-[#1e2026] text-zinc-300 hover:text-white transition cursor-pointer disabled:opacity-50"
+              aria-label="Recarregar notificações"
+            >
+              <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
+            </button>
+
+            {unreadCount > 0 && (
+              <button
+                type="button"
+                onClick={() => void handleMarkAllAsRead()}
+                className="min-h-[44px] px-3 flex items-center gap-1.5 rounded-xl bg-[#111216] border border-[#1e2026] text-zinc-200 hover:text-white text-xs font-semibold transition cursor-pointer"
+              >
+                <CheckCheck className="w-4 h-4" />
+                <span>Ler todas</span>
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={() => setIsSettingsOpen(true)}
+              className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl bg-[#111216] border border-[#1e2026] text-zinc-300 hover:text-white transition cursor-pointer ml-auto"
+              aria-label="Configurações de notificações"
+            >
+              <SlidersHorizontal className="w-4 h-4" />
+            </button>
+          </div>
+
           {/* Desktop Search & Ações Rápidas */}
-          <div className="hidden sm:flex items-center gap-3">
+          <div className="hidden sm:flex items-center gap-2.5">
             <div className="relative">
               <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-zinc-500" />
               <input
@@ -346,22 +473,35 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
               />
             </div>
 
+            <button
+              type="button"
+              onClick={() => setReloadNonce((n) => n + 1)}
+              disabled={isLoading}
+              className="p-2 rounded-xl bg-[#111216] border border-[#1e2026] text-zinc-400 hover:text-white transition cursor-pointer disabled:opacity-50"
+              title="Recarregar notificações"
+              aria-label="Recarregar notificações"
+            >
+              <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
+            </button>
+
             {unreadCount > 0 && (
               <button
-                onClick={handleMarkAllAsRead}
+                type="button"
+                onClick={() => void handleMarkAllAsRead()}
                 className="p-2 rounded-xl bg-[#111216] border border-[#1e2026] text-zinc-400 hover:text-white transition cursor-pointer"
                 title="Marcar todas como lidas"
+                aria-label="Marcar todas como lidas"
               >
                 <CheckCheck className="w-4 h-4" />
               </button>
             )}
 
-
-
             <button
+              type="button"
               onClick={() => setIsSettingsOpen(true)}
               className="p-2 rounded-xl bg-[#111216] border border-[#1e2026] text-zinc-400 hover:text-white transition cursor-pointer"
               title="Configurações de notificações"
+              aria-label="Configurações de notificações"
             >
               <SlidersHorizontal className="w-4 h-4" />
             </button>
@@ -452,16 +592,69 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
           </button>
         </div>
 
-        {/* LISTAGEM DE NOTIFICAÇÕES OU EMPTY STATE AUTÊNTICO */}
-        {dateGroupKeys.length === 0 ? (
+        {/* LISTAGEM DE NOTIFICAÇÕES, LOADING, ERRO OU EMPTY STATE AUTÊNTICO */}
+        {isLoading && notifications.length === 0 ? (
+          <div className="p-10 sm:p-14 rounded-3xl border border-[#1e2026] bg-[#111216] text-center space-y-3">
+            <div className="w-8 h-8 rounded-full border-2 border-white/20 border-t-white animate-spin mx-auto" />
+            <p className="text-xs sm:text-sm text-zinc-400">Sincronizando suas notificações...</p>
+          </div>
+        ) : loadError && notifications.length === 0 ? (
           <div className="p-10 sm:p-14 rounded-3xl border border-[#1e2026] bg-[#111216] text-center space-y-4">
-            <div className="w-14 h-14 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center mx-auto text-zinc-500 shadow-lg">
-              <Bell className="w-6 h-6 text-zinc-400" />
+            <div className="w-12 h-12 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center mx-auto text-zinc-300">
+              <AlertCircle className="w-6 h-6 text-zinc-300" />
             </div>
             <div className="space-y-1.5 max-w-md mx-auto">
-              <h3 className="text-base font-bold text-white">Nenhuma notificação no momento</h3>
+              <h3 className="text-base font-bold text-white">
+                {sessionExpired ? 'Sessão expirada' : 'Erro de sincronização'}
+              </h3>
               <p className="text-xs sm:text-[13px] text-zinc-400 leading-relaxed">
-                Você receberá notificações aqui em tempo real assim que surgirem acontecimentos urgentes, comunicados corporativos ou sínteses sobre as entidades que você segue.
+                {loadError}
+              </p>
+            </div>
+            <div className="pt-1 flex items-center justify-center gap-2">
+              {sessionExpired ? (
+                <button
+                  type="button"
+                  onClick={() => onRequireAuth?.()}
+                  className="px-4 py-2.5 rounded-xl bg-white text-black text-xs font-bold hover:bg-zinc-200 transition cursor-pointer min-h-[44px]"
+                >
+                  Fazer login novamente
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setReloadNonce((n) => n + 1)}
+                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white text-black text-xs font-bold hover:bg-zinc-200 transition cursor-pointer min-h-[44px]"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>Tentar novamente</span>
+                </button>
+              )}
+            </div>
+          </div>
+        ) : dateGroupKeys.length === 0 ? (
+          <div className="p-10 sm:p-14 rounded-3xl border border-[#1e2026] bg-[#111216] text-center space-y-4">
+            <div className="w-14 h-14 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center mx-auto text-zinc-500 shadow-lg">
+              {filterOnlyUnread && notifications.length > 0 ? (
+                <CheckCheck className="w-6 h-6 text-zinc-400" />
+              ) : (
+                <Bell className="w-6 h-6 text-zinc-400" />
+              )}
+            </div>
+            <div className="space-y-1.5 max-w-md mx-auto">
+              <h3 className="text-base font-bold text-white">
+                {filterOnlyUnread && notifications.length > 0
+                  ? 'Todas as notificações foram lidas'
+                  : activeTab !== 'todas' || searchQuery
+                    ? 'Nenhuma notificação encontrada'
+                    : 'Nenhuma notificação no momento'}
+              </h3>
+              <p className="text-xs sm:text-[13px] text-zinc-400 leading-relaxed">
+                {filterOnlyUnread && notifications.length > 0
+                  ? 'Você está em dia com todos os alertas da sua conta.'
+                  : activeTab !== 'todas' || searchQuery
+                    ? 'Tente limpar os filtros ou ajustar o termo de busca.'
+                    : 'Você receberá notificações aqui assim que surgirem acontecimentos relevantes ou resumos vinculados aos temas e empresas que você segue.'}
               </p>
             </div>
             {(activeTab !== 'todas' || filterOnlyUnread || searchQuery) && (
@@ -472,7 +665,7 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
                     setFilterOnlyUnread(false);
                     setSearchQuery('');
                   }}
-                  className="px-4 py-2 rounded-xl bg-white text-black text-xs font-bold hover:bg-zinc-200 transition cursor-pointer"
+                  className="px-4 py-2 rounded-xl bg-white text-black text-xs font-bold hover:bg-zinc-200 transition cursor-pointer min-h-[44px]"
                 >
                   Limpar filtros
                 </button>
@@ -481,6 +674,19 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
           </div>
         ) : (
           <div className="space-y-6">
+            {loadError && (
+              <div className="rounded-2xl border border-red-900/60 bg-red-950/30 px-4 py-3 text-xs text-red-200 flex items-center justify-between gap-3">
+                <span>{loadError}</span>
+                <button
+                  type="button"
+                  onClick={() => setReloadNonce((n) => n + 1)}
+                  className="text-white underline font-semibold shrink-0 cursor-pointer"
+                >
+                  Recarregar
+                </button>
+              </div>
+            )}
+
             {dateGroupKeys.map((group) => (
               <section key={group} className="space-y-3">
                 <h2 className="text-xs sm:text-sm font-bold text-zinc-300 tracking-wide">
@@ -491,7 +697,7 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
                   {groupedByDate[group].map((item) => (
                     <div
                       key={item.id}
-                      onClick={() => handleItemClick(item)}
+                      onClick={() => void handleItemClick(item)}
                       className={`group relative p-3.5 sm:p-4 rounded-2xl border transition flex items-center justify-between gap-3.5 cursor-pointer ${
                         !item.read
                           ? 'bg-[#111216] border-[#22252e] hover:border-zinc-600 shadow-sm'
@@ -536,6 +742,20 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
                 </div>
               </section>
             ))}
+
+            {/* Paginação */}
+            {hasMore && (
+              <div className="pt-2 flex justify-center">
+                <button
+                  type="button"
+                  onClick={() => void handleLoadMore()}
+                  disabled={isLoadingMore}
+                  className="px-5 py-2.5 rounded-xl bg-[#111216] border border-[#1e2026] hover:border-zinc-700 text-xs font-semibold text-zinc-200 hover:text-white transition cursor-pointer disabled:opacity-50 min-h-[44px]"
+                >
+                  {isLoadingMore ? 'Carregando mais...' : 'Carregar mais notificações'}
+                </button>
+              </div>
+            )}
           </div>
         )}
       </main>
@@ -684,16 +904,19 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
 
             <div className="pt-2 flex justify-end gap-2">
               <button
+                type="button"
                 onClick={() => setIsSettingsOpen(false)}
-                className="px-4 py-2 rounded-xl bg-zinc-800 text-zinc-300 text-xs font-semibold"
+                className="px-4 py-2 rounded-xl bg-zinc-800 text-zinc-300 text-xs font-semibold min-h-[44px] cursor-pointer"
               >
                 Cancelar
               </button>
               <button
-                onClick={handleSaveSettings}
-                className="px-4 py-2 rounded-xl bg-white text-black text-xs font-bold hover:bg-zinc-200"
+                type="button"
+                disabled={isSavingSettings}
+                onClick={() => void handleSaveSettings()}
+                className="px-4 py-2 rounded-xl bg-white text-black text-xs font-bold hover:bg-zinc-200 min-h-[44px] cursor-pointer disabled:opacity-50"
               >
-                Salvar Preferências
+                {isSavingSettings ? 'Salvando...' : 'Salvar Preferências'}
               </button>
             </div>
           </div>

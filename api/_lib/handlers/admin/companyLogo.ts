@@ -3,12 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * Handler Admin: Upload/Remoção Individual de Logotipo PNG
- * Protegido por verifyAdminRequest, persiste permanentemente no bucket
- * brand-assets do Supabase Storage e atualiza public.entities.image_url.
+ * Exige sessão Supabase válida + autorização administrativa em internal.user_roles.
+ * Persiste permanentemente no bucket público "brand-assets" e atualiza DB após upload confirmado.
  */
 
 import { sendJson, setCorsHeaders, readJsonBody } from '../../common.js';
-import { verifyAdminRequest } from '../../adminAuth.js';
+import { verifySupabaseAdminSession } from '../../adminAuth.js';
 import { validatePngTransparency } from '../../../../src/server/companyLogoService.js';
 import {
   clearSingleTargetImage,
@@ -25,12 +25,15 @@ export default async function companyLogoHandler(req: any, res: any) {
     return;
   }
 
-  const isAuthorized = await verifyAdminRequest(req);
-  if (!isAuthorized) {
-    return sendJson(res, 401, {
+  const adminSession = await verifySupabaseAdminSession(req);
+  if (!adminSession.authorized) {
+    const isForbidden = adminSession.statusCode === 403;
+    return sendJson(res, adminSession.statusCode, {
       success: false,
-      error: 'UNAUTHORIZED_ADMIN',
-      message: 'Acesso administrativo obrigatório para gerenciar logotipos.'
+      error: isForbidden ? 'FORBIDDEN_ADMIN' : 'UNAUTHORIZED_SESSION',
+      message: isForbidden
+        ? 'Acesso negado. Apenas administradores autorizados podem alterar logotipos.'
+        : 'Sessão Supabase válida obrigatória para gerenciar logotipos.'
     });
   }
 

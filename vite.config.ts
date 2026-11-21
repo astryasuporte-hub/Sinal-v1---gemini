@@ -569,142 +569,10 @@ function apiProxyPlugin(): Plugin {
             return;
           }
 
-          // 6. Resend Send Email Endpoint (Daily Briefings & Test Dispatches)
+          // 6. Resend Send Email Endpoint (Delegado ao handler hardened V2.3 de produção)
           if (req.url === '/api/resend/send' || req.url.startsWith('/api/resend/send')) {
-            const buffers: any[] = [];
-            for await (const chunk of req) {
-              buffers.push(chunk);
-            }
-            const bodyStr = Buffer.concat(buffers).toString();
-            let parsedBody: any = {};
-            try { parsedBody = JSON.parse(bodyStr); } catch {}
-
-            const resendApiKey = SERVER_SECRET_KEYS.RESEND;
-            const toEmail = parsedBody.to || 'astryasuporte@gmail.com';
-            const subject = parsedBody.subject || 'FatosBR • Resumo Matinal';
-            const isOtp = Boolean(parsedBody.code || subject.toLowerCase().includes('código') || subject.toLowerCase().includes('otp'));
-            const templateType = parsedBody.template || (isOtp ? 'otp_code' : (subject.toLowerCase().includes('teste') ? 'test_email' : 'briefing'));
-
-            // Renderiza o template HTML externo a partir da pasta /templates/emails
-            let htmlContent = parsedBody.html;
-            if (!htmlContent) {
-              if (isOtp || templateType === 'otp_code') {
-                const otpVal = parsedBody.code || parsedBody.otp || (parsedBody.text ? parsedBody.text.replace(/\D/g, '').slice(0, 6) : '123456');
-                htmlContent = renderEmailTemplate('otp_code', {
-                  otp_code: otpVal,
-                  recipient: toEmail,
-                  timestamp: new Date().toLocaleTimeString('pt-BR'),
-                  year: new Date().getFullYear().toString()
-                });
-              } else if (templateType === 'test_email') {
-                htmlContent = renderEmailTemplate('test_email', {
-                  recipient: toEmail,
-                  sender: 'onboarding@resend.dev',
-                  message: parsedBody.text || 'Validação de infraestrutura do provedor Resend concluída com sucesso.',
-                  timestamp: new Date().toLocaleTimeString('pt-BR'),
-                  latency: `${providerStats.resend.lastLatencyMs || 198} ms`
-                });
-              } else {
-                // Utiliza a publicação editorial premium da Sinal com suporte a Resumo Matinal/Noturno e eventos reais
-                const isEvening = parsedBody.type === 'evening' ||
-                  subject.toLowerCase().includes('noturn') ||
-                  subject.toLowerCase().includes('20:00') ||
-                  subject.toLowerCase().includes('20h');
-
-                htmlContent = buildEditorialBriefingHtml({
-                  type: isEvening ? 'evening' : 'morning',
-                  events: Array.isArray(parsedBody.events) ? parsedBody.events : undefined,
-                  recipient: toEmail,
-                  brandName: 'Sinal',
-                  senderEmail: 'onboarding@resend.dev',
-                  appUrl: process.env.APP_URL || 'https://sinal.app',
-                  readingTime: parsedBody.reading_time,
-                  customTitle: parsedBody.customTitle,
-                  customSubtitle: parsedBody.customSubtitle || parsedBody.summary
-                });
-              }
-            }
-
-            if (resendApiKey) {
-              const sendStart = Date.now();
-              try {
-                const resendRes = await fetch('https://api.resend.com/emails', {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json',
-                    Authorization: `Bearer ${resendApiKey}`
-                  },
-                  body: JSON.stringify({
-                    from: customResendSender,
-                    to: [toEmail],
-                    subject: subject,
-                    html: htmlContent,
-                    text: parsedBody.text || parsedBody.summary || subject
-                  })
-                });
-
-                const latencyMs = Date.now() - sendStart;
-                providerStats.resend.requestsToday += 1;
-                providerStats.resend.requestsThisMonth += 1;
-                providerStats.resend.lastRequestAt = new Date().toISOString();
-                providerStats.resend.lastLatencyMs = latencyMs;
-                providerStats.resend.lastStatusCode = resendRes.status;
-
-                const resendData = await resendRes.json().catch(() => ({}));
-
-                if (resendRes.ok) {
-                  providerStats.resend.emailsSentToday += 1;
-                  providerStats.resend.emailsSentThisMonth += 1;
-                  providerStats.resend.quotaLeft = Math.max(0, 3000 - providerStats.resend.requestsThisMonth);
-
-                  res.setHeader('Content-Type', 'application/json');
-                  res.statusCode = 200;
-                  res.end(JSON.stringify({
-                    success: true,
-                    id: resendData.id,
-                    recipient: toEmail,
-                    template: templateType,
-                    provider: 'Resend',
-                    message: 'Briefing enviado com sucesso via Resend API'
-                  }));
-                  return;
-                } else {
-                  providerStats.resend.errorCount += 1;
-                  const rawMsg = resendData.message || `HTTP ${resendRes.status}`;
-                  const formattedError = resendRes.status === 403
-                    ? `A conta Resend em sandbox autoriza envios apenas para astryasuporte@gmail.com. (${rawMsg})`
-                    : rawMsg;
-
-                  providerStats.resend.lastErrorMessage = formattedError;
-                  res.setHeader('Content-Type', 'application/json');
-                  res.statusCode = resendRes.status;
-                  res.end(JSON.stringify({
-                    success: false,
-                    error: formattedError,
-                    details: resendData
-                  }));
-                  return;
-                }
-              } catch (sendErr: any) {
-                providerStats.resend.errorCount += 1;
-                providerStats.resend.lastErrorMessage = sendErr.message;
-                res.setHeader('Content-Type', 'application/json');
-                res.statusCode = 500;
-                res.end(JSON.stringify({
-                  success: false,
-                  error: sendErr.message
-                }));
-                return;
-              }
-            }
-
-            res.setHeader('Content-Type', 'application/json');
-            res.statusCode = 400;
-            res.end(JSON.stringify({
-              success: false,
-              error: 'RESEND_API_KEY não configurada no servidor'
-            }));
-            return;
+            const { default: sendResendHandler } = await import('./api/_lib/handlers/resend/send');
+            return await sendResendHandler(req, res);
           }
 
           // 6.5. Endpoint Dedicado para Envio de Código de Confirmação OTP (/api/auth/send-otp)
@@ -1740,7 +1608,7 @@ function apiProxyPlugin(): Plugin {
                 const endpoint = payload.subscription?.endpoint || `sub_${Date.now()}`;
                 activeWebPushSubscriptions.set(endpoint, {
                   subscription: payload.subscription,
-                  userEmail: payload.userEmail || 'leitor@fatosbr.com.br',
+                  userEmail: payload.userEmail || null,
                   subscribedAt: payload.subscribedAt || new Date().toISOString()
                 });
 

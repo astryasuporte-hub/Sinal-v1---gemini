@@ -122,7 +122,7 @@ class NotificationService {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           subscription: sub.toJSON(),
-          userEmail: userEmail || 'leitor@fatosbr.com.br',
+          userEmail: userEmail || undefined,
           subscribedAt: new Date().toISOString()
         })
       }).catch(() => {});
@@ -329,22 +329,103 @@ class NotificationService {
   }
 
   /**
-   * Limpa cache de notificações de um usuário (usado no logout)
+   * Obtém chave de cache privada para configurações de alerta de um usuário
+   */
+  public getUserSettingsCacheKey(userId: string): string {
+    return `fatosbr_notif_settings_${userId}`;
+  }
+
+  /**
+   * Limpa cache de notificações e configurações privadas de um usuário (usado no logout)
    */
   public clearUserCache(userId: string): void {
     if (typeof window === 'undefined') return;
     try {
       localStorage.removeItem(this.getUserCacheKey(userId));
+      localStorage.removeItem(this.getUserSettingsCacheKey(userId));
     } catch {}
   }
 
-  /**
-   * Consulta as notificações reais do usuário autenticado no Supabase
-   */
-  public async getUserNotifications(userId: string): Promise<any[]> {
-    if (!isSupabaseConfigured || !userId) {
-      return [];
+  private isSessionExpiredError(err: any): boolean {
+    if (!err) return false;
+    const msg = String(err?.message || '').toLowerCase();
+    const code = String(err?.code || '').toUpperCase();
+    const status = Number(err?.status || 0);
+    return (
+      status === 401 ||
+      code === 'PGRST301' ||
+      msg.includes('jwt expired') ||
+      msg.includes('invalid jwt') ||
+      msg.includes('session not found')
+    );
+  }
+
+  private mapDbNotificationRow(n: any) {
+    const now = new Date();
+    const todayStr = now.toLocaleDateString('pt-BR');
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayStr = yesterday.toLocaleDateString('pt-BR');
+
+    const notifDate = new Date(n.created_at);
+    const dateStr = notifDate.toLocaleDateString('pt-BR');
+    let dateGroup = 'Anteriores';
+    if (dateStr === todayStr) {
+      dateGroup = 'Hoje';
+    } else if (dateStr === yesterdayStr) {
+      dateGroup = 'Ontem';
     }
+
+    const diffMinutes = Math.floor((now.getTime() - notifDate.getTime()) / 60000);
+    let timestamp = 'agora';
+    if (diffMinutes >= 1 && diffMinutes < 60) {
+      timestamp = `há ${diffMinutes} min`;
+    } else if (diffMinutes >= 60 && diffMinutes < 1440) {
+      const h = Math.floor(diffMinutes / 60);
+      timestamp = h === 1 ? 'há 1 hora' : `há ${h} horas`;
+    } else if (diffMinutes >= 1440) {
+      const d = Math.floor(diffMinutes / 1440);
+      timestamp = d === 1 ? 'há 1 dia' : `há ${d} dias`;
+    }
+
+    const validCategories = ['acontecimentos', 'entidades', 'temas', 'fontes', 'atualizacoes'];
+    const rawCat = String(n.category || '').toLowerCase();
+    const category = validCategories.includes(rawCat) ? rawCat : 'acontecimentos';
+
+    return {
+      id: n.id,
+      category,
+      dateGroup,
+      title: n.title,
+      subtitle: n.subtitle || '',
+      timestamp,
+      read: Boolean(n.read),
+      eventId: n.event_id || undefined,
+      entityId: n.entity_id || undefined,
+      metadata: n.metadata || {},
+      createdAt: n.created_at
+    };
+  }
+
+  /**
+   * Consulta paginada das notificações reais do usuário autenticado no Supabase,
+   * diferenciando estado vazio legítimo de falha de rede ou sessão expirada.
+   */
+  public async getUserNotificationsDetailed(
+    userId: string,
+    options?: { limit?: number; offset?: number }
+  ): Promise<{
+    items: any[];
+    hasMore: boolean;
+    error?: string;
+    sessionExpired?: boolean;
+  }> {
+    if (!isSupabaseConfigured || !userId) {
+      return { items: [], hasMore: false };
+    }
+
+    const limit = Math.max(1, Math.min(100, options?.limit ?? 25));
+    const offset = Math.max(0, options?.offset ?? 0);
 
     try {
       const { data, error } = await (supabase as any)
@@ -352,79 +433,63 @@ class NotificationService {
         .select('*')
         .eq('user_id', userId)
         .order('created_at', { ascending: false })
-        .limit(50);
+        .range(offset, offset + limit);
 
       if (error) {
-        console.warn('[NotificationService] Falha ao consultar notificações no Supabase:', error.message);
-        return [];
-      }
-
-      if (!data || data.length === 0) {
-        return [];
-      }
-
-      const now = new Date();
-      const todayStr = now.toLocaleDateString('pt-BR');
-      const yesterday = new Date(now);
-      yesterday.setDate(yesterday.getDate() - 1);
-      const yesterdayStr = yesterday.toLocaleDateString('pt-BR');
-
-      const items = data.map((n: any) => {
-        const notifDate = new Date(n.created_at);
-        const dateStr = notifDate.toLocaleDateString('pt-BR');
-        let dateGroup = 'Anteriores';
-        if (dateStr === todayStr) {
-          dateGroup = 'Hoje';
-        } else if (dateStr === yesterdayStr) {
-          dateGroup = 'Ontem';
-        }
-
-        const diffMinutes = Math.floor((now.getTime() - notifDate.getTime()) / 60000);
-        let timestamp = 'agora';
-        if (diffMinutes >= 1 && diffMinutes < 60) {
-          timestamp = `há ${diffMinutes} min`;
-        } else if (diffMinutes >= 60 && diffMinutes < 1440) {
-          const h = Math.floor(diffMinutes / 60);
-          timestamp = h === 1 ? 'há 1 hora' : `há ${h} horas`;
-        } else if (diffMinutes >= 1440) {
-          const d = Math.floor(diffMinutes / 1440);
-          timestamp = d === 1 ? 'há 1 dia' : `há ${d} dias`;
-        }
-
+        const expired = this.isSessionExpiredError(error);
         return {
-          id: n.id,
-          category: n.category || 'acontecimentos',
-          dateGroup,
-          title: n.title,
-          subtitle: n.subtitle || '',
-          timestamp,
-          read: Boolean(n.read),
-          eventId: n.event_id || undefined,
-          entityId: n.entity_id || undefined,
-          metadata: n.metadata || {}
+          items: [],
+          hasMore: false,
+          sessionExpired: expired,
+          error: expired
+            ? 'Sua sessão expirou. Faça login novamente para sincronizar seus alertas.'
+            : error.message || 'Falha ao sincronizar notificações.'
         };
-      });
+      }
 
-      // Salva no cache privado do usuário
-      if (typeof window !== 'undefined') {
+      const rows = Array.isArray(data) ? data : [];
+      const hasMore = rows.length > limit;
+      const sliced = hasMore ? rows.slice(0, limit) : rows;
+      const items = sliced.map((n: any) => this.mapDbNotificationRow(n));
+
+      // Atualiza cache privado apenas para a primeira página (incluindo estado vazio para limpar cache antigo)
+      if (offset === 0 && typeof window !== 'undefined') {
         try {
           localStorage.setItem(this.getUserCacheKey(userId), JSON.stringify(items));
         } catch {}
       }
 
-      return items;
+      return { items, hasMore };
     } catch (err: any) {
-      console.warn('[NotificationService] Erro na consulta de notificações:', err?.message);
-      return [];
+      return {
+        items: [],
+        hasMore: false,
+        error: err?.message || 'Erro de conexão ao consultar notificações.'
+      };
     }
   }
 
   /**
-   * Consulta a contagem real de notificações não lidas no Supabase
+   * Consulta as notificações reais do usuário autenticado no Supabase
    */
-  public async getUnreadCount(userId: string): Promise<number> {
+  public async getUserNotifications(userId: string): Promise<any[]> {
+    const res = await this.getUserNotificationsDetailed(userId, { limit: 50, offset: 0 });
+    if (res.error) {
+      console.warn('[NotificationService] Falha ao consultar notificações no Supabase:', res.error);
+    }
+    return res.items;
+  }
+
+  /**
+   * Consulta a contagem real de notificações não lidas no Supabase com diagnóstico de erro
+   */
+  public async getUnreadCountDetailed(userId: string): Promise<{
+    count: number;
+    error?: string;
+    sessionExpired?: boolean;
+  }> {
     if (!isSupabaseConfigured || !userId) {
-      return 0;
+      return { count: 0 };
     }
 
     try {
@@ -435,22 +500,41 @@ class NotificationService {
         .eq('read', false);
 
       if (error) {
-        console.warn('[NotificationService] Erro ao buscar contagem de não lidas:', error.message);
-        return 0;
+        const expired = this.isSessionExpiredError(error);
+        return {
+          count: 0,
+          sessionExpired: expired,
+          error: error.message
+        };
       }
 
-      return count || 0;
-    } catch {
-      return 0;
+      return { count: count || 0 };
+    } catch (err: any) {
+      return { count: 0, error: err?.message || 'Erro de conexão' };
     }
   }
 
   /**
-   * Marca uma notificação como lida no Supabase
+   * Consulta a contagem real de notificações não lidas no Supabase
    */
-  public async markAsRead(notificationId: string, userId: string): Promise<boolean> {
+  public async getUnreadCount(userId: string): Promise<number> {
+    const res = await this.getUnreadCountDetailed(userId);
+    if (res.error) {
+      console.warn('[NotificationService] Erro ao buscar contagem de não lidas:', res.error);
+      return 0;
+    }
+    return res.count;
+  }
+
+  /**
+   * Marca uma notificação como lida no Supabase com diagnóstico detalhado
+   */
+  public async markAsReadDetailed(
+    notificationId: string,
+    userId: string
+  ): Promise<{ success: boolean; error?: string; sessionExpired?: boolean }> {
     if (!isSupabaseConfigured || !userId || !notificationId) {
-      return false;
+      return { success: false, error: 'Sessão inválida para atualizar notificação.' };
     }
 
     try {
@@ -461,28 +545,45 @@ class NotificationService {
         .eq('user_id', userId);
 
       if (error) {
-        console.error('[NotificationService] Erro ao marcar notificação como lida:', error.message);
-        return false;
+        const expired = this.isSessionExpiredError(error);
+        return {
+          success: false,
+          sessionExpired: expired,
+          error: expired
+            ? 'Sessão expirada ao marcar notificação como lida.'
+            : error.message || 'Falha ao atualizar status da notificação.'
+        };
       }
 
-      // Dispara evento para sincronizar cabeçalhos e telas
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('fatosbr_notifications_updated'));
       }
 
-      return true;
+      return { success: true };
     } catch (err: any) {
-      console.error('[NotificationService] Erro de rede ao marcar notificação:', err?.message);
-      return false;
+      return { success: false, error: err?.message || 'Erro de rede ao marcar notificação.' };
     }
   }
 
   /**
-   * Marca todas as notificações do usuário como lidas no Supabase
+   * Marca uma notificação como lida no Supabase
    */
-  public async markAllAsRead(userId: string): Promise<boolean> {
+  public async markAsRead(notificationId: string, userId: string): Promise<boolean> {
+    const res = await this.markAsReadDetailed(notificationId, userId);
+    if (!res.success && res.error) {
+      console.error('[NotificationService] Erro ao marcar notificação como lida:', res.error);
+    }
+    return res.success;
+  }
+
+  /**
+   * Marca todas as notificações do usuário como lidas no Supabase com diagnóstico detalhado
+   */
+  public async markAllAsReadDetailed(
+    userId: string
+  ): Promise<{ success: boolean; error?: string; sessionExpired?: boolean }> {
     if (!isSupabaseConfigured || !userId) {
-      return false;
+      return { success: false, error: 'Sessão inválida para atualizar notificações.' };
     }
 
     try {
@@ -493,18 +594,69 @@ class NotificationService {
         .eq('read', false);
 
       if (error) {
-        console.error('[NotificationService] Erro ao marcar todas as notificações:', error.message);
-        return false;
+        const expired = this.isSessionExpiredError(error);
+        return {
+          success: false,
+          sessionExpired: expired,
+          error: expired
+            ? 'Sessão expirada ao marcar notificações como lidas.'
+            : error.message || 'Falha ao atualizar notificações.'
+        };
       }
 
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('fatosbr_notifications_updated'));
       }
 
-      return true;
+      return { success: true };
     } catch (err: any) {
-      console.error('[NotificationService] Erro de rede ao marcar todas:', err?.message);
-      return false;
+      return { success: false, error: err?.message || 'Erro de rede ao marcar todas como lidas.' };
+    }
+  }
+
+  /**
+   * Marca todas as notificações do usuário como lidas no Supabase
+   */
+  public async markAllAsRead(userId: string): Promise<boolean> {
+    const res = await this.markAllAsReadDetailed(userId);
+    if (!res.success && res.error) {
+      console.error('[NotificationService] Erro ao marcar todas as notificações:', res.error);
+    }
+    return res.success;
+  }
+
+  /**
+   * Assina alterações em tempo real na tabela public.notifications restrita ao user_id autenticado
+   */
+  public subscribeToUserNotifications(userId: string, onChange: () => void): () => void {
+    if (!isSupabaseConfigured || !userId) {
+      return () => {};
+    }
+
+    try {
+      const channel = (supabase as any)
+        .channel(`user-notifs-${userId}`)
+        .on(
+          'postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'notifications',
+            filter: `user_id=eq.${userId}`
+          },
+          () => {
+            onChange();
+          }
+        )
+        .subscribe();
+
+      return () => {
+        try {
+          (supabase as any).removeChannel(channel);
+        } catch {}
+      };
+    } catch {
+      return () => {};
     }
   }
 }

@@ -848,8 +848,13 @@ export default function App() {
         }
       });
     } else {
+      setUnreadCount(0);
+      setCurrentUserAvatar(null);
       try {
         localStorage.removeItem('fatosbr_session_active');
+        localStorage.removeItem('sinal_user_profile');
+        localStorage.removeItem('sinal_briefing_subscriber_email');
+        localStorage.removeItem('sinal_notif_settings');
       } catch {}
     }
   };
@@ -968,21 +973,26 @@ export default function App() {
 
   // Sincronização em tempo real do contador de notificações não lidas
   useEffect(() => {
+    setUnreadCount(0);
+
     if (!currentUser?.id) {
-      setUnreadCount(0);
       return;
     }
 
+    let cancelled = false;
     const syncUnread = async () => {
       try {
-        const count = await notificationService.getUnreadCount(currentUser.id);
-        setUnreadCount(count);
-      } catch {
-        setUnreadCount(0);
-      }
+        const res = await notificationService.getUnreadCountDetailed(currentUser.id);
+        if (cancelled) return;
+        if (!res.error) {
+          setUnreadCount(res.count);
+        } else if (res.sessionExpired) {
+          setUnreadCount(0);
+        }
+      } catch {}
     };
 
-    // 1. Tentar ler do cache privado do usuário para 0ms de layout shift
+    // 1. Hidratação instantânea do cache privado deste usuário
     try {
       const cacheKey = notificationService.getUserCacheKey(currentUser.id);
       const saved = localStorage.getItem(cacheKey);
@@ -998,14 +1008,33 @@ export default function App() {
     syncUnread();
 
     const handleNotifsChanged = () => {
-      syncUnread();
+      void syncUnread();
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void syncUnread();
+      }
     };
 
     window.addEventListener('fatosbr_notifications_updated', handleNotifsChanged);
     window.addEventListener('storage', handleNotifsChanged);
+    window.addEventListener('focus', handleNotifsChanged);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    // 3. Realtime leve escopo exclusivo do usuário (sem polling redundante)
+    const unsubscribeRealtime = notificationService.subscribeToUserNotifications(
+      currentUser.id,
+      handleNotifsChanged
+    );
+
     return () => {
+      cancelled = true;
       window.removeEventListener('fatosbr_notifications_updated', handleNotifsChanged);
       window.removeEventListener('storage', handleNotifsChanged);
+      window.removeEventListener('focus', handleNotifsChanged);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      unsubscribeRealtime();
     };
   }, [currentUser?.id]);
   const [externalSearchFailed, setExternalSearchFailed] = useState<string | null>(null);
@@ -1295,9 +1324,14 @@ export default function App() {
             <button
               type="button"
               onClick={async () => {
+                const loggedOutId = currentUser?.id;
                 setProfileLoadError(null);
                 await authService.signOut();
-                setCurrentUser(null);
+                if (loggedOutId) {
+                  notificationService.clearUserCache(loggedOutId);
+                  briefingService.clearUserCache(loggedOutId);
+                }
+                handleUserSession(null);
                 setCurrentNav('login');
               }}
               className="w-full min-h-[44px] py-2.5 px-4 bg-transparent border border-zinc-800 hover:border-zinc-700 text-zinc-300 hover:text-white font-medium text-xs rounded-2xl transition cursor-pointer"
@@ -1939,6 +1973,8 @@ export default function App() {
               currentUser={currentUser}
               onOpenEvent={(ev) => handleOpenEventDetail(ev)}
               onOpenEntity={(ent) => setActiveEntityModal(ent)}
+              onOpenBriefing={() => setCurrentNav('briefings')}
+              onRequireAuth={() => setIsAuthModalOpen(true)}
               onBack={() => setCurrentNav('home')}
             />
           </div>
@@ -2052,17 +2088,14 @@ export default function App() {
               onLogout={async () => {
                 const loggedOutId = currentUser?.id;
                 await authService.signOut();
-                setCurrentUser(null);
-                setCurrentUserAvatar(null);
-                setUnreadCount(0);
                 if (loggedOutId) {
                   notificationService.clearUserCache(loggedOutId);
                   briefingService.clearUserCache(loggedOutId);
+                  try {
+                    localStorage.removeItem(`fatosbr_briefing_prefs_${loggedOutId}`);
+                  } catch {}
                 }
-                try {
-                  localStorage.removeItem('fatosbr_session_active');
-                  localStorage.removeItem('sinal_user_profile');
-                } catch {}
+                handleUserSession(null);
                 setCurrentNav('landing');
                 if (typeof window !== 'undefined') {
                   window.scrollTo({ top: 0, behavior: 'smooth' });

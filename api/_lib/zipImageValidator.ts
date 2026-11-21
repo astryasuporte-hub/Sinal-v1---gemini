@@ -334,7 +334,7 @@ function normalizeTargetType(rawType: any, sectionFallback?: ManifestTargetType)
 }
 
 function normalizeZipRelativePath(rawFilePath: string, rootPrefix: string): string {
-  const cleaned = rawFilePath.replace(/^\.\//, '');
+  const cleaned = rawFilePath.replace(/^\.\//, '').replace(/\/{2,}/g, '/');
   const safeRelative = assertSafeZipEntryPath(cleaned);
   if (rootPrefix && !safeRelative.startsWith(`${rootPrefix}/`)) {
     return `${rootPrefix}/${safeRelative}`;
@@ -342,8 +342,23 @@ function normalizeZipRelativePath(rawFilePath: string, rootPrefix: string): stri
   return safeRelative;
 }
 
+function inferTypeFromZipPath(zipPath: string): ManifestTargetType | null {
+  const lower = zipPath.toLowerCase();
+  const segments = lower.split('/');
+  if (segments.some((s) => ['companies', 'company', 'empresas', 'empresa', 'organizations', 'orgs'].includes(s))) {
+    return 'COMPANY';
+  }
+  if (segments.some((s) => ['people', 'person', 'pessoas', 'pessoa', 'authors', 'personalities'].includes(s))) {
+    return 'PERSON';
+  }
+  if (segments.some((s) => ['sources', 'source', 'fontes', 'fonte', 'news_sources', 'vehicles'].includes(s))) {
+    return 'SOURCE';
+  }
+  return null;
+}
+
 /**
- * Faz o parse seguro de manifest.json suportando formatos planos ou agrupados.
+ * Faz o parse seguro de manifest.json suportando formatos planos, agrupados ou padrões FatosBR.
  */
 export function parseImageManifest(
   manifestJsonText: string,
@@ -361,6 +376,22 @@ export function parseImageManifest(
     throw new Error('MANIFEST_INVALID: manifest.json não é um JSON válido.');
   }
 
+  // Suporta envelope { manifest: ... } ou { data: ... }
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    if (parsed.manifest && typeof parsed.manifest === 'object') {
+      parsed = parsed.manifest;
+    } else if (
+      parsed.data &&
+      typeof parsed.data === 'object' &&
+      !parsed.items &&
+      !parsed.entries &&
+      !parsed.companies &&
+      !parsed.empresas
+    ) {
+      parsed = parsed.data;
+    }
+  }
+
   const rawEntries: Array<{ item: any; fallbackType?: ManifestTargetType }> = [];
 
   if (Array.isArray(parsed)) {
@@ -368,20 +399,30 @@ export function parseImageManifest(
       rawEntries.push({ item });
     }
   } else if (parsed && typeof parsed === 'object') {
-    const listCandidates = parsed.items || parsed.entries || parsed.assets || parsed.files || parsed.images;
+    const listCandidates =
+      parsed.items ||
+      parsed.entries ||
+      parsed.assets ||
+      parsed.files ||
+      parsed.images ||
+      parsed.records ||
+      parsed.entities;
     if (Array.isArray(listCandidates)) {
       for (const item of listCandidates) {
         rawEntries.push({ item });
       }
     }
-    if (Array.isArray(parsed.companies)) {
-      for (const item of parsed.companies) rawEntries.push({ item, fallbackType: 'COMPANY' });
+    const companyGroups = parsed.companies || parsed.empresas;
+    if (Array.isArray(companyGroups)) {
+      for (const item of companyGroups) rawEntries.push({ item, fallbackType: 'COMPANY' });
     }
-    if (Array.isArray(parsed.people)) {
-      for (const item of parsed.people) rawEntries.push({ item, fallbackType: 'PERSON' });
+    const peopleGroups = parsed.people || parsed.pessoas;
+    if (Array.isArray(peopleGroups)) {
+      for (const item of peopleGroups) rawEntries.push({ item, fallbackType: 'PERSON' });
     }
-    if (Array.isArray(parsed.sources)) {
-      for (const item of parsed.sources) rawEntries.push({ item, fallbackType: 'SOURCE' });
+    const sourceGroups = parsed.sources || parsed.fontes || parsed.news_sources;
+    if (Array.isArray(sourceGroups)) {
+      for (const item of sourceGroups) rawEntries.push({ item, fallbackType: 'SOURCE' });
     }
   }
 
@@ -398,25 +439,46 @@ export function parseImageManifest(
       item.file ??
       item.path ??
       item.filePath ??
+      item.file_path ??
       item.filename ??
+      item.file_name ??
       item.image ??
+      item.image_path ??
       item.asset ??
       item.logo ??
+      item.logo_path ??
+      item.src ??
       '';
 
-    const targetType = normalizeTargetType(
-      item.type ?? item.entityType ?? item.targetType ?? item.kind ?? item.category,
-      fallbackType
-    );
-
-    if (!rawFile || !targetType) {
+    if (!rawFile) {
       return;
     }
 
     const zipEntryPath = normalizeZipRelativePath(String(rawFile).trim(), rootPrefix);
+    const inferredFromPath = inferTypeFromZipPath(zipEntryPath) || undefined;
+
+    const targetType = normalizeTargetType(
+      item.type ??
+        item.entityType ??
+        item.entity_type ??
+        item.targetType ??
+        item.target_type ??
+        item.kind ??
+        item.category,
+      fallbackType || inferredFromPath
+    );
+
+    if (!targetType) {
+      return;
+    }
 
     const rawClassification = String(
-      item.classification ?? item.reviewStatus ?? item.status ?? item.approval ?? 'approved'
+      item.classification ??
+        item.reviewStatus ??
+        item.review_status ??
+        item.status ??
+        item.approval ??
+        'approved'
     )
       .trim()
       .toLowerCase();
@@ -425,20 +487,25 @@ export function parseImageManifest(
 
     const requiresBrandReview =
       rawClassification === 'requires_brand_review' ||
+      rawClassification === 'brand_review' ||
+      rawClassification === 'pending_brand_review' ||
       item.requires_brand_review === true ||
+      item.requires_brand_review === 'true' ||
       item.requiresBrandReview === true ||
+      item.brand_review_required === true ||
       flagArray.includes('requires_brand_review');
+
+    const name =
+      item.name ?? item.title ?? item.label ?? item.entity_name ?? item.source_name;
+    const slug = item.slug ?? item.entity_slug ?? item.source_slug;
+    const domain = item.domain ?? item.website ?? item.url ?? item.host ?? item.source_domain;
 
     entries.push({
       index: idx,
       targetType,
-      name: item.name ? String(item.name).trim() : item.title ? String(item.title).trim() : undefined,
-      slug: item.slug ? String(item.slug).trim() : undefined,
-      domain: item.domain
-        ? String(item.domain).trim()
-        : item.website
-        ? String(item.website).trim()
-        : undefined,
+      name: name ? String(name).trim() : undefined,
+      slug: slug ? String(slug).trim() : undefined,
+      domain: domain ? String(domain).trim() : undefined,
       zipEntryPath,
       classification: requiresBrandReview ? 'requires_brand_review' : rawClassification || 'approved',
       requiresBrandReview,

@@ -267,11 +267,35 @@ export const userService = {
   },
 
   /**
-   * Carrega preferências do usuário (`user_preferences` com fallback seguro para `user_settings`)
+   * Detecta erro de sessão expirada ou token JWT inválido do Supabase
    */
-  async getUserPreferences(userId: string) {
+  isSessionExpiredError(err: any): boolean {
+    if (!err) return false;
+    const msg = String(err?.message || '').toLowerCase();
+    const code = String(err?.code || '').toUpperCase();
+    const status = Number(err?.status || 0);
+    return (
+      status === 401 ||
+      code === 'PGRST301' ||
+      msg.includes('jwt expired') ||
+      msg.includes('invalid jwt') ||
+      msg.includes('session not found') ||
+      msg.includes('refresh_token')
+    );
+  },
+
+  /**
+   * Carrega preferências detalhadas do usuário (`user_preferences` / `user_settings`)
+   * diferenciando ausência de registro de falha real de rede/sessão expirada.
+   */
+  async getUserPreferencesDetailed(userId: string): Promise<{
+    data: any | null;
+    error?: string;
+    sessionExpired?: boolean;
+  }> {
     const { client, configured } = getDb();
-    if (!configured || !userId) return null;
+    if (!configured || !userId) return { data: null };
+
     try {
       const { data, error } = await client
         .from('user_preferences')
@@ -279,22 +303,152 @@ export const userService = {
         .eq('id', userId)
         .maybeSingle();
 
-      if (error) {
-        if (isMissingRelationError(error)) {
+      if (!error) {
+        if (data) return { data };
+        // Caso user_preferences não tenha linha ainda, verifica se há registro legado em user_settings
+        try {
           const { data: settingsData, error: settingsErr } = await client
             .from('user_settings')
             .select('*')
             .eq('user_id', userId)
             .maybeSingle();
-          if (!settingsErr) return settingsData;
-        }
-        console.warn('[UserService] Falha ao carregar preferências do Supabase:', error.message);
-        return null;
+          if (!settingsErr && settingsData) return { data: settingsData };
+        } catch {}
+        return { data: null };
       }
-      return data;
+
+      if (this.isSessionExpiredError(error)) {
+        return { data: null, error: 'Sua sessão expirou. Faça login novamente.', sessionExpired: true };
+      }
+
+      if (isMissingRelationError(error)) {
+        const { data: settingsData, error: settingsErr } = await client
+          .from('user_settings')
+          .select('*')
+          .eq('user_id', userId)
+          .maybeSingle();
+
+        if (!settingsErr) return { data: settingsData || null };
+        if (this.isSessionExpiredError(settingsErr)) {
+          return { data: null, error: 'Sua sessão expirou. Faça login novamente.', sessionExpired: true };
+        }
+        return { data: null, error: settingsErr.message || 'Falha ao carregar configurações do usuário.' };
+      }
+
+      return { data: null, error: error.message || 'Falha ao carregar preferências do Supabase.' };
     } catch (err: any) {
-      console.warn('[UserService] Erro na consulta de preferências:', err?.message);
-      return null;
+      return { data: null, error: err?.message || 'Erro de conexão ao consultar preferências.' };
+    }
+  },
+
+  /**
+   * Carrega preferências do usuário (`user_preferences` com fallback seguro para `user_settings`)
+   */
+  async getUserPreferences(userId: string) {
+    const res = await this.getUserPreferencesDetailed(userId);
+    if (res.error) {
+      console.warn('[UserService] Falha ao carregar preferências do Supabase:', res.error);
+    }
+    return res.data;
+  },
+
+  /**
+   * Atualiza preferências no Supabase retornando diagnóstico estruturado e timestamp real.
+   */
+  async updateUserPreferencesDetailed(
+    userId: string,
+    updates: {
+      email_morning_briefing?: boolean;
+      email_evening_briefing?: boolean;
+      email_breaking_alerts?: boolean;
+      weekend_edition?: boolean;
+      briefing_email?: string;
+      morning_time?: string;
+      evening_time?: string;
+      timezone?: string;
+      notification_settings?: Record<string, any>;
+    }
+  ): Promise<{ success: boolean; error?: string; sessionExpired?: boolean; updatedAt?: string }> {
+    const { client, configured } = getDb();
+    if (!configured || !userId) {
+      return { success: false, error: 'Sessão ou conexão Supabase indisponível.' };
+    }
+
+    const nowIso = new Date().toISOString();
+
+    const stripExtendedCols = (obj: Record<string, any>) => {
+      const { notification_settings: _ns, morning_time: _mt, evening_time: _et, timezone: _tz, ...rest } = obj;
+      return rest;
+    };
+
+    try {
+      const payload = {
+        id: userId,
+        ...updates,
+        updated_at: nowIso,
+      };
+
+      const { error } = await client
+        .from('user_preferences')
+        .upsert(payload, { onConflict: 'id' });
+
+      if (!error) {
+        return { success: true, updatedAt: nowIso };
+      }
+
+      if (this.isSessionExpiredError(error)) {
+        return { success: false, sessionExpired: true, error: 'Sua sessão expirou. Faça login novamente.' };
+      }
+
+      if (isMissingColumnError(error)) {
+        const { error: baseErr } = await client
+          .from('user_preferences')
+          .upsert({ id: userId, ...stripExtendedCols(updates), updated_at: nowIso }, { onConflict: 'id' });
+
+        if (!baseErr) return { success: true, updatedAt: nowIso };
+        if (!isMissingRelationError(baseErr)) {
+          return {
+            success: false,
+            sessionExpired: this.isSessionExpiredError(baseErr),
+            error: baseErr.message || 'Falha ao salvar preferências no banco.'
+          };
+        }
+      }
+
+      if (isMissingRelationError(error)) {
+        const settingsPayload = {
+          user_id: userId,
+          ...updates,
+          updated_at: nowIso,
+        };
+        const { error: settingsErr } = await client
+          .from('user_settings')
+          .upsert(settingsPayload, { onConflict: 'user_id' });
+
+        if (!settingsErr) return { success: true, updatedAt: nowIso };
+
+        if (isMissingColumnError(settingsErr)) {
+          const { error: settingsBaseErr } = await client
+            .from('user_settings')
+            .upsert({ user_id: userId, ...stripExtendedCols(updates), updated_at: nowIso }, { onConflict: 'user_id' });
+          if (!settingsBaseErr) return { success: true, updatedAt: nowIso };
+          return {
+            success: false,
+            sessionExpired: this.isSessionExpiredError(settingsBaseErr),
+            error: settingsBaseErr.message || 'Falha ao salvar em user_settings.'
+          };
+        }
+
+        return {
+          success: false,
+          sessionExpired: this.isSessionExpiredError(settingsErr),
+          error: settingsErr.message || 'Falha ao salvar configurações do usuário.'
+        };
+      }
+
+      return { success: false, error: error.message || 'Falha ao persistir preferências no Supabase.' };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Erro de conexão ao salvar preferências.' };
     }
   },
 
@@ -312,46 +466,14 @@ export const userService = {
       morning_time?: string;
       evening_time?: string;
       timezone?: string;
+      notification_settings?: Record<string, any>;
     }
   ): Promise<boolean> {
-    const { client, configured } = getDb();
-    if (!configured || !userId) return false;
-    try {
-      const nowIso = new Date().toISOString();
-      const { error } = await client
-        .from('user_preferences')
-        .upsert(
-          {
-            id: userId,
-            ...updates,
-            updated_at: nowIso,
-          },
-          { onConflict: 'id' }
-        );
-
-      if (error) {
-        if (isMissingRelationError(error)) {
-          const { error: settingsErr } = await client
-            .from('user_settings')
-            .upsert(
-              {
-                user_id: userId,
-                ...updates,
-                updated_at: nowIso,
-              },
-              { onConflict: 'user_id' }
-            );
-          return !settingsErr;
-        }
-        console.error('[UserService] Erro ao persistir preferências no Supabase:', error.message);
-        return false;
-      }
-
-      return true;
-    } catch (err: any) {
-      console.error('[UserService] Erro de rede ao persistir preferências:', err?.message);
-      return false;
+    const res = await this.updateUserPreferencesDetailed(userId, updates);
+    if (!res.success && res.error) {
+      console.error('[UserService] Erro ao persistir preferências no Supabase:', res.error);
     }
+    return res.success;
   },
 
   /**

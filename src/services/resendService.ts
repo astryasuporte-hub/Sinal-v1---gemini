@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { supabase, isSupabaseConfigured } from '../lib/supabase';
+
 export interface ResendWebhookItem {
   id: string;
   type: 'delivered' | 'opened' | 'clicked' | 'bounced' | 'complained' | string;
@@ -64,6 +66,7 @@ export interface ResendStatusResponse {
 
 export interface ResendSendResult {
   success: boolean;
+  statusCode?: number;
   id?: string;
   recipient?: string;
   template?: string;
@@ -73,9 +76,21 @@ export interface ResendSendResult {
 }
 
 const STORAGE_EMAIL_KEY = 'sinal_briefing_subscriber_email';
-const DEFAULT_EMAIL = 'astryasuporte@gmail.com';
 
 class ResendService {
+  private async getAuthHeaders(): Promise<Record<string, string>> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (!isSupabaseConfigured) return headers;
+    try {
+      const { data } = await supabase.auth.getSession();
+      const token = data?.session?.access_token;
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
+      }
+    } catch {}
+    return headers;
+  }
+
   /**
    * Consulta o endpoint do servidor para verificar a integridade da chave do Resend
    */
@@ -109,11 +124,15 @@ class ResendService {
    * Dispara um e-mail de teste operacional utilizando o template externo test_email.html
    */
   async sendTestEmail(toEmail?: string): Promise<ResendSendResult> {
-    const recipient = toEmail || this.getStoredSubscriberEmail();
+    const recipient = (toEmail || this.getStoredSubscriberEmail()).trim();
+    if (!recipient) {
+      return { success: false, recipient: '', error: 'Informe um e-mail válido para teste.' };
+    }
     try {
+      const headers = await this.getAuthHeaders();
       const res = await fetch('/api/resend/send', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           to: recipient,
           template: 'test_email',
@@ -126,6 +145,7 @@ class ResendService {
       if (res.ok && data.success) {
         return {
           success: true,
+          statusCode: res.status,
           id: data.id,
           recipient,
           template: 'test_email',
@@ -135,8 +155,9 @@ class ResendService {
       }
       return {
         success: false,
+        statusCode: res.status,
         recipient,
-        error: data.error || data.message || `Falha no envio (HTTP ${res.status})`
+        error: data.message || data.error || `Falha no envio (HTTP ${res.status})`
       };
     } catch (err: any) {
       return {
@@ -151,8 +172,11 @@ class ResendService {
    * Dispara um Briefing Executivo utilizando o template externo briefing.html
    */
   async sendBriefing(toEmail: string, title: string, summary: string, rawEventsSummary?: string): Promise<ResendSendResult> {
-    const recipient = toEmail || this.getStoredSubscriberEmail();
-    
+    const recipient = (toEmail || this.getStoredSubscriberEmail()).trim();
+    if (!recipient) {
+      return { success: false, recipient: '', error: 'Informe um e-mail válido para envio.' };
+    }
+
     // Constrói blocos elegantes em HTML para a síntese dos acontecimentos
     let eventsHtml = '';
     if (rawEventsSummary) {
@@ -168,9 +192,10 @@ class ResendService {
     }
 
     try {
+      const headers = await this.getAuthHeaders();
       const res = await fetch('/api/resend/send', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           to: recipient,
           template: 'briefing',
@@ -185,6 +210,7 @@ class ResendService {
       if (res.ok && data.success) {
         return {
           success: true,
+          statusCode: res.status,
           id: data.id,
           recipient,
           template: 'briefing',
@@ -194,8 +220,9 @@ class ResendService {
       }
       return {
         success: false,
+        statusCode: res.status,
         recipient,
-        error: data.error || data.message || `Falha no envio (HTTP ${res.status})`
+        error: data.message || data.error || `Falha no envio (HTTP ${res.status})`
       };
     } catch (err: any) {
       return {
@@ -230,15 +257,17 @@ class ResendService {
     events?: any[];
   }): Promise<ResendSendResult> {
     try {
+      const headers = await this.getAuthHeaders();
       const res = await fetch('/api/resend/send', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(params)
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.success) {
         return {
           success: true,
+          statusCode: res.status,
           id: data.id,
           recipient: params.to,
           message: data.message || `E-mail enviado com sucesso para ${params.to}`
@@ -246,8 +275,9 @@ class ResendService {
       }
       return {
         success: false,
+        statusCode: res.status,
         recipient: params.to,
-        error: data.error || data.message || `Falha no envio (HTTP ${res.status})`
+        error: data.message || data.error || `Falha no envio (HTTP ${res.status})`
       };
     } catch (err: any) {
       return {
@@ -319,9 +349,10 @@ class ResendService {
       : undefined;
 
     try {
+      const headers = await this.getAuthHeaders();
       const res = await fetch('/api/resend/send', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           to: recipient,
           template: 'briefing',
@@ -330,7 +361,7 @@ class ResendService {
           customTitle: options.customTitle,
           customSubtitle: options.customSubtitle,
           events: mappedEvents,
-          text: `Sinal • ${editionTitle}\n${options.customSubtitle || 'Seu resumo com os principais acontecimentos apurados pela Sinal.'}`
+          text: `FatosBR • ${editionTitle}\n${options.customSubtitle || 'Seu resumo com os principais acontecimentos apurados pela FatosBR.'}`
         })
       });
 
@@ -338,6 +369,7 @@ class ResendService {
       if (res.ok && data.success) {
         return {
           success: true,
+          statusCode: res.status,
           id: data.id,
           recipient,
           template: 'briefing',
@@ -347,8 +379,9 @@ class ResendService {
       }
       return {
         success: false,
+        statusCode: res.status,
         recipient,
-        error: data.error || data.message || `Falha no envio (HTTP ${res.status})`
+        error: data.message || data.error || `Falha no envio (HTTP ${res.status})`
       };
     } catch (err: any) {
       return {
@@ -360,7 +393,7 @@ class ResendService {
   }
 
   /**
-   * Dispara um teste do Morning Briefing das 07h00 utilizando a publicação editorial Sinal
+   * Dispara um teste do Morning Briefing das 07h00 utilizando a publicação editorial FatosBR
    */
   async sendMorningBriefingTest(toEmail?: string): Promise<ResendSendResult> {
     return this.sendEditorialBriefing({
@@ -372,14 +405,18 @@ class ResendService {
   getStoredSubscriberEmail(): string {
     try {
       const saved = localStorage.getItem(STORAGE_EMAIL_KEY);
-      if (saved && saved.includes('@') && !saved.toLowerCase().includes('yleaopvpy01')) return saved;
+      if (saved && saved.includes('@')) return saved;
     } catch {}
-    return DEFAULT_EMAIL;
+    return '';
   }
 
   setStoredSubscriberEmail(email: string): void {
     try {
-      localStorage.setItem(STORAGE_EMAIL_KEY, email);
+      if (email) {
+        localStorage.setItem(STORAGE_EMAIL_KEY, email);
+      } else {
+        localStorage.removeItem(STORAGE_EMAIL_KEY);
+      }
     } catch {}
   }
 

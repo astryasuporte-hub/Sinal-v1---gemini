@@ -4,23 +4,27 @@
  *
  * Handler Admin: Biblioteca de Imagens & Importação em Lote via ZIP
  *
- * Rotas suportadas (todas protegidas por verifyAdminRequest):
+ * Segurança:
+ * - Exige sessão Supabase válida e autorização administrativa real via internal.user_roles / app_metadata.
+ * - Usuários comuns recebem HTTP 403 e requisições sem sessão recebem HTTP 401.
+ * - ZIPs e arquivos temporários usam exclusivamente o bucket privado "brand-assets-staging".
+ * - Imagens aprovadas e permanentes são gravadas exclusivamente em "brand-assets".
+ *
+ * Rotas suportadas:
  * - GET  /api/admin/image-library?action=history
- * - POST /api/admin/image-library?action=init-upload  (gera Signed Upload URL para pacotes >2.5MB)
- * - POST /api/admin/image-library?action=preview      (dry-run: valida ZIP + manifest + matching)
- * - POST /api/admin/image-library?action=apply        (confirma lote: upload Storage + update DB)
- * - POST /api/admin/image-library?action=reprocess    (reprocessa apenas itens FAILED do lote)
+ * - POST /api/admin/image-library?action=init-upload
+ * - POST /api/admin/image-library?action=preview
+ * - POST /api/admin/image-library?action=apply
+ * - POST /api/admin/image-library?action=reprocess
  */
 
 import crypto from 'crypto';
 import { sendJson, setCorsHeaders } from '../../common.js';
-import { verifyAdminRequest } from '../../adminAuth.js';
+import { verifySupabaseAdminSession } from '../../adminAuth.js';
 import { getServerSupabase } from '../../db.js';
 import {
   applyOrReprocessImageBatch,
-  BRAND_ASSETS_BUCKET,
-  ensureBrandAssetsBucket,
-  extractAdminActorFromRequest,
+  BRAND_ASSETS_STAGING_BUCKET,
   listImageImportHistory,
   previewImageLibraryZip
 } from '../../imageLibraryService.js';
@@ -70,35 +74,6 @@ function decodeZipBase64(rawBase64: string): Buffer {
   return Buffer.from(clean.trim(), 'base64');
 }
 
-async function resolveAdminAuth(req: any): Promise<boolean> {
-  if (await verifyAdminRequest(req)) return true;
-
-  // Fallback seguro quando DATABASE_URL não está configurado mas SUPABASE_SERVICE_ROLE_KEY sim
-  const authHeader = String(req?.headers?.authorization || '');
-  if (!authHeader.startsWith('Bearer ')) return false;
-  const token = authHeader.slice(7).trim();
-  if (!token) return false;
-
-  try {
-    const supabase = getServerSupabase();
-    const { data, error } = await supabase.auth.getUser(token);
-    if (error || !data?.user) return false;
-    const appMeta = data.user.app_metadata || {};
-    if (appMeta.is_admin === true || appMeta.role === 'admin' || appMeta.role === 'super_admin') {
-      return true;
-    }
-    const { data: roleRow } = await supabase
-      .from('user_roles')
-      .select('role')
-      .eq('user_id', data.user.id)
-      .in('role', ['admin', 'super_admin'])
-      .maybeSingle();
-    return Boolean(roleRow);
-  } catch {
-    return false;
-  }
-}
-
 export default async function imageLibraryHandler(req: any, res: any) {
   setCorsHeaders(res);
 
@@ -108,12 +83,15 @@ export default async function imageLibraryHandler(req: any, res: any) {
     return;
   }
 
-  const isAuthorized = await resolveAdminAuth(req);
-  if (!isAuthorized) {
-    return sendJson(res, 401, {
+  const adminSession = await verifySupabaseAdminSession(req);
+  if (!adminSession.authorized) {
+    const isForbidden = adminSession.statusCode === 403;
+    return sendJson(res, adminSession.statusCode, {
       success: false,
-      error: 'UNAUTHORIZED_ADMIN',
-      message: 'Acesso negado. Apenas administradores autenticados podem importar bibliotecas de imagens.'
+      error: isForbidden ? 'FORBIDDEN_ADMIN' : 'UNAUTHORIZED_SESSION',
+      message: isForbidden
+        ? 'Acesso negado. Seu usuário não possui privilégios administrativos em internal.user_roles.'
+        : 'Sessão Supabase válida obrigatória para acessar a biblioteca de imagens.'
     });
   }
 
@@ -133,7 +111,7 @@ export default async function imageLibraryHandler(req: any, res: any) {
 
     const body = await readBoundedJsonBody(req);
 
-    // 1. Signed Upload URL para pacotes grandes (>2.5MB) evitando limite de 4.5MB da Vercel
+    // 1. Signed Upload URL para pacotes grandes (>2.5MB) no bucket privado brand-assets-staging
     if (action === 'init-upload') {
       const fileName = String(body.fileName || 'package.zip').replace(/[^a-zA-Z0-9._-]/g, '_');
       const byteSize = Number(body.fileSizeBytes || 0);
@@ -145,10 +123,9 @@ export default async function imageLibraryHandler(req: any, res: any) {
       }
 
       const supabase = getServerSupabase();
-      await ensureBrandAssetsBucket();
       const storagePath = `staging-zips/${crypto.randomUUID()}-${fileName}`;
       const { data, error } = await supabase.storage
-        .from(BRAND_ASSETS_BUCKET)
+        .from(BRAND_ASSETS_STAGING_BUCKET)
         .createSignedUploadUrl(storagePath);
 
       if (error || !data?.signedUrl) {
@@ -166,7 +143,7 @@ export default async function imageLibraryHandler(req: any, res: any) {
       });
     }
 
-    // 2. Preview / Dry-Run de ZIP
+    // 2. Preview / Dry-Run de ZIP (somente staging privado em brand-assets-staging)
     if (action === 'preview') {
       const fileName = String(body.fileName || 'brand-library.zip').trim();
       const storagePath = body.storagePath ? String(body.storagePath).trim() : '';
@@ -178,12 +155,12 @@ export default async function imageLibraryHandler(req: any, res: any) {
         }
         const supabase = getServerSupabase();
         const { data: zipBlob, error: dlErr } = await supabase.storage
-          .from(BRAND_ASSETS_BUCKET)
+          .from(BRAND_ASSETS_STAGING_BUCKET)
           .download(storagePath);
 
-        // Limpa ZIP temporário após download
+        // Limpa ZIP temporário de brand-assets-staging após leitura
         try {
-          await supabase.storage.from(BRAND_ASSETS_BUCKET).remove([storagePath]);
+          await supabase.storage.from(BRAND_ASSETS_STAGING_BUCKET).remove([storagePath]);
         } catch {}
 
         if (dlErr || !zipBlob) {
@@ -204,11 +181,13 @@ export default async function imageLibraryHandler(req: any, res: any) {
         zipBuffer = decodeZipBase64(rawBase64);
       }
 
-      const actor = await extractAdminActorFromRequest(req);
       const result = await previewImageLibraryZip({
         zipBuffer,
         fileName,
-        actor
+        actor: {
+          userId: adminSession.userId || null,
+          email: adminSession.email || null
+        }
       });
 
       if (!result.success) {
@@ -225,7 +204,7 @@ export default async function imageLibraryHandler(req: any, res: any) {
       });
     }
 
-    // 3. Confirmação explícita & aplicação em lote
+    // 3. Confirmação explícita & aplicação permanente em brand-assets + DB
     if (action === 'apply') {
       const batchId = String(body.batchId || '').trim();
       const confirmed = body.confirmed === true;

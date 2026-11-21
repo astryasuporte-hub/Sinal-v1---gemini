@@ -25,7 +25,8 @@ import {
   ValidatedZipImageAsset
 } from './zipImageValidator.js';
 
-export const BRAND_ASSETS_BUCKET = 'brand-assets';
+export const BRAND_ASSETS_BUCKET = 'brand-assets'; // Público: somente imagens aprovadas e permanentes
+export const BRAND_ASSETS_STAGING_BUCKET = 'brand-assets-staging'; // Privado: ZIPs e imagens temporárias de staging
 
 export interface CatalogEntityRecord {
   id: string;
@@ -313,24 +314,7 @@ export async function fetchCatalogForMatching(): Promise<{
   };
 }
 
-/**
- * Garante a existência do bucket brand-assets no Supabase Storage.
- */
-export async function ensureBrandAssetsBucket(): Promise<void> {
-  const supabase = getServerSupabase();
-  try {
-    const { data, error } = await supabase.storage.getBucket(BRAND_ASSETS_BUCKET);
-    if (error || !data) {
-      await supabase.storage.createBucket(BRAND_ASSETS_BUCKET, {
-        public: true,
-        fileSizeLimit: 5 * 1024 * 1024,
-        allowedMimeTypes: ['image/png', 'image/jpeg', 'image/webp', 'image/svg+xml']
-      });
-    }
-  } catch (err: any) {
-    console.warn('[ImageLibrary] Aviso ao verificar bucket brand-assets:', err?.message);
-  }
-}
+// Buckets 'brand-assets' (público) e 'brand-assets-staging' (privado) já estão provisionados no Supabase Storage.
 
 function buildTinyPreviewDataUrl(asset?: ValidatedZipImageAsset): string | null {
   if (!asset) return null;
@@ -669,7 +653,7 @@ async function updateTargetRecordImageUrl(
   if (targetType === 'SOURCE') {
     const { error } = await supabase
       .from('news_sources')
-      .update({ logo_url: publicUrl, updated_at: new Date().toISOString() })
+      .update({ logo_url: publicUrl })
       .eq('id', targetId);
     if (error) throw new Error(error.message);
     return;
@@ -694,7 +678,6 @@ export async function uploadPermanentBrandAsset(params: {
   extension: string;
 }): Promise<{ storagePath: string; publicUrl: string }> {
   const supabase = getServerSupabase();
-  await ensureBrandAssetsBucket();
 
   const folder =
     params.targetType === 'COMPANY'
@@ -751,7 +734,6 @@ export async function previewImageLibraryZip(params: {
   const { entities, sources } = await fetchCatalogForMatching();
   const batchId = crypto.randomUUID();
   const supabase = getServerSupabase();
-  await ensureBrandAssetsBucket();
 
   const itemsForDb: Array<any> = [];
   const itemsForResponse: ImageImportPreviewItem[] = [];
@@ -792,10 +774,10 @@ export async function previewImageLibraryZip(params: {
       status = 'APPROVED';
       approvedCount++;
 
-      // Faz staging seguro no bucket privado/temporário apenas para itens aprovados
+      // Faz staging seguro exclusivamente no bucket privado "brand-assets-staging"
       const stagePath = `staging/${batchId}/${itemId}.${asset.extension}`;
       const { error: stageErr } = await supabase.storage
-        .from(BRAND_ASSETS_BUCKET)
+        .from(BRAND_ASSETS_STAGING_BUCKET)
         .upload(stagePath, asset.buffer, {
           contentType: asset.mimeType,
           upsert: true
@@ -804,7 +786,6 @@ export async function previewImageLibraryZip(params: {
       if (!stageErr) {
         stagedStoragePath = stagePath;
       } else {
-        // Ainda permite aplicar caso o front reenvie o ZIP na confirmação, ou marca erro visível
         stagedStoragePath = null;
       }
     }
@@ -1007,7 +988,7 @@ export async function applyOrReprocessImageBatch(params: {
 
       if (item.staged_storage_path) {
         const { data: blobData, error: dlErr } = await supabase.storage
-          .from(BRAND_ASSETS_BUCKET)
+          .from(BRAND_ASSETS_STAGING_BUCKET)
           .download(item.staged_storage_path);
         if (!dlErr && blobData) {
           const ab = await blobData.arrayBuffer();
@@ -1028,7 +1009,7 @@ export async function applyOrReprocessImageBatch(params: {
         throw new Error('Arquivo em staging indisponível. Reenvie o pacote ZIP ao reprocessar.');
       }
 
-      // 2. Upload permanente no Supabase Storage (antes de tocar no banco!)
+      // 2. Upload permanente no bucket público "brand-assets" (somente imagens aprovadas)
       const uploaded = await uploadPermanentBrandAsset({
         targetType: item.target_type,
         targetId: item.target_id,
@@ -1039,13 +1020,13 @@ export async function applyOrReprocessImageBatch(params: {
       });
       uploadedStoragePath = uploaded.storagePath;
 
-      // 3. Atualizar entities.image_url ou news_sources.logo_url APÓS confirmação do Storage
+      // 3. Atualizar entities.image_url ou news_sources.logo_url APÓS confirmação do upload em brand-assets
       await updateTargetRecordImageUrl(item.target_type, item.target_id, uploaded.publicUrl);
 
-      // Limpar staging se existir (best-effort)
+      // Limpar arquivo temporário do bucket privado "brand-assets-staging" (best-effort)
       if (item.staged_storage_path) {
         try {
-          await supabase.storage.from(BRAND_ASSETS_BUCKET).remove([item.staged_storage_path]);
+          await supabase.storage.from(BRAND_ASSETS_STAGING_BUCKET).remove([item.staged_storage_path]);
         } catch {}
       }
 
@@ -1238,7 +1219,16 @@ export async function updateSingleTargetImage(params: {
     extension: params.extension
   });
 
-  await updateTargetRecordImageUrl(params.targetType, params.targetId, uploaded.publicUrl);
+  try {
+    await updateTargetRecordImageUrl(params.targetType, params.targetId, uploaded.publicUrl);
+  } catch (dbErr) {
+    try {
+      const supabase = getServerSupabase();
+      await supabase.storage.from(BRAND_ASSETS_BUCKET).remove([uploaded.storagePath]);
+    } catch {}
+    throw dbErr;
+  }
+
   return { publicUrl: uploaded.publicUrl, storagePath: uploaded.storagePath };
 }
 

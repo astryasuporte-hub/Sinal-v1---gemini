@@ -18,7 +18,9 @@ import {
   Send,
   X,
   FileText,
-  ArrowLeft
+  ArrowLeft,
+  AlertCircle,
+  RefreshCw
 } from 'lucide-react';
 import { FatosBrLogo } from './FatosBrLogo';
 import { resendService } from '../services/resendService';
@@ -55,10 +57,10 @@ if (typeof window !== 'undefined') {
 
 export const BriefingView: React.FC<BriefingViewProps> = ({
   events = [],
-  subscription,
+  subscription: _subscription,
   currentUser,
   onOpenEventDetail,
-  onOpenBilling,
+  onOpenBilling: _onOpenBilling,
   onRequireAuth
 }) => {
   // Estados de filtro e busca
@@ -67,23 +69,35 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
   const [selectedBriefing, setSelectedBriefing] = useState<RealBriefingItem | null>(null);
   const [isPreferencesOpen, setIsPreferencesOpen] = useState(false);
 
-  // Preferências
+  // Preferências individuais do usuário autenticado
   const [morningEnabled, setMorningEnabled] = useState(true);
   const [eveningEnabled, setEveningEnabled] = useState(true);
   const [morningTime, setMorningTime] = useState('07:00');
   const [eveningTime, setEveningTime] = useState('20:00');
+  const [timezone, setTimezone] = useState('America/Sao_Paulo');
+  const [prefsUpdatedAt, setPrefsUpdatedAt] = useState<string | null>(null);
   const [emailAddress, setEmailAddress] = useState(currentUser?.email || '');
   const [isLoadingPrefs, setIsLoadingPrefs] = useState(false);
   const [isSavingPrefs, setIsSavingPrefs] = useState(false);
+  const [prefsError, setPrefsError] = useState<string | null>(null);
+  const [prefsSessionExpired, setPrefsSessionExpired] = useState(false);
+
+  // Briefings reais e estados de carregamento/erro
   const [isLoadingBriefings, setIsLoadingBriefings] = useState(false);
   const [userBriefings, setUserBriefings] = useState<RealBriefingItem[]>([]);
+  const [briefingsError, setBriefingsError] = useState<string | null>(null);
+  const [briefingsSessionExpired, setBriefingsSessionExpired] = useState(false);
+  const [reloadNonce, setReloadNonce] = useState(0);
+
+  // Teste de e-mail via Resend
   const [isSendingTest, setIsSendingTest] = useState(false);
   const [testCooldown, setTestCooldown] = useState(0);
-  const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [resendAvailability, setResendAvailability] = useState<'checking' | 'available' | 'unavailable'>('checking');
+  const [toastMsg, setToastMsg] = useState<{ text: string; isError?: boolean } | null>(null);
 
-  const showToast = (msg: string) => {
-    setToastMsg(msg);
-    setTimeout(() => setToastMsg(null), 3500);
+  const showToast = (text: string, isError = false) => {
+    setToastMsg({ text, isError });
+    setTimeout(() => setToastMsg(null), 4000);
   };
 
   // Cooldown timer de 30s para o botão de teste de e-mail
@@ -95,19 +109,59 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
     return () => clearInterval(interval);
   }, [testCooldown]);
 
+  // Verifica disponibilidade real do provedor de e-mail (Resend) ao abrir o modal
+  useEffect(() => {
+    if (!isPreferencesOpen) return;
+    let active = true;
+    setResendAvailability('checking');
+    resendService.getStatus()
+      .then((status) => {
+        if (!active) return;
+        setResendAvailability(status.connected ? 'available' : 'unavailable');
+      })
+      .catch(() => {
+        if (!active) return;
+        setResendAvailability('unavailable');
+      });
+    return () => {
+      active = false;
+    };
+  }, [isPreferencesOpen]);
+
   // Carregamento de preferências e briefings associados exclusivamente ao usuário autenticado
   useEffect(() => {
-    if (!currentUser) {
+    // Limpa estado privado anterior imediatamente ao trocar de usuário ou fazer logout
+    setSelectedBriefing(null);
+    setPrefsError(null);
+    setPrefsSessionExpired(false);
+    setBriefingsError(null);
+    setBriefingsSessionExpired(false);
+
+    if (!currentUser?.id) {
       setEmailAddress('');
+      setMorningEnabled(true);
+      setEveningEnabled(true);
+      setMorningTime('07:00');
+      setEveningTime('20:00');
+      setTimezone('America/Sao_Paulo');
+      setPrefsUpdatedAt(null);
       setUserBriefings([]);
       return;
     }
 
-    if (currentUser.email) {
-      setEmailAddress((prev) => prev || currentUser.email || '');
-    }
+    let cancelled = false;
 
-    // 1. Hidratação imediata via cache privado do usuário
+    // Inicializa com valores padrão da conta ativa antes de hidratar cache/banco
+    setEmailAddress(currentUser.email || '');
+    setMorningEnabled(true);
+    setEveningEnabled(true);
+    setMorningTime('07:00');
+    setEveningTime('20:00');
+    setTimezone('America/Sao_Paulo');
+    setPrefsUpdatedAt(null);
+    setUserBriefings([]);
+
+    // 1. Hidratação rápida via cache privado isolado por user_id
     try {
       const cacheKey = `fatosbr_briefing_prefs_${currentUser.id}`;
       const saved = localStorage.getItem(cacheKey);
@@ -116,43 +170,66 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
         if (p.emailAddress) setEmailAddress(p.emailAddress);
         if (p.morningTime) setMorningTime(p.morningTime);
         if (p.eveningTime) setEveningTime(p.eveningTime);
+        if (p.timezone) setTimezone(p.timezone);
+        if (p.updatedAt) setPrefsUpdatedAt(p.updatedAt);
         if (typeof p.morningEnabled === 'boolean') setMorningEnabled(p.morningEnabled);
         if (typeof p.eveningEnabled === 'boolean') setEveningEnabled(p.eveningEnabled);
       }
+
+      const briefingsCache = localStorage.getItem(briefingService.getUserCacheKey(currentUser.id));
+      if (briefingsCache) {
+        const parsedBriefings = JSON.parse(briefingsCache);
+        if (Array.isArray(parsedBriefings)) {
+          setUserBriefings(parsedBriefings);
+        }
+      }
     } catch {}
 
-    // 2. Consulta de preferências reais no Supabase
+    // 2. Consulta canônica de preferências reais no Supabase
     setIsLoadingPrefs(true);
-    userService.getUserPreferences(currentUser.id)
-      .then((prefs: any) => {
+    userService.getUserPreferencesDetailed(currentUser.id)
+      .then((res) => {
+        if (cancelled) return;
+        if (res.error) {
+          setPrefsError(res.error);
+          setPrefsSessionExpired(Boolean(res.sessionExpired));
+          return;
+        }
+        const prefs = res.data;
         if (prefs) {
           if (prefs.briefing_email) setEmailAddress(prefs.briefing_email);
           if (typeof prefs.email_morning_briefing === 'boolean') setMorningEnabled(prefs.email_morning_briefing);
           if (typeof prefs.email_evening_briefing === 'boolean') setEveningEnabled(prefs.email_evening_briefing);
           if (prefs.morning_time) setMorningTime(prefs.morning_time);
           if (prefs.evening_time) setEveningTime(prefs.evening_time);
+          if (prefs.timezone) setTimezone(prefs.timezone);
+          if (prefs.updated_at) setPrefsUpdatedAt(prefs.updated_at);
         }
       })
-      .catch((err) => {
-        console.warn('[BriefingView] Falha ao carregar preferências do usuário:', err);
-      })
       .finally(() => {
-        setIsLoadingPrefs(false);
+        if (!cancelled) setIsLoadingPrefs(false);
       });
 
-    // 3. Consulta de briefings reais do usuário no Supabase
+    // 3. Consulta canônica de briefings reais do usuário no Supabase
     setIsLoadingBriefings(true);
-    briefingService.getUserBriefings(currentUser.id, events)
-      .then((items) => {
-        setUserBriefings(items);
-      })
-      .catch((err) => {
-        console.warn('[BriefingView] Falha ao carregar briefings do usuário:', err);
+    briefingService.getUserBriefingsDetailed(currentUser.id, events)
+      .then((res) => {
+        if (cancelled) return;
+        if (res.error) {
+          setBriefingsError(res.error);
+          setBriefingsSessionExpired(Boolean(res.sessionExpired));
+          return;
+        }
+        setUserBriefings(res.items);
       })
       .finally(() => {
-        setIsLoadingBriefings(false);
+        if (!cancelled) setIsLoadingBriefings(false);
       });
-  }, [currentUser, events]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser?.id, currentUser?.email, events, reloadNonce]);
 
   // Filtragem dos briefings reais do usuário
   const filteredBriefings = useMemo(() => {
@@ -176,11 +253,22 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
   const yesterdayItems = filteredBriefings.filter((b) => b.groupDate === 'Ontem');
   const pastDateItems = filteredBriefings.filter((b) => b.groupDate !== 'Hoje' && b.groupDate !== 'Ontem');
 
-  // Envio de teste de e-mail (validação server-side, sem falso sucesso)
+  // Envio de teste de e-mail (autenticação + verificação real no servidor, sem falso sucesso)
   const handleSendTest = async () => {
+    if (!currentUser?.id) {
+      showToast('Faça login para enviar um e-mail de teste.', true);
+      onRequireAuth?.();
+      return;
+    }
+
+    if (resendAvailability === 'unavailable') {
+      showToast('Serviço de envio de e-mail indisponível no servidor no momento.', true);
+      return;
+    }
+
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailAddress || !emailRegex.test(emailAddress.trim())) {
-      showToast('Por favor, informe um e-mail válido antes de testar.');
+      showToast('Por favor, informe um e-mail válido antes de testar.', true);
       return;
     }
 
@@ -188,38 +276,97 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
     try {
       const cleanEmail = emailAddress.trim();
 
-      // Verifica status de conectividade do serviço de e-mail antes de despachar
+      // Verifica status de conectividade real do serviço de e-mail antes de despachar
       const status = await resendService.getStatus();
       if (!status.connected) {
-        showToast('Serviço de envio de e-mail temporariamente indisponível no servidor.');
+        setResendAvailability('unavailable');
+        showToast('Serviço de envio de e-mail indisponível no servidor.', true);
         return;
       }
 
       const res = await resendService.sendBriefing(
         cleanEmail,
-        'FatosBR • Demonstração do Briefing Matinal',
+        'FatosBR • Prévia do Briefing Matinal',
         'Os principais acontecimentos das últimas horas, organizados e resumidos para você.'
       );
       if (res.success) {
         setTestCooldown(30);
         showToast(`E-mail de teste enviado para ${cleanEmail}!`);
       } else {
-        showToast(res.message || res.error || 'Não foi possível disparar o teste no momento.');
+        if (res.statusCode === 503) setResendAvailability('unavailable');
+        showToast(res.error || res.message || 'Não foi possível disparar o teste no momento.', true);
       }
     } catch {
-      showToast('Serviço de e-mail temporariamente indisponível.');
+      showToast('Falha de conexão ao contatar o servidor de e-mail.', true);
     } finally {
       setIsSendingTest(false);
     }
   };
 
+  // Persistência imediata dos toggles rápidos da coluna lateral
+  const handleSidebarToggle = async (field: 'morning' | 'evening', nextValue: boolean) => {
+    if (!currentUser?.id) {
+      showToast('Faça login para alterar suas preferências.', true);
+      onRequireAuth?.();
+      return;
+    }
+
+    const prevMorning = morningEnabled;
+    const prevEvening = eveningEnabled;
+
+    if (field === 'morning') setMorningEnabled(nextValue);
+    else setEveningEnabled(nextValue);
+
+    const res = await userService.updateUserPreferencesDetailed(currentUser.id, {
+      email_morning_briefing: field === 'morning' ? nextValue : morningEnabled,
+      email_evening_briefing: field === 'evening' ? nextValue : eveningEnabled,
+      morning_time: morningTime,
+      evening_time: eveningTime,
+      timezone,
+      briefing_email: (emailAddress || currentUser.email || '').trim() || undefined
+    });
+
+    if (!res.success) {
+      // Reverte estado otimista se falhar no Supabase
+      setMorningEnabled(prevMorning);
+      setEveningEnabled(prevEvening);
+      showToast(res.error || 'Falha ao salvar preferência no servidor.', true);
+      if (res.sessionExpired) onRequireAuth?.();
+      return;
+    }
+
+    if (res.updatedAt) setPrefsUpdatedAt(res.updatedAt);
+    try {
+      localStorage.setItem(
+        `fatosbr_briefing_prefs_${currentUser.id}`,
+        JSON.stringify({
+          emailAddress: emailAddress || currentUser.email || '',
+          morningEnabled: field === 'morning' ? nextValue : morningEnabled,
+          eveningEnabled: field === 'evening' ? nextValue : eveningEnabled,
+          morningTime,
+          eveningTime,
+          timezone,
+          updatedAt: res.updatedAt || new Date().toISOString()
+        })
+      );
+    } catch {}
+    showToast('Preferência atualizada!');
+  };
+
   return (
-    <div className="w-full max-w-[1240px] mx-auto px-4 sm:px-8 py-6 sm:py-8 text-zinc-100 font-sans">
+    <div className="w-full max-w-[1240px] mx-auto px-4 sm:px-8 py-6 sm:py-8 text-zinc-100 font-sans overflow-x-hidden">
       {/* Toast Monocromático */}
       {toastMsg && (
-        <div className="fixed top-5 right-5 z-50 bg-[#161820] border border-zinc-700 text-white px-4 py-2.5 rounded-xl shadow-2xl text-xs flex items-center gap-2 animate-fade-in font-medium">
-          <Check className="w-4 h-4 text-white" />
-          <span>{toastMsg}</span>
+        <div
+          role="status"
+          className={`fixed top-5 right-5 z-50 border px-4 py-2.5 rounded-xl shadow-2xl text-xs flex items-center gap-2 animate-fade-in font-medium max-w-[90vw] ${
+            toastMsg.isError
+              ? 'bg-[#1a1114] border-red-800/70 text-red-100'
+              : 'bg-[#161820] border-zinc-700 text-white'
+          }`}
+        >
+          {toastMsg.isError ? <AlertCircle className="w-4 h-4 text-red-400 shrink-0" /> : <Check className="w-4 h-4 text-white shrink-0" />}
+          <span>{toastMsg.text}</span>
         </div>
       )}
 
@@ -298,36 +445,90 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
         <div className="space-y-8 min-w-0">
           
           {/* Indicador de Carregamento */}
-          {isLoadingBriefings && (
+          {isLoadingBriefings && userBriefings.length === 0 && (
             <div className="rounded-2xl border border-zinc-800/80 bg-[#0d0e12] p-12 text-center text-zinc-400 text-sm space-y-3">
               <div className="w-8 h-8 rounded-full border-2 border-white/20 border-t-white animate-spin mx-auto" />
               <p>Carregando seus briefings...</p>
             </div>
           )}
 
+          {/* Estado de Erro / Sessão Expirada no carregamento */}
+          {!isLoadingBriefings && briefingsError && (
+            <div className="rounded-2xl border border-zinc-800 bg-[#0d0e12] p-8 sm:p-10 text-center max-w-xl mx-auto space-y-4">
+              <div className="w-12 h-12 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center mx-auto text-zinc-300">
+                <AlertCircle className="w-6 h-6 text-zinc-300" />
+              </div>
+              <div className="space-y-1.5">
+                <h3 className="text-base sm:text-lg font-bold text-white tracking-tight">
+                  {briefingsSessionExpired ? 'Sessão expirada' : 'Falha ao carregar briefings'}
+                </h3>
+                <p className="text-xs sm:text-sm text-zinc-400 leading-relaxed max-w-md mx-auto">
+                  {briefingsError}
+                </p>
+              </div>
+              <div className="pt-1 flex items-center justify-center gap-2.5 flex-wrap">
+                {briefingsSessionExpired ? (
+                  <button
+                    type="button"
+                    onClick={() => onRequireAuth?.()}
+                    className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white hover:bg-zinc-200 text-black text-xs font-bold transition cursor-pointer min-h-[44px]"
+                  >
+                    <span>Fazer login novamente</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setReloadNonce((n) => n + 1)}
+                    className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white hover:bg-zinc-200 text-black text-xs font-bold transition cursor-pointer min-h-[44px]"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Tentar novamente</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Empty State Oficial quando não há briefings persistidos ainda */}
-          {!isLoadingBriefings && filteredBriefings.length === 0 && (
+          {!isLoadingBriefings && !briefingsError && filteredBriefings.length === 0 && (
             <div className="rounded-2xl border border-zinc-800/80 bg-[#0d0e12] p-8 sm:p-12 text-center max-w-xl mx-auto space-y-4">
               <div className="w-12 h-12 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center mx-auto text-zinc-300">
                 <Sun className="w-6 h-6 text-zinc-400" />
               </div>
               <div className="space-y-1.5">
                 <h3 className="text-base sm:text-lg font-bold text-white tracking-tight">
-                  Nenhum briefing disponível no momento
+                  {userBriefings.length > 0
+                    ? 'Nenhum briefing encontrado para este filtro'
+                    : 'Nenhum briefing disponível no momento'}
                 </h3>
                 <p className="text-xs sm:text-sm text-zinc-400 leading-relaxed max-w-md mx-auto">
-                  Seus resumos matinais e noturnos serão gerados e consolidados aqui conforme o cronograma e os temas que você acompanha.
+                  {userBriefings.length > 0
+                    ? 'Altere os filtros ou a busca para visualizar seus resumos salvos.'
+                    : 'Seus resumos matinais e noturnos serão exibidos aqui assim que forem gerados e persistidos para sua conta.'}
                 </p>
               </div>
-              <div className="pt-2">
-                <button
-                  type="button"
-                  onClick={() => setIsPreferencesOpen(true)}
-                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white hover:bg-zinc-200 text-black text-xs font-bold transition cursor-pointer active:scale-95 shadow-sm min-h-[44px]"
-                >
-                  <Settings className="w-3.5 h-3.5" />
-                  <span>Configurar preferências de envio</span>
-                </button>
+              <div className="pt-2 flex items-center justify-center gap-2 flex-wrap">
+                {userBriefings.length > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveFilter('all');
+                      setSearchQuery('');
+                    }}
+                    className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white hover:bg-zinc-200 text-black text-xs font-bold transition cursor-pointer min-h-[44px]"
+                  >
+                    <span>Limpar filtros</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setIsPreferencesOpen(true)}
+                    className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white hover:bg-zinc-200 text-black text-xs font-bold transition cursor-pointer active:scale-95 shadow-sm min-h-[44px]"
+                  >
+                    <Settings className="w-3.5 h-3.5" />
+                    <span>Configurar preferências de envio</span>
+                  </button>
+                )}
               </div>
             </div>
           )}
@@ -499,14 +700,15 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
                   <p className="text-[11px] text-zinc-500 font-mono">{morningTime}</p>
                 </div>
               </div>
-              <label className="relative inline-flex items-center cursor-pointer">
+              <label className="relative inline-flex items-center cursor-pointer min-h-[44px] min-w-[44px] justify-center">
                 <input
                   type="checkbox"
                   checked={morningEnabled}
-                  onChange={(e) => setMorningEnabled(e.target.checked)}
+                  disabled={isLoadingPrefs || isSavingPrefs}
+                  onChange={(e) => void handleSidebarToggle('morning', e.target.checked)}
                   className="sr-only peer"
                 />
-                <div className="w-10 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-black after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-white peer-checked:after:bg-black" />
+                <div className="w-10 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-black after:content-[''] after:absolute after:top-[14px] after:left-[4px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-white peer-checked:after:bg-black" />
               </label>
             </div>
 
@@ -519,19 +721,21 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
                   <p className="text-[11px] text-zinc-500 font-mono">{eveningTime}</p>
                 </div>
               </div>
-              <label className="relative inline-flex items-center cursor-pointer">
+              <label className="relative inline-flex items-center cursor-pointer min-h-[44px] min-w-[44px] justify-center">
                 <input
                   type="checkbox"
                   checked={eveningEnabled}
-                  onChange={(e) => setEveningEnabled(e.target.checked)}
+                  disabled={isLoadingPrefs || isSavingPrefs}
+                  onChange={(e) => void handleSidebarToggle('evening', e.target.checked)}
                   className="sr-only peer"
                 />
-                <div className="w-10 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-black after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-white peer-checked:after:bg-black" />
+                <div className="w-10 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-black after:content-[''] after:absolute after:top-[14px] after:left-[4px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-white peer-checked:after:bg-black" />
               </label>
             </div>
 
             <div className="text-[11px] text-zinc-500 border-t border-zinc-800/60 pt-4 leading-relaxed font-mono">
-              America/Sao Paulo · e-mail e leitura na FatosBR.
+              {timezone.replace('_', ' ')} · e-mail e leitura na FatosBR.
+              {isLoadingPrefs && <span className="block text-zinc-400 mt-1">Sincronizando preferências...</span>}
             </div>
 
             <button
@@ -603,36 +807,58 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
               </div>
             </div>
 
-            {/* Lista de acontecimentos do briefing */}
+            {/* Lista de acontecimentos reais vinculados a este briefing */}
             <div className="p-5 sm:p-6 overflow-y-auto space-y-4 flex-1">
               <p className="text-sm sm:text-base text-zinc-200 leading-relaxed pb-2 border-b border-zinc-800/80">
                 {selectedBriefing.description}
               </p>
 
-              <div className="divide-y divide-zinc-800/70">
-                {events.slice(0, selectedBriefing.eventsCount).map((ev) => (
-                  <div
-                    key={ev.id}
-                    onClick={() => {
-                      setSelectedBriefing(null);
-                      onOpenEventDetail?.(ev);
-                    }}
-                    className="py-4 first:pt-2 hover:bg-zinc-900/50 px-3 -mx-3 rounded-xl transition cursor-pointer group"
-                  >
-                    <div className="flex items-center gap-2 text-[11px] text-zinc-400 font-mono mb-1.5">
-                      <span className="uppercase tracking-wider text-zinc-300">{ev.category}</span>
-                      <span>·</span>
-                      <span>{ev.sources?.length || 2} fontes apuradas</span>
+              {selectedBriefing.rawStatus === 'FAILED' ? (
+                <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4 text-xs text-zinc-300">
+                  A geração desta edição apresentou falha no servidor e não possui acontecimentos consolidados.
+                </div>
+              ) : selectedBriefing.rawEvents && selectedBriefing.rawEvents.length > 0 ? (
+                <div className="divide-y divide-zinc-800/70">
+                  {selectedBriefing.rawEvents.map((ev) => (
+                    <div
+                      key={ev.id}
+                      onClick={() => {
+                        setSelectedBriefing(null);
+                        onOpenEventDetail?.(ev);
+                      }}
+                      className="py-4 first:pt-2 hover:bg-zinc-900/50 px-3 -mx-3 rounded-xl transition cursor-pointer group"
+                    >
+                      <div className="flex items-center gap-2 text-[11px] text-zinc-400 font-mono mb-1.5 flex-wrap">
+                        <span className="uppercase tracking-wider text-zinc-300">{ev.category}</span>
+                        {ev.sources && ev.sources.length > 0 && (
+                          <>
+                            <span>·</span>
+                            <span>{ev.sources.length} {ev.sources.length === 1 ? 'fonte apurada' : 'fontes apuradas'}</span>
+                          </>
+                        )}
+                        {ev.relativeTime && (
+                          <>
+                            <span>·</span>
+                            <span>{ev.relativeTime}</span>
+                          </>
+                        )}
+                      </div>
+                      <h4 className="text-sm sm:text-base font-bold text-white group-hover:text-zinc-200 transition leading-snug">
+                        {ev.title}
+                      </h4>
+                      <p className="text-xs sm:text-sm text-zinc-400 mt-1.5 line-clamp-2 leading-relaxed">
+                        {ev.summary}
+                      </p>
                     </div>
-                    <h4 className="text-sm sm:text-base font-bold text-white group-hover:text-zinc-200 transition leading-snug">
-                      {ev.title}
-                    </h4>
-                    <p className="text-xs sm:text-sm text-zinc-400 mt-1.5 line-clamp-2 leading-relaxed">
-                      {ev.summary}
-                    </p>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="rounded-xl border border-zinc-800/80 bg-zinc-900/30 p-5 text-center text-xs text-zinc-400">
+                  {selectedBriefing.rawStatus === 'PENDING' || selectedBriefing.rawStatus === 'PROCESSING'
+                    ? 'Este briefing ainda está em preparação e os acontecimentos serão listados assim que a edição for concluída.'
+                    : 'Nenhum acontecimento vinculado a esta edição.'}
+                </div>
+              )}
             </div>
 
             {/* Rodapé do Modal */}
@@ -685,6 +911,40 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
                 <X className="w-5 h-5" />
               </button>
             </div>
+
+            {/* Feedback de Carregamento / Erro de Rede ou Sessão */}
+            {isLoadingPrefs && (
+              <div className="rounded-xl border border-zinc-800 bg-[#111317] px-3.5 py-2.5 text-xs text-zinc-300 flex items-center gap-2">
+                <RefreshCw className="w-3.5 h-3.5 animate-spin text-zinc-400" />
+                <span>Carregando preferências salvas da sua conta...</span>
+              </div>
+            )}
+
+            {prefsError && (
+              <div className="rounded-xl border border-red-900/60 bg-red-950/30 px-3.5 py-2.5 text-xs text-red-200 flex items-start justify-between gap-2">
+                <div className="flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                  <span>{prefsError}</span>
+                </div>
+                {prefsSessionExpired ? (
+                  <button
+                    type="button"
+                    onClick={() => onRequireAuth?.()}
+                    className="text-[11px] font-semibold underline text-white shrink-0 cursor-pointer"
+                  >
+                    Entrar
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setReloadNonce((n) => n + 1)}
+                    className="text-[11px] font-semibold underline text-white shrink-0 cursor-pointer"
+                  >
+                    Recarregar
+                  </button>
+                )}
+              </div>
+            )}
 
             {/* Campo E-mail de Recebimento */}
             <div className="space-y-2">
@@ -770,6 +1030,31 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
                   />
                 </div>
               </div>
+
+              {/* Fuso Horário & Última alteração */}
+              <div className="p-3.5 rounded-xl bg-[#111317] border border-zinc-800/80 space-y-2">
+                <div className="flex items-center justify-between gap-3">
+                  <label htmlFor="briefing-timezone" className="text-xs text-zinc-400 font-medium">
+                    Fuso horário
+                  </label>
+                  <select
+                    id="briefing-timezone"
+                    value={timezone}
+                    onChange={(e) => setTimezone(e.target.value)}
+                    className="bg-[#181a22] border border-zinc-800 rounded-lg px-2.5 py-1.5 text-xs font-mono text-white outline-none focus:border-zinc-500 min-h-[36px]"
+                  >
+                    <option value="America/Sao_Paulo">America/Sao_Paulo</option>
+                    <option value="America/Manaus">America/Manaus</option>
+                    <option value="America/Fortaleza">America/Fortaleza</option>
+                    <option value="UTC">UTC</option>
+                  </select>
+                </div>
+                {prefsUpdatedAt && (
+                  <p className="text-[11px] text-zinc-500 font-mono">
+                    Última alteração: {new Date(prefsUpdatedAt).toLocaleString('pt-BR')}
+                  </p>
+                )}
+              </div>
             </div>
 
             {/* Seção Secundária: Enviar e-mail de teste */}
@@ -779,17 +1064,23 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
                   Enviar e-mail de teste
                 </h4>
                 <p className="text-xs text-zinc-400 mt-0.5 leading-relaxed">
-                  Receba uma prévia para conferir como seu briefing chegará.
+                  {resendAvailability === 'unavailable'
+                    ? 'Envio de e-mail indisponível no servidor no momento (serviço Resend não configurado).'
+                    : 'Receba uma prévia para conferir como seu briefing chegará.'}
                 </p>
               </div>
 
               <button
                 type="button"
                 onClick={handleSendTest}
-                disabled={isSendingTest || testCooldown > 0}
+                disabled={isSendingTest || testCooldown > 0 || resendAvailability === 'unavailable' || resendAvailability === 'checking'}
                 className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-zinc-700/80 hover:border-zinc-500 bg-[#161820] hover:bg-[#1c1e27] text-white text-xs font-semibold transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed min-h-[44px]"
               >
-                {isSendingTest ? (
+                {resendAvailability === 'checking' ? (
+                  <span>Verificando serviço de e-mail...</span>
+                ) : resendAvailability === 'unavailable' ? (
+                  <span>Envio de teste indisponível</span>
+                ) : isSendingTest ? (
                   <span>Enviando teste...</span>
                 ) : testCooldown > 0 ? (
                   <span>Aguarde {testCooldown}s para reenviar</span>
@@ -815,53 +1106,61 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
                 type="button"
                 disabled={isSavingPrefs}
                 onClick={async () => {
+                  if (!currentUser?.id) {
+                    showToast('Faça login para salvar suas preferências.', true);
+                    onRequireAuth?.();
+                    return;
+                  }
+
                   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
                   if (!emailAddress || !emailRegex.test(emailAddress.trim())) {
-                    showToast('Por favor, informe um endereço de e-mail válido.');
+                    showToast('Por favor, informe um endereço de e-mail válido.', true);
                     return;
                   }
 
                   setIsSavingPrefs(true);
+                  setPrefsError(null);
+                  setPrefsSessionExpired(false);
                   try {
                     const cleanEmail = emailAddress.trim();
+                    const res = await userService.updateUserPreferencesDetailed(currentUser.id, {
+                      briefing_email: cleanEmail,
+                      email_morning_briefing: morningEnabled,
+                      email_evening_briefing: eveningEnabled,
+                      morning_time: morningTime,
+                      evening_time: eveningTime,
+                      timezone
+                    });
+
+                    if (!res.success) {
+                      const errMsg = res.error || 'Não foi possível persistir no servidor. Verifique a conexão.';
+                      setPrefsError(errMsg);
+                      setPrefsSessionExpired(Boolean(res.sessionExpired));
+                      showToast(errMsg, true);
+                      return;
+                    }
+
+                    const updatedAt = res.updatedAt || new Date().toISOString();
+                    setPrefsUpdatedAt(updatedAt);
+
                     const prefs = {
                       emailAddress: cleanEmail,
                       morningEnabled,
                       eveningEnabled,
                       morningTime,
                       eveningTime,
-                      updatedAt: new Date().toISOString()
+                      timezone,
+                      updatedAt
                     };
 
-                    // Se o usuário estiver autenticado, salva no Supabase (fonte canônica)
-                    if (currentUser?.id) {
-                      const ok = await userService.updateUserPreferences(currentUser.id, {
-                        briefing_email: cleanEmail,
-                        email_morning_briefing: morningEnabled,
-                        email_evening_briefing: eveningEnabled,
-                        morning_time: morningTime,
-                        evening_time: eveningTime,
-                        timezone: 'America/Sao_Paulo'
-                      });
-
-                      if (!ok) {
-                        showToast('Não foi possível persistir no servidor. Verifique a conexão.');
-                        return;
-                      }
-
-                      // Cache local isolado exclusivamente por usuário
-                      localStorage.setItem(`fatosbr_briefing_prefs_${currentUser.id}`, JSON.stringify(prefs));
-                    } else {
-                      // Usuário sem sessão ativa: alerta para fazer login
-                      onRequireAuth?.();
-                    }
-
-                    resendService.setStoredSubscriberEmail(cleanEmail);
+                    // Cache local isolado exclusivamente por usuário
+                    localStorage.setItem(`fatosbr_briefing_prefs_${currentUser.id}`, JSON.stringify(prefs));
                     window.dispatchEvent(new CustomEvent('fatosbr_briefing_prefs_updated'));
                     setIsPreferencesOpen(false);
                     showToast('Preferências salvas com sucesso!');
                   } catch {
-                    showToast('Erro ao salvar preferências.');
+                    setPrefsError('Falha de conexão ao salvar preferências. Tente novamente.');
+                    showToast('Erro de conexão ao salvar preferências.', true);
                   } finally {
                     setIsSavingPrefs(false);
                   }
