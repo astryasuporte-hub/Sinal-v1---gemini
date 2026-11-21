@@ -1642,6 +1642,11 @@ function apiProxyPlugin(): Plugin {
                 return;
               }
 
+              if (pathname === '/api/notifications/generate-briefings') {
+                const { default: generateBriefingsHandler } = await import('./api/_lib/handlers/notifications/generateBriefings');
+                return await generateBriefingsHandler(req, res);
+              }
+
               if (pathname === '/api/notifications/status') {
                 res.setHeader('Content-Type', 'application/json');
                 res.statusCode = 200;

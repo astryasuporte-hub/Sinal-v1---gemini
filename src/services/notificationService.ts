@@ -346,6 +346,30 @@ class NotificationService {
     } catch {}
   }
 
+  private testClientOverride: { client: any; configured: boolean } | null = null;
+
+  public setTestClient(override: { client: any; configured?: boolean } | null): void {
+    this.testClientOverride = override
+      ? { client: override.client, configured: override.configured ?? true }
+      : null;
+  }
+
+  private getDb(): { client: any; configured: boolean } {
+    if (this.testClientOverride) return this.testClientOverride;
+    return { client: supabase as any, configured: isSupabaseConfigured };
+  }
+
+  private isMissingColumnError(err: any): boolean {
+    const msg = String(err?.message || '').toLowerCase();
+    const code = String(err?.code || '');
+    return (
+      code === '42703' ||
+      code === 'PGRST204' ||
+      (msg.includes('column') && msg.includes('does not exist')) ||
+      msg.includes('schema cache')
+    );
+  }
+
   private isSessionExpiredError(err: any): boolean {
     if (!err) return false;
     const msg = String(err?.message || '').toLowerCase();
@@ -390,16 +414,23 @@ class NotificationService {
 
     const validCategories = ['acontecimentos', 'entidades', 'temas', 'fontes', 'atualizacoes'];
     const rawCat = String(n.category || '').toLowerCase();
-    const category = validCategories.includes(rawCat) ? rawCat : 'acontecimentos';
+    const category = validCategories.includes(rawCat)
+      ? rawCat
+      : String(n.type || '').toUpperCase() === 'BRIEFING_READY'
+        ? 'atualizacoes'
+        : 'acontecimentos';
+    const isRead = Boolean(n.read || n.read_at);
 
     return {
       id: n.id,
+      type: n.type || n.metadata?.notification_type || undefined,
       category,
       dateGroup,
       title: n.title,
-      subtitle: n.subtitle || '',
+      subtitle: n.subtitle || n.body || n.message || '',
       timestamp,
-      read: Boolean(n.read),
+      read: isRead,
+      readAt: n.read_at || undefined,
       eventId: n.event_id || undefined,
       entityId: n.entity_id || undefined,
       metadata: n.metadata || {},
@@ -420,7 +451,8 @@ class NotificationService {
     error?: string;
     sessionExpired?: boolean;
   }> {
-    if (!isSupabaseConfigured || !userId) {
+    const { client, configured } = this.getDb();
+    if (!configured || !userId) {
       return { items: [], hasMore: false };
     }
 
@@ -428,7 +460,7 @@ class NotificationService {
     const offset = Math.max(0, options?.offset ?? 0);
 
     try {
-      const { data, error } = await (supabase as any)
+      const { data, error } = await client
         .from('notifications')
         .select('*')
         .eq('user_id', userId)
@@ -488,12 +520,13 @@ class NotificationService {
     error?: string;
     sessionExpired?: boolean;
   }> {
-    if (!isSupabaseConfigured || !userId) {
+    const { client, configured } = this.getDb();
+    if (!configured || !userId) {
       return { count: 0 };
     }
 
     try {
-      const { count, error } = await (supabase as any)
+      const { count, error } = await client
         .from('notifications')
         .select('id', { count: 'exact', head: true })
         .eq('user_id', userId)
@@ -527,22 +560,33 @@ class NotificationService {
   }
 
   /**
-   * Marca uma notificação como lida no Supabase com diagnóstico detalhado
+   * Marca uma notificação como lida no Supabase mantendo consistência entre `read` e `read_at`
    */
   public async markAsReadDetailed(
     notificationId: string,
     userId: string
-  ): Promise<{ success: boolean; error?: string; sessionExpired?: boolean }> {
-    if (!isSupabaseConfigured || !userId || !notificationId) {
+  ): Promise<{ success: boolean; readAt?: string; error?: string; sessionExpired?: boolean }> {
+    const { client, configured } = this.getDb();
+    if (!configured || !userId || !notificationId) {
       return { success: false, error: 'Sessão inválida para atualizar notificação.' };
     }
 
+    const nowIso = new Date().toISOString();
     try {
-      const { error } = await (supabase as any)
+      let { error } = await client
         .from('notifications')
-        .update({ read: true })
+        .update({ read: true, read_at: nowIso })
         .eq('id', notificationId)
         .eq('user_id', userId);
+
+      if (error && this.isMissingColumnError(error)) {
+        const retry = await client
+          .from('notifications')
+          .update({ read: true })
+          .eq('id', notificationId)
+          .eq('user_id', userId);
+        error = retry.error;
+      }
 
       if (error) {
         const expired = this.isSessionExpiredError(error);
@@ -559,7 +603,7 @@ class NotificationService {
         window.dispatchEvent(new CustomEvent('fatosbr_notifications_updated'));
       }
 
-      return { success: true };
+      return { success: true, readAt: nowIso };
     } catch (err: any) {
       return { success: false, error: err?.message || 'Erro de rede ao marcar notificação.' };
     }
@@ -577,21 +621,32 @@ class NotificationService {
   }
 
   /**
-   * Marca todas as notificações do usuário como lidas no Supabase com diagnóstico detalhado
+   * Marca todas as notificações do usuário como lidas no Supabase mantendo consistência entre `read` e `read_at`
    */
   public async markAllAsReadDetailed(
     userId: string
-  ): Promise<{ success: boolean; error?: string; sessionExpired?: boolean }> {
-    if (!isSupabaseConfigured || !userId) {
+  ): Promise<{ success: boolean; readAt?: string; error?: string; sessionExpired?: boolean }> {
+    const { client, configured } = this.getDb();
+    if (!configured || !userId) {
       return { success: false, error: 'Sessão inválida para atualizar notificações.' };
     }
 
+    const nowIso = new Date().toISOString();
     try {
-      const { error } = await (supabase as any)
+      let { error } = await client
         .from('notifications')
-        .update({ read: true })
+        .update({ read: true, read_at: nowIso })
         .eq('user_id', userId)
         .eq('read', false);
+
+      if (error && this.isMissingColumnError(error)) {
+        const retry = await client
+          .from('notifications')
+          .update({ read: true })
+          .eq('user_id', userId)
+          .eq('read', false);
+        error = retry.error;
+      }
 
       if (error) {
         const expired = this.isSessionExpiredError(error);
@@ -608,7 +663,7 @@ class NotificationService {
         window.dispatchEvent(new CustomEvent('fatosbr_notifications_updated'));
       }
 
-      return { success: true };
+      return { success: true, readAt: nowIso };
     } catch (err: any) {
       return { success: false, error: err?.message || 'Erro de rede ao marcar todas como lidas.' };
     }

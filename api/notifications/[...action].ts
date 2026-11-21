@@ -9,6 +9,7 @@
 import { sendJson, setCorsHeaders } from '../_lib/common.js';
 import subscribeHandler from '../_lib/handlers/notifications/subscribe.js';
 import broadcastPushHandler from '../_lib/handlers/notifications/broadcastPush.js';
+import generateBriefingsHandler from '../_lib/handlers/notifications/generateBriefings.js';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);
@@ -27,6 +28,9 @@ export default async function handler(req: any, res: any) {
   }
   if (pathname.includes('/broadcast-push')) {
     return broadcastPushHandler(req, res);
+  }
+  if (pathname.includes('/generate-briefings')) {
+    return generateBriefingsHandler(req, res);
   }
 
   return sendJson(res, 404, {

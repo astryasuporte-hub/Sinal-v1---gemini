@@ -285,8 +285,9 @@ export const userService = {
   },
 
   /**
-   * Carrega preferências detalhadas do usuário (`user_preferences` / `user_settings`)
-   * diferenciando ausência de registro de falha real de rede/sessão expirada.
+   * Carrega preferências detalhadas do usuário consolidando de forma canônica
+   * `public.user_preferences` (entrega de briefings) e `public.user_settings` (configurações e `notification_settings`).
+   * Diferencia ausência de registro de falha real de rede/sessão expirada.
    */
   async getUserPreferencesDetailed(userId: string): Promise<{
     data: any | null;
@@ -297,52 +298,89 @@ export const userService = {
     if (!configured || !userId) return { data: null };
 
     try {
-      const { data, error } = await client
-        .from('user_preferences')
-        .select('*')
-        .eq('id', userId)
-        .maybeSingle();
+      const [prefRes, settingsRes] = await Promise.all([
+        client.from('user_preferences').select('*').eq('id', userId).maybeSingle(),
+        client.from('user_settings').select('*').eq('user_id', userId).maybeSingle(),
+      ]);
 
-      if (!error) {
-        if (data) return { data };
-        // Caso user_preferences não tenha linha ainda, verifica se há registro legado em user_settings
-        try {
-          const { data: settingsData, error: settingsErr } = await client
-            .from('user_settings')
-            .select('*')
-            .eq('user_id', userId)
-            .maybeSingle();
-          if (!settingsErr && settingsData) return { data: settingsData };
-        } catch {}
-        return { data: null };
-      }
+      const prefErr = prefRes.error;
+      const settingsErr = settingsRes.error;
 
-      if (this.isSessionExpiredError(error)) {
+      if (this.isSessionExpiredError(prefErr) || this.isSessionExpiredError(settingsErr)) {
         return { data: null, error: 'Sua sessão expirou. Faça login novamente.', sessionExpired: true };
       }
 
-      if (isMissingRelationError(error)) {
-        const { data: settingsData, error: settingsErr } = await client
-          .from('user_settings')
-          .select('*')
-          .eq('user_id', userId)
-          .maybeSingle();
+      const prefFatal = prefErr && !isMissingRelationError(prefErr) ? prefErr : null;
+      const settingsFatal = settingsErr && !isMissingRelationError(settingsErr) ? settingsErr : null;
 
-        if (!settingsErr) return { data: settingsData || null };
-        if (this.isSessionExpiredError(settingsErr)) {
-          return { data: null, error: 'Sua sessão expirou. Faça login novamente.', sessionExpired: true };
-        }
-        return { data: null, error: settingsErr.message || 'Falha ao carregar configurações do usuário.' };
+      if (prefFatal && settingsFatal) {
+        return { data: null, error: prefFatal.message || settingsFatal.message || 'Falha ao carregar preferências do Supabase.' };
+      }
+      if (prefFatal && isMissingRelationError(settingsErr)) {
+        return { data: null, error: prefFatal.message || 'Falha ao carregar preferências do Supabase.' };
+      }
+      if (settingsFatal && isMissingRelationError(prefErr)) {
+        return { data: null, error: settingsFatal.message || 'Falha ao carregar configurações do usuário.' };
       }
 
-      return { data: null, error: error.message || 'Falha ao carregar preferências do Supabase.' };
+      const prefData = !prefErr ? prefRes.data : null;
+      const settingsData = !settingsErr ? settingsRes.data : null;
+
+      if (!prefData && !settingsData) {
+        if (prefFatal || settingsFatal) {
+          return { data: null, error: (prefFatal || settingsFatal)?.message || 'Falha ao carregar preferências.' };
+        }
+        return { data: null };
+      }
+
+      const mergedNotificationSettings =
+        (settingsData?.notification_settings && typeof settingsData.notification_settings === 'object'
+          ? settingsData.notification_settings
+          : null) ??
+        (prefData?.notification_settings && typeof prefData.notification_settings === 'object'
+          ? prefData.notification_settings
+          : undefined);
+
+      const merged = {
+        ...(settingsData || {}),
+        ...(prefData || {}),
+        email_morning_briefing:
+          typeof prefData?.email_morning_briefing === 'boolean'
+            ? prefData.email_morning_briefing
+            : settingsData?.email_morning_briefing,
+        email_evening_briefing:
+          typeof prefData?.email_evening_briefing === 'boolean'
+            ? prefData.email_evening_briefing
+            : settingsData?.email_evening_briefing,
+        email_breaking_alerts:
+          typeof prefData?.email_breaking_alerts === 'boolean'
+            ? prefData.email_breaking_alerts
+            : settingsData?.email_breaking_alerts,
+        weekend_edition:
+          typeof prefData?.weekend_edition === 'boolean'
+            ? prefData.weekend_edition
+            : settingsData?.weekend_edition,
+        briefing_email: prefData?.briefing_email || settingsData?.briefing_email,
+        morning_time: prefData?.morning_time || settingsData?.morning_time,
+        evening_time: prefData?.evening_time || settingsData?.evening_time,
+        timezone: prefData?.timezone || settingsData?.timezone,
+        notification_settings: mergedNotificationSettings,
+        updated_at:
+          prefData?.updated_at && settingsData?.updated_at
+            ? new Date(prefData.updated_at).getTime() >= new Date(settingsData.updated_at).getTime()
+              ? prefData.updated_at
+              : settingsData.updated_at
+            : prefData?.updated_at || settingsData?.updated_at,
+      };
+
+      return { data: merged };
     } catch (err: any) {
       return { data: null, error: err?.message || 'Erro de conexão ao consultar preferências.' };
     }
   },
 
   /**
-   * Carrega preferências do usuário (`user_preferences` com fallback seguro para `user_settings`)
+   * Carrega preferências do usuário (`user_preferences` + `user_settings` canônicos)
    */
   async getUserPreferences(userId: string) {
     const res = await this.getUserPreferencesDetailed(userId);
@@ -353,7 +391,11 @@ export const userService = {
   },
 
   /**
-   * Atualiza preferências no Supabase retornando diagnóstico estruturado e timestamp real.
+   * Atualiza preferências no Supabase de forma estritamente consistente:
+   * - Nunca descarta campos solicitados para retornar falso sucesso.
+   * - Persiste preferências de entrega em `public.user_preferences` (ou `user_settings`)
+   *   e `notification_settings` no armazenamento canônico (`user_settings` ou `user_preferences`).
+   * - Retorna erro explícito se algum campo solicitado não puder ser gravado no esquema atual.
    */
   async updateUserPreferencesDetailed(
     userId: string,
@@ -375,85 +417,165 @@ export const userService = {
     }
 
     const nowIso = new Date().toISOString();
+    const cleanedUpdates: Record<string, any> = {};
+    for (const [k, v] of Object.entries(updates || {})) {
+      if (v !== undefined) cleanedUpdates[k] = v;
+    }
 
-    const stripExtendedCols = (obj: Record<string, any>) => {
-      const { notification_settings: _ns, morning_time: _mt, evening_time: _et, timezone: _tz, ...rest } = obj;
-      return rest;
+    if (Object.keys(cleanedUpdates).length === 0) {
+      return { success: false, error: 'Nenhuma preferência informada para atualização.' };
+    }
+
+    const hasNotificationSettings = Object.prototype.hasOwnProperty.call(cleanedUpdates, 'notification_settings');
+    const baseBriefingKeys = [
+      'email_morning_briefing',
+      'email_evening_briefing',
+      'email_breaking_alerts',
+      'weekend_edition',
+      'briefing_email',
+    ];
+    const scheduleKeys = ['morning_time', 'evening_time', 'timezone'];
+
+    const baseUpdates: Record<string, any> = {};
+    const scheduleUpdates: Record<string, any> = {};
+    for (const k of baseBriefingKeys) {
+      if (k in cleanedUpdates) baseUpdates[k] = cleanedUpdates[k];
+    }
+    for (const k of scheduleKeys) {
+      if (k in cleanedUpdates) scheduleUpdates[k] = cleanedUpdates[k];
+    }
+
+    const upsertTable = async (
+      table: 'user_preferences' | 'user_settings',
+      pkCol: 'id' | 'user_id',
+      fields: Record<string, any>
+    ): Promise<{ ok: boolean; error?: any }> => {
+      const payload = { [pkCol]: userId, ...fields, updated_at: nowIso };
+      const { error } = await client.from(table).upsert(payload, { onConflict: pkCol });
+      return { ok: !error, error };
     };
 
     try {
-      const payload = {
-        id: userId,
-        ...updates,
-        updated_at: nowIso,
-      };
+      // 1. Persistir `notification_settings` quando solicitado (armazenamento canônico: user_settings, fallback user_preferences)
+      if (hasNotificationSettings) {
+        const nsPayload: Record<string, any> = {
+          notification_settings: cleanedUpdates.notification_settings,
+        };
+        if ('email_breaking_alerts' in cleanedUpdates) {
+          nsPayload.email_breaking_alerts = cleanedUpdates.email_breaking_alerts;
+        }
 
-      const { error } = await client
-        .from('user_preferences')
-        .upsert(payload, { onConflict: 'id' });
+        const settingsWrite = await upsertTable('user_settings', 'user_id', nsPayload);
+        if (!settingsWrite.ok) {
+          if (this.isSessionExpiredError(settingsWrite.error)) {
+            return { success: false, sessionExpired: true, error: 'Sua sessão expirou. Faça login novamente.' };
+          }
 
-      if (!error) {
-        return { success: true, updatedAt: nowIso };
-      }
-
-      if (this.isSessionExpiredError(error)) {
-        return { success: false, sessionExpired: true, error: 'Sua sessão expirou. Faça login novamente.' };
-      }
-
-      if (isMissingColumnError(error)) {
-        const { error: baseErr } = await client
-          .from('user_preferences')
-          .upsert({ id: userId, ...stripExtendedCols(updates), updated_at: nowIso }, { onConflict: 'id' });
-
-        if (!baseErr) return { success: true, updatedAt: nowIso };
-        if (!isMissingRelationError(baseErr)) {
-          return {
-            success: false,
-            sessionExpired: this.isSessionExpiredError(baseErr),
-            error: baseErr.message || 'Falha ao salvar preferências no banco.'
-          };
+          if (isMissingColumnError(settingsWrite.error) || isMissingRelationError(settingsWrite.error)) {
+            // Tenta armazenar notification_settings em user_preferences somente se a coluna existir lá
+            const prefNsWrite = await upsertTable('user_preferences', 'id', nsPayload);
+            if (!prefNsWrite.ok) {
+              if (this.isSessionExpiredError(prefNsWrite.error)) {
+                return { success: false, sessionExpired: true, error: 'Sua sessão expirou. Faça login novamente.' };
+              }
+              if (isMissingColumnError(prefNsWrite.error) || isMissingRelationError(prefNsWrite.error)) {
+                return {
+                  success: false,
+                  error:
+                    'Não foi possível persistir notification_settings: coluna ausente no banco de dados (migração V2.3.1 pendente).'
+                };
+              }
+              return {
+                success: false,
+                error: prefNsWrite.error?.message || 'Falha ao salvar preferências de notificação no banco.'
+              };
+            }
+          } else {
+            return {
+              success: false,
+              error: settingsWrite.error?.message || 'Falha ao salvar preferências de notificação no banco.'
+            };
+          }
         }
       }
 
-      if (isMissingRelationError(error)) {
-        const settingsPayload = {
-          user_id: userId,
-          ...updates,
-          updated_at: nowIso,
-        };
-        const { error: settingsErr } = await client
-          .from('user_settings')
-          .upsert(settingsPayload, { onConflict: 'user_id' });
+      // 2. Persistir preferências de entrega e horários de briefings sem descartar campos solicitados
+      const briefingFields = { ...baseUpdates, ...scheduleUpdates };
+      if (Object.keys(briefingFields).length > 0) {
+        const prefWrite = await upsertTable('user_preferences', 'id', briefingFields);
 
-        if (!settingsErr) return { success: true, updatedAt: nowIso };
+        if (!prefWrite.ok) {
+          if (this.isSessionExpiredError(prefWrite.error)) {
+            return { success: false, sessionExpired: true, error: 'Sua sessão expirou. Faça login novamente.' };
+          }
 
-        if (isMissingColumnError(settingsErr)) {
-          const { error: settingsBaseErr } = await client
-            .from('user_settings')
-            .upsert({ user_id: userId, ...stripExtendedCols(updates), updated_at: nowIso }, { onConflict: 'user_id' });
-          if (!settingsBaseErr) return { success: true, updatedAt: nowIso };
-          return {
-            success: false,
-            sessionExpired: this.isSessionExpiredError(settingsBaseErr),
-            error: settingsBaseErr.message || 'Falha ao salvar em user_settings.'
-          };
+          if (isMissingRelationError(prefWrite.error)) {
+            // Ambiente usa exclusivamente user_settings
+            const settingsAllWrite = await upsertTable('user_settings', 'user_id', briefingFields);
+            if (!settingsAllWrite.ok) {
+              if (this.isSessionExpiredError(settingsAllWrite.error)) {
+                return { success: false, sessionExpired: true, error: 'Sua sessão expirou. Faça login novamente.' };
+              }
+              if (isMissingColumnError(settingsAllWrite.error)) {
+                return {
+                  success: false,
+                  error:
+                    'Não foi possível salvar todas as preferências solicitadas: colunas de agendamento/entrega ausentes em user_settings.'
+                };
+              }
+              return {
+                success: false,
+                error: settingsAllWrite.error?.message || 'Falha ao salvar configurações do usuário.'
+              };
+            }
+          } else if (isMissingColumnError(prefWrite.error)) {
+            // user_preferences não possui colunas de horário/fuso -> só aceita se user_settings persistir integralmente essas colunas
+            let schedulePersistedInSettings = Object.keys(scheduleUpdates).length === 0;
+            if (Object.keys(scheduleUpdates).length > 0) {
+              const settingsSchedWrite = await upsertTable('user_settings', 'user_id', scheduleUpdates);
+              if (this.isSessionExpiredError(settingsSchedWrite.error)) {
+                return { success: false, sessionExpired: true, error: 'Sua sessão expirou. Faça login novamente.' };
+              }
+              schedulePersistedInSettings = settingsSchedWrite.ok;
+            }
+
+            if (!schedulePersistedInSettings) {
+              return {
+                success: false,
+                error:
+                  'Não foi possível persistir horários ou fuso horário de briefings: colunas ausentes no banco de dados (migração V2.3.1 pendente).'
+              };
+            }
+
+            if (Object.keys(baseUpdates).length > 0) {
+              const prefBaseWrite = await upsertTable('user_preferences', 'id', baseUpdates);
+              if (!prefBaseWrite.ok) {
+                if (this.isSessionExpiredError(prefBaseWrite.error)) {
+                  return { success: false, sessionExpired: true, error: 'Sua sessão expirou. Faça login novamente.' };
+                }
+                return {
+                  success: false,
+                  error: prefBaseWrite.error?.message || 'Falha ao salvar preferências de entrega no banco.'
+                };
+              }
+            }
+          } else {
+            return {
+              success: false,
+              error: prefWrite.error?.message || 'Falha ao persistir preferências no Supabase.'
+            };
+          }
         }
-
-        return {
-          success: false,
-          sessionExpired: this.isSessionExpiredError(settingsErr),
-          error: settingsErr.message || 'Falha ao salvar configurações do usuário.'
-        };
       }
 
-      return { success: false, error: error.message || 'Falha ao persistir preferências no Supabase.' };
+      return { success: true, updatedAt: nowIso };
     } catch (err: any) {
       return { success: false, error: err?.message || 'Erro de conexão ao salvar preferências.' };
     }
   },
 
   /**
-   * Atualiza ou cria as preferências do usuário no Supabase (`user_preferences` com fallback seguro para `user_settings`)
+   * Atualiza ou cria as preferências do usuário no Supabase (`user_preferences` / `user_settings`)
    */
   async updateUserPreferences(
     userId: string,

@@ -18,7 +18,9 @@ import {
   SlidersHorizontal,
   ChevronLeft,
   AlertCircle,
-  RefreshCw
+  RefreshCw,
+  Rss,
+  FileText
 } from 'lucide-react';
 import { CompanyLogoBadge } from './CompanyLogoBadge';
 import { notificationService } from '../services/notificationService';
@@ -155,25 +157,48 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
         if (!cancelled) setIsLoading(false);
       });
 
-    // 3. Sincroniza preferências de alerta do usuário no Supabase
+    // 3. Sincroniza preferências de alerta do usuário no Supabase (fonte canônica)
     userService.getUserPreferencesDetailed(currentUser.id)
       .then((res) => {
-        if (cancelled || !res.data) return;
-        const remoteSettings = res.data.notification_settings;
-        if (remoteSettings && typeof remoteSettings === 'object') {
-          const merged = { ...DEFAULT_NOTIF_SETTINGS, ...remoteSettings };
-          setSettings(merged);
-          try {
-            localStorage.setItem(
-              notificationService.getUserSettingsCacheKey(currentUser.id),
-              JSON.stringify(merged)
-            );
-          } catch {}
-        } else if (typeof res.data.email_breaking_alerts === 'boolean') {
-          setSettings((prev) => ({ ...prev, urgentEvents: res.data.email_breaking_alerts }));
+        if (cancelled) return;
+        if (res.error) {
+          if (res.sessionExpired) setSessionExpired(true);
+          showToast(res.error, true);
+          return;
         }
+        if (!res.data) return;
+
+        const remoteSettings = res.data.notification_settings;
+        const baseAlert =
+          typeof res.data.email_breaking_alerts === 'boolean'
+            ? res.data.email_breaking_alerts
+            : DEFAULT_NOTIF_SETTINGS.urgentEvents;
+
+        const merged =
+          remoteSettings && typeof remoteSettings === 'object'
+            ? {
+                ...DEFAULT_NOTIF_SETTINGS,
+                urgentEvents: baseAlert,
+                ...remoteSettings
+              }
+            : {
+                ...DEFAULT_NOTIF_SETTINGS,
+                urgentEvents: baseAlert
+              };
+
+        setSettings(merged);
+        try {
+          localStorage.setItem(
+            notificationService.getUserSettingsCacheKey(currentUser.id),
+            JSON.stringify(merged)
+          );
+        } catch {}
       })
-      .catch(() => {});
+      .catch(() => {
+        if (!cancelled) {
+          showToast('Erro de conexão ao sincronizar preferências de alerta.', true);
+        }
+      });
 
     return () => {
       cancelled = true;
@@ -578,6 +603,28 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
           </button>
 
           <button
+            onClick={() => setActiveTab('fontes')}
+            className={`px-3.5 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition cursor-pointer ${
+              activeTab === 'fontes'
+                ? 'bg-white text-black shadow-sm'
+                : 'bg-[#111216] text-zinc-400 hover:text-white border border-[#1e2026]'
+            }`}
+          >
+            Fontes
+          </button>
+
+          <button
+            onClick={() => setActiveTab('atualizacoes')}
+            className={`px-3.5 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition cursor-pointer ${
+              activeTab === 'atualizacoes'
+                ? 'bg-white text-black shadow-sm'
+                : 'bg-[#111216] text-zinc-400 hover:text-white border border-[#1e2026]'
+            }`}
+          >
+            Briefings
+          </button>
+
+          <button
             onClick={() => setFilterOnlyUnread(!filterOnlyUnread)}
             className={`px-3.5 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition cursor-pointer ml-auto shrink-0 flex items-center gap-1.5 ${
               filterOnlyUnread
@@ -821,6 +868,42 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
               </div>
               <span className="font-mono text-zinc-500 text-[11px]">{counts.temas}</span>
             </button>
+
+            <button
+              onClick={() => {
+                setActiveTab('fontes');
+                setFilterOnlyUnread(false);
+              }}
+              className={`w-full flex items-center justify-between p-2 rounded-xl transition cursor-pointer ${
+                activeTab === 'fontes'
+                  ? 'bg-zinc-800 text-white font-semibold'
+                  : 'text-zinc-300 hover:bg-[#16181f] hover:text-white'
+              }`}
+            >
+              <div className="flex items-center gap-2.5">
+                <Rss className="w-4 h-4 text-zinc-400" />
+                <span>Fontes</span>
+              </div>
+              <span className="font-mono text-zinc-500 text-[11px]">{counts.fontes}</span>
+            </button>
+
+            <button
+              onClick={() => {
+                setActiveTab('atualizacoes');
+                setFilterOnlyUnread(false);
+              }}
+              className={`w-full flex items-center justify-between p-2 rounded-xl transition cursor-pointer ${
+                activeTab === 'atualizacoes'
+                  ? 'bg-zinc-800 text-white font-semibold'
+                  : 'text-zinc-300 hover:bg-[#16181f] hover:text-white'
+              }`}
+            >
+              <div className="flex items-center gap-2.5">
+                <FileText className="w-4 h-4 text-zinc-400" />
+                <span>Briefings</span>
+              </div>
+              <span className="font-mono text-zinc-500 text-[11px]">{counts.atualizacoes}</span>
+            </button>
           </div>
         </div>
 
@@ -861,8 +944,8 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
             </div>
 
             <div className="space-y-3 text-xs">
-              <label className="flex items-center justify-between p-2 rounded-lg bg-zinc-900/50 cursor-pointer">
-                <span>Acontecimentos urgentes</span>
+              <label className="flex items-center justify-between p-2.5 rounded-lg bg-zinc-900/50 cursor-pointer">
+                <span>Acontecimentos importantes</span>
                 <input
                   type="checkbox"
                   checked={settings.urgentEvents}
@@ -871,8 +954,8 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
                 />
               </label>
 
-              <label className="flex items-center justify-between p-2 rounded-lg bg-zinc-900/50 cursor-pointer">
-                <span>Atualizações de empresas seguidas</span>
+              <label className="flex items-center justify-between p-2.5 rounded-lg bg-zinc-900/50 cursor-pointer">
+                <span>Atualizações de entidades seguidas</span>
                 <input
                   type="checkbox"
                   checked={settings.entityUpdates}
@@ -881,8 +964,8 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
                 />
               </label>
 
-              <label className="flex items-center justify-between p-2 rounded-lg bg-zinc-900/50 cursor-pointer">
-                <span>Alertas de temas monitorados</span>
+              <label className="flex items-center justify-between p-2.5 rounded-lg bg-zinc-900/50 cursor-pointer">
+                <span>Alertas sobre temas</span>
                 <input
                   type="checkbox"
                   checked={settings.topicAlerts}
@@ -891,12 +974,32 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
                 />
               </label>
 
-              <label className="flex items-center justify-between p-2 rounded-lg bg-zinc-900/50 cursor-pointer">
-                <span>Avisos de Briefings diários</span>
+              <label className="flex items-center justify-between p-2.5 rounded-lg bg-zinc-900/50 cursor-pointer">
+                <span>Notícias de fontes seguidas</span>
+                <input
+                  type="checkbox"
+                  checked={settings.sourcesDigest}
+                  onChange={(e) => setSettings({ ...settings, sourcesDigest: e.target.checked })}
+                  className="rounded border-zinc-700"
+                />
+              </label>
+
+              <label className="flex items-center justify-between p-2.5 rounded-lg bg-zinc-900/50 cursor-pointer">
+                <span>Briefings prontos</span>
                 <input
                   type="checkbox"
                   checked={settings.dailyBriefings}
                   onChange={(e) => setSettings({ ...settings, dailyBriefings: e.target.checked })}
+                  className="rounded border-zinc-700"
+                />
+              </label>
+
+              <label className="flex items-center justify-between p-2.5 rounded-lg bg-zinc-900/50 cursor-pointer">
+                <span>Apenas notificações de alta relevância</span>
+                <input
+                  type="checkbox"
+                  checked={settings.onlyHighRelevance}
+                  onChange={(e) => setSettings({ ...settings, onlyHighRelevance: e.target.checked })}
                   className="rounded border-zinc-700"
                 />
               </label>

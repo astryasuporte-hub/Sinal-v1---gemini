@@ -197,13 +197,36 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
         }
         const prefs = res.data;
         if (prefs) {
-          if (prefs.briefing_email) setEmailAddress(prefs.briefing_email);
-          if (typeof prefs.email_morning_briefing === 'boolean') setMorningEnabled(prefs.email_morning_briefing);
-          if (typeof prefs.email_evening_briefing === 'boolean') setEveningEnabled(prefs.email_evening_briefing);
-          if (prefs.morning_time) setMorningTime(prefs.morning_time);
-          if (prefs.evening_time) setEveningTime(prefs.evening_time);
-          if (prefs.timezone) setTimezone(prefs.timezone);
-          if (prefs.updated_at) setPrefsUpdatedAt(prefs.updated_at);
+          const nextEmail = prefs.briefing_email || currentUser.email || '';
+          const nextMorning = typeof prefs.email_morning_briefing === 'boolean' ? prefs.email_morning_briefing : true;
+          const nextEvening = typeof prefs.email_evening_briefing === 'boolean' ? prefs.email_evening_briefing : true;
+          const nextMorningTime = prefs.morning_time || '07:00';
+          const nextEveningTime = prefs.evening_time || '20:00';
+          const nextTz = prefs.timezone || 'America/Sao_Paulo';
+          const nextUpdatedAt = prefs.updated_at || null;
+
+          setEmailAddress(nextEmail);
+          setMorningEnabled(nextMorning);
+          setEveningEnabled(nextEvening);
+          setMorningTime(nextMorningTime);
+          setEveningTime(nextEveningTime);
+          setTimezone(nextTz);
+          setPrefsUpdatedAt(nextUpdatedAt);
+
+          try {
+            localStorage.setItem(
+              `fatosbr_briefing_prefs_${currentUser.id}`,
+              JSON.stringify({
+                emailAddress: nextEmail,
+                morningEnabled: nextMorning,
+                eveningEnabled: nextEvening,
+                morningTime: nextMorningTime,
+                eveningTime: nextEveningTime,
+                timezone: nextTz,
+                updatedAt: nextUpdatedAt
+              })
+            );
+          } catch {}
         }
       })
       .finally(() => {
@@ -621,9 +644,14 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
                       className="w-14 h-14 rounded-lg object-cover mr-4 shrink-0 border border-zinc-800"
                     />
                     <div className="flex-1 min-w-0 pr-3">
-                      <h4 className="text-sm font-semibold text-white mb-1 truncate group-hover:text-zinc-200">
-                        {briefing.title}
-                      </h4>
+                      <div className="flex items-center gap-2 mb-1 min-w-0">
+                        <h4 className="text-sm font-semibold text-white truncate group-hover:text-zinc-200">
+                          {briefing.title}
+                        </h4>
+                        <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-zinc-900 border border-zinc-800 text-zinc-300 shrink-0">
+                          {briefing.status}
+                        </span>
+                      </div>
                       <div className="flex items-center gap-2 text-xs text-zinc-400 font-medium flex-wrap">
                         <span>{briefing.eventsCount} acontecimentos</span>
                         <span className="w-1 h-1 rounded-full bg-zinc-600" />
@@ -658,9 +686,14 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
                       className="w-14 h-14 rounded-lg object-cover mr-4 shrink-0 border border-zinc-800"
                     />
                     <div className="flex-1 min-w-0 pr-3">
-                      <h4 className="text-sm font-semibold text-white mb-1 truncate group-hover:text-zinc-200">
-                        {briefing.title}
-                      </h4>
+                      <div className="flex items-center gap-2 mb-1 min-w-0">
+                        <h4 className="text-sm font-semibold text-white truncate group-hover:text-zinc-200">
+                          {briefing.title}
+                        </h4>
+                        <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-zinc-900 border border-zinc-800 text-zinc-300 shrink-0">
+                          {briefing.status}
+                        </span>
+                      </div>
                       <div className="flex items-center gap-2 text-xs text-zinc-400 font-medium flex-wrap">
                         <span>{briefing.eventsCount} acontecimentos</span>
                         <span className="w-1 h-1 rounded-full bg-zinc-600" />
@@ -817,6 +850,10 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
                 <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4 text-xs text-zinc-300">
                   A geração desta edição apresentou falha no servidor e não possui acontecimentos consolidados.
                 </div>
+              ) : selectedBriefing.rawStatus === 'CANCELED' ? (
+                <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4 text-xs text-zinc-300">
+                  Esta edição foi cancelada antes da conclusão e não possui acontecimentos publicados.
+                </div>
               ) : selectedBriefing.rawEvents && selectedBriefing.rawEvents.length > 0 ? (
                 <div className="divide-y divide-zinc-800/70">
                   {selectedBriefing.rawEvents.map((ev) => (
@@ -854,9 +891,11 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
                 </div>
               ) : (
                 <div className="rounded-xl border border-zinc-800/80 bg-zinc-900/30 p-5 text-center text-xs text-zinc-400">
-                  {selectedBriefing.rawStatus === 'PENDING' || selectedBriefing.rawStatus === 'PROCESSING'
-                    ? 'Este briefing ainda está em preparação e os acontecimentos serão listados assim que a edição for concluída.'
-                    : 'Nenhum acontecimento vinculado a esta edição.'}
+                  {selectedBriefing.rawStatus === 'PENDING'
+                    ? 'Este briefing está agendado e será preparado no próximo ciclo de geração.'
+                    : selectedBriefing.rawStatus === 'GENERATING'
+                      ? 'Este briefing está em preparação e os acontecimentos serão listados assim que a edição for concluída.'
+                      : 'Nenhum acontecimento vinculado a esta edição.'}
                 </div>
               )}
             </div>

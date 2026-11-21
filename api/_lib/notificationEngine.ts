@@ -2,27 +2,36 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * FatosBR — Motor Server-side Seguro de Notificações (V2.3)
+ * FatosBR — Motor Server-side Seguro de Notificações (V2.3.1)
  *
- * Diretrizes V2.3:
- * 1. Execução exclusivamente server-side com conexão segura ao PostgreSQL / Supabase service_role.
- * 2. Idempotência estrita: Prevenção de duplicação por (user_id, event_id, category).
- * 3. Segmentação editorial: Alertas de alta relevância respeitam temas, entidades ou fontes seguidas e preferências do usuário.
- * 4. Tipos canônicos: BRIEFING_READY, NEWS_HIGH_RELEVANCE, EVENT_UPDATED, OPERATIONAL_ALERT.
+ * Diretrizes V2.3.1:
+ * 1. Execução exclusivamente server-side com PostgreSQL nativo ou Supabase service_role.
+ * 2. Tipos canônicos 100% compatíveis com a constraint auditada de public.notifications:
+ *    NEWS_HIGH_RELEVANCE | BRIEFING_READY | TRIAL_EXPIRING | TRIAL_EXPIRED |
+ *    SUBSCRIPTION_ACTIVE | PAYMENT_FAILED | SYSTEM.
+ * 3. Consulta canônica de preferências em public.user_settings e public.user_preferences
+ *    sem falhas silenciosas e com fail-closed se preferências não puderem ser verificadas.
+ * 4. Idempotência concorrente via constraint/índice único + tratamento de violação 23505.
  */
 
 import { executeSql, isPostgresConfigured } from './postgres.js';
 import { getServerSupabase } from './db.js';
 
-export type NotificationType =
-  | 'BRIEFING_READY'
-  | 'NEWS_HIGH_RELEVANCE'
-  | 'EVENT_UPDATED'
-  | 'OPERATIONAL_ALERT';
+export const ALLOWED_NOTIFICATION_TYPES = [
+  'NEWS_HIGH_RELEVANCE',
+  'BRIEFING_READY',
+  'TRIAL_EXPIRING',
+  'TRIAL_EXPIRED',
+  'SUBSCRIPTION_ACTIVE',
+  'PAYMENT_FAILED',
+  'SYSTEM',
+] as const;
+
+export type NotificationType = (typeof ALLOWED_NOTIFICATION_TYPES)[number];
 
 export interface CreateNotificationParams {
   userId: string;
-  type: NotificationType;
+  type: NotificationType | 'EVENT_UPDATED' | 'OPERATIONAL_ALERT';
   title: string;
   subtitle?: string;
   category?: 'acontecimentos' | 'entidades' | 'temas' | 'fontes' | 'atualizacoes';
@@ -42,9 +51,219 @@ export interface SegmentedEventDispatchInput {
   type?: 'NEWS_HIGH_RELEVANCE' | 'EVENT_UPDATED';
 }
 
+export interface UserAlertPreferencesRecord {
+  userId: string;
+  emailBreakingAlerts: boolean;
+  urgentEvents: boolean;
+  entityUpdates: boolean;
+  topicAlerts: boolean;
+  sourcesDigest: boolean;
+  dailyBriefings: boolean;
+  onlyHighRelevance: boolean;
+}
+
+interface NotificationEngineDeps {
+  executeSql: typeof executeSql;
+  isPostgresConfigured: typeof isPostgresConfigured;
+  getServerSupabase: typeof getServerSupabase;
+}
+
+let customDeps: NotificationEngineDeps | null = null;
+
+export function setNotificationEngineTestDeps(deps: Partial<NotificationEngineDeps> | null): void {
+  if (!deps) {
+    customDeps = null;
+    return;
+  }
+  customDeps = {
+    executeSql: deps.executeSql || executeSql,
+    isPostgresConfigured: deps.isPostgresConfigured || isPostgresConfigured,
+    getServerSupabase: deps.getServerSupabase || getServerSupabase,
+  };
+}
+
+function getDeps(): NotificationEngineDeps {
+  return (
+    customDeps || {
+      executeSql,
+      isPostgresConfigured,
+      getServerSupabase,
+    }
+  );
+}
+
+/**
+ * Normaliza o tipo para valores estritamente aceitos pela constraint de public.notifications.
+ * Valores legados fora da constraint (ex: EVENT_UPDATED, OPERATIONAL_ALERT) são mapeados
+ * sem violar o contrato do PostgreSQL.
+ */
+export function normalizeNotificationType(raw: unknown): NotificationType {
+  const upper = String(raw || 'NEWS_HIGH_RELEVANCE').trim().toUpperCase();
+  if ((ALLOWED_NOTIFICATION_TYPES as readonly string[]).includes(upper)) {
+    return upper as NotificationType;
+  }
+  if (upper === 'EVENT_UPDATED') return 'NEWS_HIGH_RELEVANCE';
+  if (upper === 'OPERATIONAL_ALERT') return 'SYSTEM';
+  return 'SYSTEM';
+}
+
+function isMissingColumnError(err: any): boolean {
+  const msg = String(err?.message || '').toLowerCase();
+  const code = String(err?.code || '');
+  return (
+    code === '42703' ||
+    code === 'PGRST204' ||
+    (msg.includes('column') && msg.includes('does not exist')) ||
+    msg.includes('schema cache')
+  );
+}
+
+function isMissingRelationError(err: any): boolean {
+  const msg = String(err?.message || '').toLowerCase();
+  const code = String(err?.code || '');
+  return (
+    code === '42P01' ||
+    code === 'PGRST205' ||
+    (msg.includes('relation') && msg.includes('does not exist')) ||
+    msg.includes('could not find the table')
+  );
+}
+
+function isUniqueViolationError(err: any): boolean {
+  const msg = String(err?.message || '').toLowerCase();
+  const code = String(err?.code || '');
+  return code === '23505' || msg.includes('duplicate key value') || msg.includes('unique constraint');
+}
+
+function mapPreferenceRow(userId: string, prefRow: any, settingsRow: any): UserAlertPreferencesRecord {
+  const ns =
+    (settingsRow?.notification_settings && typeof settingsRow.notification_settings === 'object'
+      ? settingsRow.notification_settings
+      : null) ??
+    (prefRow?.notification_settings && typeof prefRow.notification_settings === 'object'
+      ? prefRow.notification_settings
+      : null);
+
+  const baseBreaking =
+    typeof prefRow?.email_breaking_alerts === 'boolean'
+      ? prefRow.email_breaking_alerts
+      : typeof settingsRow?.email_breaking_alerts === 'boolean'
+        ? settingsRow.email_breaking_alerts
+        : true;
+
+  return {
+    userId,
+    emailBreakingAlerts: baseBreaking,
+    urgentEvents: typeof ns?.urgentEvents === 'boolean' ? ns.urgentEvents : baseBreaking,
+    entityUpdates: typeof ns?.entityUpdates === 'boolean' ? ns.entityUpdates : true,
+    topicAlerts: typeof ns?.topicAlerts === 'boolean' ? ns.topicAlerts : true,
+    sourcesDigest: typeof ns?.sourcesDigest === 'boolean' ? ns.sourcesDigest : true,
+    dailyBriefings: typeof ns?.dailyBriefings === 'boolean' ? ns.dailyBriefings : true,
+    onlyHighRelevance: typeof ns?.onlyHighRelevance === 'boolean' ? ns.onlyHighRelevance : true,
+  };
+}
+
+async function fetchUserAlertPreferences(
+  userIds: string[]
+): Promise<{ map: Map<string, UserAlertPreferencesRecord>; error?: string }> {
+  const { getServerSupabase: getSb } = getDeps();
+  const map = new Map<string, UserAlertPreferencesRecord>();
+  if (userIds.length === 0) return { map };
+
+  const supabase = getSb();
+  const prefByUser = new Map<string, any>();
+  const settingsByUser = new Map<string, any>();
+
+  // 1. Consulta public.user_preferences (tenta com notification_settings; se ausente, lê colunas base sem falhar)
+  let prefErrorMsg: string | null = null;
+  let prefAvailable = false;
+  try {
+    let { data: prefRows, error: prefErr } = await (supabase as any)
+      .from('user_preferences')
+      .select('id, email_breaking_alerts, email_morning_briefing, email_evening_briefing, notification_settings')
+      .in('id', userIds);
+
+    if (prefErr && isMissingColumnError(prefErr)) {
+      const retry = await (supabase as any)
+        .from('user_preferences')
+        .select('id, email_breaking_alerts, email_morning_briefing, email_evening_briefing')
+        .in('id', userIds);
+      prefRows = retry.data;
+      prefErr = retry.error;
+    }
+
+    if (prefErr) {
+      if (!isMissingRelationError(prefErr)) {
+        prefErrorMsg = prefErr.message || 'Erro ao consultar user_preferences';
+      }
+    } else {
+      prefAvailable = true;
+      for (const row of prefRows || []) {
+        if (row?.id) prefByUser.set(String(row.id), row);
+      }
+    }
+  } catch (err: any) {
+    prefErrorMsg = err?.message || 'Exceção ao consultar user_preferences';
+  }
+
+  // 2. Consulta armazenamento canônico em public.user_settings
+  let settingsErrorMsg: string | null = null;
+  let settingsAvailable = false;
+  try {
+    let { data: settingsRows, error: settingsErr } = await (supabase as any)
+      .from('user_settings')
+      .select('user_id, email_breaking_alerts, notification_settings')
+      .in('user_id', userIds);
+
+    if (settingsErr && isMissingColumnError(settingsErr)) {
+      const retry = await (supabase as any)
+        .from('user_settings')
+        .select('user_id')
+        .in('user_id', userIds);
+      settingsRows = retry.data;
+      settingsErr = retry.error;
+    }
+
+    if (settingsErr) {
+      if (!isMissingRelationError(settingsErr)) {
+        settingsErrorMsg = settingsErr.message || 'Erro ao consultar user_settings';
+      }
+    } else {
+      settingsAvailable = true;
+      for (const row of settingsRows || []) {
+        if (row?.user_id) settingsByUser.set(String(row.user_id), row);
+      }
+    }
+  } catch (err: any) {
+    settingsErrorMsg = err?.message || 'Exceção ao consultar user_settings';
+  }
+
+  if (!prefAvailable && !settingsAvailable) {
+    const errText = prefErrorMsg || settingsErrorMsg || 'Nenhuma fonte de preferências de usuário disponível.';
+    console.error('[NotificationEngine] Falha ao carregar preferências (fail-closed):', errText);
+    return { map, error: errText };
+  }
+
+  if (prefErrorMsg) {
+    console.warn('[NotificationEngine] Aviso ao consultar user_preferences:', prefErrorMsg);
+  }
+  if (settingsErrorMsg) {
+    console.warn('[NotificationEngine] Aviso ao consultar user_settings:', settingsErrorMsg);
+  }
+
+  for (const uid of userIds) {
+    map.set(uid, mapPreferenceRow(uid, prefByUser.get(uid), settingsByUser.get(uid)));
+  }
+
+  return { map };
+}
+
 export const notificationEngine = {
+  fetchUserAlertPreferences,
+
   /**
-   * Cria uma notificação no Supabase de forma segura e idempotente (deduplicada por user_id + event_id + category).
+   * Cria uma notificação no Supabase de forma segura, compatível com a constraint de tipos
+   * e idempotente mesmo sob requisições concorrentes.
    */
   async createNotification(
     params: CreateNotificationParams
@@ -57,57 +276,79 @@ export const notificationEngine = {
       category = 'acontecimentos',
       eventId,
       entityId,
-      metadata = {}
+      metadata = {},
     } = params;
 
     if (!userId || !title) {
       return { success: false, error: 'INVALID_PARAMS' };
     }
 
-    const enrichedMetadata = { ...metadata, notification_type: type };
+    const canonicalType = normalizeNotificationType(type);
+    const enrichedMetadata: Record<string, any> = { ...metadata, notification_type: canonicalType };
+    const { executeSql: runSql, isPostgresConfigured: pgConfigured, getServerSupabase: getSb } = getDeps();
 
     // 1. Tentar persistência direta via PostgreSQL nativo se configurado
-    if (isPostgresConfigured()) {
+    if (pgConfigured()) {
       try {
-        if (eventId) {
-          const checkRes = await executeSql(
-            `SELECT id FROM public.notifications
-             WHERE user_id = $1 AND event_id = $2 AND category = $3
-             LIMIT 1`,
-            [userId, eventId, category]
-          );
-          if (checkRes.rows.length > 0) {
-            return { success: true, id: checkRes.rows[0].id, duplicate: true };
-          }
-        }
-
-        const insertRes = await executeSql(
-          `INSERT INTO public.notifications (user_id, title, subtitle, category, read, event_id, entity_id, metadata, created_at)
-           VALUES ($1, $2, $3, $4, FALSE, $5, $6, $7, NOW())
+        const insertRes = await runSql(
+          `INSERT INTO public.notifications (user_id, type, title, subtitle, category, read, event_id, entity_id, metadata, created_at)
+           VALUES ($1, $2, $3, $4, $5, FALSE, $6, $7, $8, NOW())
+           ON CONFLICT DO NOTHING
            RETURNING id`,
           [
             userId,
+            canonicalType,
             title,
             subtitle || null,
             category,
             eventId || null,
             entityId || null,
-            JSON.stringify(enrichedMetadata)
+            JSON.stringify(enrichedMetadata),
           ]
         );
 
-        return { success: true, id: insertRes.rows[0]?.id };
+        if (insertRes.rows[0]?.id) {
+          return { success: true, id: insertRes.rows[0].id };
+        }
+
+        // Conflito idempotente (ON CONFLICT DO NOTHING) -> localiza registro existente
+        if (eventId) {
+          const existingRes = await runSql(
+            `SELECT id FROM public.notifications
+             WHERE user_id = $1 AND event_id = $2 AND category = $3
+             LIMIT 1`,
+            [userId, eventId, category]
+          );
+          if (existingRes.rows[0]?.id) {
+            return { success: true, id: existingRes.rows[0].id, duplicate: true };
+          }
+        }
+        if (enrichedMetadata?.briefingId) {
+          const existingBriefing = await runSql(
+            `SELECT id FROM public.notifications
+             WHERE user_id = $1 AND metadata->>'briefingId' = $2 AND type = $3
+             LIMIT 1`,
+            [userId, String(enrichedMetadata.briefingId), canonicalType]
+          );
+          if (existingBriefing.rows[0]?.id) {
+            return { success: true, id: existingBriefing.rows[0].id, duplicate: true };
+          }
+        }
+        return { success: true, duplicate: true };
       } catch (err: any) {
-        console.warn('[NotificationEngine] Falha ao gravar via PostgreSQL direto:', err?.message);
+        if (isUniqueViolationError(err)) {
+          return { success: true, duplicate: true };
+        }
+        console.warn('[NotificationEngine] Falha ao gravar via PostgreSQL direto:', err?.code || err?.message);
       }
     }
 
-    // 2. Fallback controlado via Supabase Client server-side (service_role)
+    // 2. Persistência via Supabase Client server-side (service_role)
     try {
-      const supabase = getServerSupabase();
+      const supabase = getSb();
 
       if (eventId) {
-        const { data: existing } = await (supabase as any)
+        const { data: existing, error: checkErr } = await (supabase as any)
           .from('notifications')
           .select('id')
           .eq('user_id', userId)
@@ -115,185 +356,330 @@ export const notificationEngine = {
           .eq('category', category)
           .maybeSingle();
 
-        if (existing?.id) {
+        if (!checkErr && existing?.id) {
           return { success: true, id: existing.id, duplicate: true };
         }
       }
 
-      const { data, error } = await (supabase as any)
+      const rowPayload: Record<string, any> = {
+        user_id: userId,
+        type: canonicalType,
+        title,
+        subtitle: subtitle || null,
+        category,
+        read: false,
+        read_at: null,
+        event_id: eventId || null,
+        entity_id: entityId || null,
+        metadata: enrichedMetadata,
+      };
+
+      let { data, error } = await (supabase as any)
         .from('notifications')
-        .insert({
-          user_id: userId,
-          title,
-          subtitle: subtitle || null,
-          category,
-          read: false,
-          event_id: eventId || null,
-          entity_id: entityId || null,
-          metadata: enrichedMetadata
-        })
+        .insert(rowPayload)
         .select('id')
         .single();
 
+      // Tolerância estrita apenas para colunas opcionais não aplicadas ainda (ex: read_at)
+      if (error && isMissingColumnError(error)) {
+        const fallbackPayload = { ...rowPayload };
+        if (String(error.message || '').toLowerCase().includes('read_at')) {
+          delete fallbackPayload.read_at;
+        }
+        if (String(error.message || '').toLowerCase().includes('subtitle')) {
+          fallbackPayload.body = fallbackPayload.subtitle;
+          delete fallbackPayload.subtitle;
+        }
+        const retry = await (supabase as any)
+          .from('notifications')
+          .insert(fallbackPayload)
+          .select('id')
+          .single();
+        data = retry.data;
+        error = retry.error;
+      }
+
       if (error) {
-        console.warn('[NotificationEngine] Erro ao inserir via Supabase:', error.message);
+        if (isUniqueViolationError(error)) {
+          if (eventId) {
+            const { data: existing } = await (supabase as any)
+              .from('notifications')
+              .select('id')
+              .eq('user_id', userId)
+              .eq('event_id', eventId)
+              .eq('category', category)
+              .maybeSingle();
+            return { success: true, id: existing?.id, duplicate: true };
+          }
+          return { success: true, duplicate: true };
+        }
+
+        console.error('[NotificationEngine] Erro ao inserir notificação no Supabase:', {
+          code: error.code,
+          type: canonicalType,
+          message: error.message,
+        });
         return { success: false, error: error.message };
       }
 
       return { success: true, id: data?.id };
     } catch (err: any) {
-      console.warn('[NotificationEngine] Erro geral ao criar notificação:', err?.message);
+      console.error('[NotificationEngine] Erro geral ao criar notificação:', err?.message);
       return { success: false, error: err?.message };
     }
   },
 
   /**
-   * Cria notificação de Briefing pronto vinculada ao usuário e ao ID real do briefing persistido.
+   * Cria notificação de Briefing pronto vinculada ao usuário e ao ID real do briefing persistido,
+   * respeitando a preferência dailyBriefings do usuário e garantindo deduplicação por briefingId.
    */
   async createBriefingReadyNotification(params: {
     userId: string;
     briefingId: string;
-    briefingType: 'morning' | 'evening';
+    briefingType: 'morning' | 'evening' | 'MORNING' | 'EVENING';
     title: string;
     eventsCount: number;
-  }): Promise<{ success: boolean; id?: string; duplicate?: boolean }> {
-    const supabase = getServerSupabase();
+  }): Promise<{ success: boolean; id?: string; duplicate?: boolean; skipped?: boolean; error?: string }> {
+    const { getServerSupabase: getSb } = getDeps();
+    const supabase = getSb();
+
+    const prefCheck = await fetchUserAlertPreferences([params.userId]);
+    if (prefCheck.error) {
+      return { success: false, error: prefCheck.error };
+    }
+    const userPrefs = prefCheck.map.get(params.userId);
+    if (userPrefs && !userPrefs.dailyBriefings) {
+      return { success: true, skipped: true };
+    }
+
     try {
-      // Deduplicação por briefingId no metadata
-      const { data: existing } = await (supabase as any)
+      const { data: existing, error: dupErr } = await (supabase as any)
         .from('notifications')
         .select('id')
         .eq('user_id', params.userId)
-        .eq('category', 'atualizacoes')
+        .eq('type', 'BRIEFING_READY')
         .contains('metadata', { briefingId: params.briefingId })
         .maybeSingle();
 
-      if (existing?.id) {
+      if (!dupErr && existing?.id) {
         return { success: true, id: existing.id, duplicate: true };
       }
-    } catch {}
+    } catch (err: any) {
+      console.warn('[NotificationEngine] Aviso ao checar duplicidade de briefingId:', err?.message);
+    }
 
+    const isEvening = String(params.briefingType).toUpperCase() === 'EVENING';
     return this.createNotification({
       userId: params.userId,
       type: 'BRIEFING_READY',
       category: 'atualizacoes',
       title: params.title,
       subtitle: `${params.eventsCount} acontecimentos consolidados no seu ${
-        params.briefingType === 'evening' ? 'resumo da noite' : 'resumo da manhã'
+        isEvening ? 'resumo da noite' : 'resumo da manhã'
       }.`,
       metadata: {
         briefingId: params.briefingId,
-        briefingType: params.briefingType
-      }
+        briefingType: isEvening ? 'EVENING' : 'MORNING',
+      },
     });
   },
 
   /**
    * Serviço isolado de segmentação para acontecimentos reais persistidos.
-   * Não dispara alertas globais indiscriminados: apenas para usuários que seguem
-   * tópicos, entidades ou fontes relacionados E têm alertas habilitados.
+   * Respeita interesses seguidos (entidades, temas, fontes), relevância e preferências reais do usuário.
    */
   async dispatchSegmentedNotificationsForEvent(
     input: SegmentedEventDispatchInput
-  ): Promise<{ targetedUsers: number; created: number; duplicates: number; errors: number }> {
-    const stats = { targetedUsers: 0, created: 0, duplicates: 0, errors: 0 };
+  ): Promise<{
+    targetedUsers: number;
+    created: number;
+    duplicates: number;
+    skippedByPreferences: number;
+    errors: number;
+    errorDetails?: string[];
+  }> {
+    const stats: {
+      targetedUsers: number;
+      created: number;
+      duplicates: number;
+      skippedByPreferences: number;
+      errors: number;
+      errorDetails?: string[];
+    } = {
+      targetedUsers: 0,
+      created: 0,
+      duplicates: 0,
+      skippedByPreferences: 0,
+      errors: 0,
+    };
+
     if (!input.eventId || !input.title) return stats;
 
-    // Respeita limiar mínimo de relevância para evitar fadiga de alertas
-    if (typeof input.relevanceScore === 'number' && input.relevanceScore < 70) {
+    const relevanceScore = typeof input.relevanceScore === 'number' ? input.relevanceScore : 75;
+    if (relevanceScore < 70) {
       return stats;
     }
 
-    const supabase = getServerSupabase();
-    const targetUsersMap = new Map<
+    const { getServerSupabase: getSb } = getDeps();
+    const supabase = getSb();
+    const errorDetails: string[] = [];
+
+    const userSignals = new Map<
       string,
-      { category: 'acontecimentos' | 'entidades' | 'temas' | 'fontes'; entityId?: string }
+      { entityId?: string; hasEntity: boolean; hasTopic: boolean; hasSource: boolean }
     >();
 
+    const ensureSignal = (uid: string) => {
+      let cur = userSignals.get(uid);
+      if (!cur) {
+        cur = { hasEntity: false, hasTopic: false, hasSource: false };
+        userSignals.set(uid, cur);
+      }
+      return cur;
+    };
+
     try {
-      // 1. Seguidores de entidades relacionadas (prioridade alta)
+      // 1. Seguidores de entidades relacionadas
       if (input.entityIds && input.entityIds.length > 0) {
-        const { data: entFollows } = await (supabase as any)
+        const { data: entFollows, error: entErr } = await (supabase as any)
           .from('user_entity_follows')
           .select('user_id, entity_id')
           .in('entity_id', input.entityIds);
 
-        for (const row of entFollows || []) {
-          if (row.user_id && !targetUsersMap.has(row.user_id)) {
-            targetUsersMap.set(row.user_id, { category: 'entidades', entityId: row.entity_id });
+        if (entErr) {
+          errorDetails.push(`user_entity_follows: ${entErr.message}`);
+          stats.errors++;
+        } else {
+          for (const row of entFollows || []) {
+            if (row?.user_id) {
+              const s = ensureSignal(String(row.user_id));
+              s.hasEntity = true;
+              if (!s.entityId && row.entity_id) s.entityId = String(row.entity_id);
+            }
           }
         }
       }
 
       // 2. Seguidores de tópicos relacionados
       if (input.topicIds && input.topicIds.length > 0) {
-        const { data: topicFollows } = await (supabase as any)
+        const { data: topicFollows, error: topicErr } = await (supabase as any)
           .from('user_topic_follows')
           .select('user_id')
           .in('topic_id', input.topicIds);
 
-        for (const row of topicFollows || []) {
-          if (row.user_id && !targetUsersMap.has(row.user_id)) {
-            targetUsersMap.set(row.user_id, { category: 'temas' });
+        if (topicErr) {
+          errorDetails.push(`user_topic_follows: ${topicErr.message}`);
+          stats.errors++;
+        } else {
+          for (const row of topicFollows || []) {
+            if (row?.user_id) {
+              ensureSignal(String(row.user_id)).hasTopic = true;
+            }
           }
         }
       }
 
       // 3. Seguidores de fontes relacionadas
       if (input.sourceIds && input.sourceIds.length > 0) {
-        const { data: srcFollows } = await (supabase as any)
+        const { data: srcFollows, error: srcErr } = await (supabase as any)
           .from('user_source_follows')
           .select('user_id')
           .in('source_id', input.sourceIds);
 
-        for (const row of srcFollows || []) {
-          if (row.user_id && !targetUsersMap.has(row.user_id)) {
-            targetUsersMap.set(row.user_id, { category: 'fontes' });
+        if (srcErr) {
+          errorDetails.push(`user_source_follows: ${srcErr.message}`);
+          stats.errors++;
+        } else {
+          for (const row of srcFollows || []) {
+            if (row?.user_id) {
+              ensureSignal(String(row.user_id)).hasSource = true;
+            }
           }
         }
       }
 
-      stats.targetedUsers = targetUsersMap.size;
-      if (stats.targetedUsers === 0) return stats;
+      stats.targetedUsers = userSignals.size;
+      if (stats.targetedUsers === 0) {
+        if (errorDetails.length > 0) stats.errorDetails = errorDetails;
+        return stats;
+      }
 
-      // 4. Filtra preferências de alertas de cada usuário e persiste com deduplicação
-      const userIds = Array.from(targetUsersMap.keys());
-      const disabledUsers = new Set<string>();
+      // 4. Carrega preferências canônicas com fail-closed se falhar
+      const userIds = Array.from(userSignals.keys());
+      const prefsResult = await fetchUserAlertPreferences(userIds);
+      if (prefsResult.error) {
+        stats.errors += userIds.length;
+        stats.errorDetails = [...errorDetails, prefsResult.error];
+        return stats;
+      }
 
-      try {
-        const { data: prefsRows } = await (supabase as any)
-          .from('user_preferences')
-          .select('id, email_breaking_alerts, notification_settings')
-          .in('id', userIds);
+      const canonicalType = normalizeNotificationType(input.type || 'NEWS_HIGH_RELEVANCE');
 
-        for (const p of prefsRows || []) {
-          if (p.email_breaking_alerts === false) disabledUsers.add(p.id);
-          if (p.notification_settings?.urgentEvents === false) disabledUsers.add(p.id);
+      for (const [userId, signals] of userSignals.entries()) {
+        const prefs = prefsResult.map.get(userId);
+
+        if (!prefs) {
+          stats.errors++;
+          continue;
         }
-      } catch {}
 
-      for (const [userId, target] of targetUsersMap.entries()) {
-        if (disabledUsers.has(userId)) continue;
+        // Bloqueio global de alertas importantes
+        if (!prefs.emailBreakingAlerts || !prefs.urgentEvents) {
+          stats.skippedByPreferences++;
+          continue;
+        }
+
+        // Filtro estrito de alta relevância quando ativado pelo usuário
+        if (prefs.onlyHighRelevance && relevanceScore < 85) {
+          stats.skippedByPreferences++;
+          continue;
+        }
+
+        // Seleciona a categoria mais prioritária habilitada nas preferências do usuário
+        let chosenCategory: 'entidades' | 'temas' | 'fontes' | null = null;
+        let chosenEntityId: string | undefined;
+
+        if (signals.hasEntity && prefs.entityUpdates) {
+          chosenCategory = 'entidades';
+          chosenEntityId = signals.entityId;
+        } else if (signals.hasTopic && prefs.topicAlerts) {
+          chosenCategory = 'temas';
+        } else if (signals.hasSource && prefs.sourcesDigest) {
+          chosenCategory = 'fontes';
+        }
+
+        if (!chosenCategory) {
+          stats.skippedByPreferences++;
+          continue;
+        }
 
         const res = await this.createNotification({
           userId,
-          type: input.type || 'NEWS_HIGH_RELEVANCE',
-          category: target.category === 'entidades' ? 'entidades' : target.category === 'temas' ? 'temas' : 'acontecimentos',
+          type: canonicalType,
+          category: chosenCategory,
           title: input.title,
           subtitle: input.summary,
           eventId: input.eventId,
-          entityId: target.entityId,
-          metadata: { relevanceScore: input.relevanceScore ?? null }
+          entityId: chosenEntityId,
+          metadata: { relevanceScore },
         });
 
         if (res.duplicate) stats.duplicates++;
         else if (res.success) stats.created++;
-        else stats.errors++;
+        else {
+          stats.errors++;
+          if (res.error) errorDetails.push(res.error);
+        }
       }
     } catch (err: any) {
-      console.warn('[NotificationEngine] Erro na segmentação de notificações:', err?.message);
+      console.error('[NotificationEngine] Erro crítico na segmentação de notificações:', err?.message);
+      stats.errors++;
+      errorDetails.push(err?.message || 'Erro inesperado na segmentação.');
     }
 
+    if (errorDetails.length > 0) {
+      stats.errorDetails = errorDetails;
+    }
     return stats;
-  }
+  },
 };
