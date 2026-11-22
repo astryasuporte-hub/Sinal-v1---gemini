@@ -2,12 +2,12 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * FatosBR — Motor Server-side de Geração e Entrega de Briefings (V2.3.1)
+ * FatosBR — Motor Server-side de Geração e Entrega de Briefings (V2.3.2)
  *
  * Separa rigorosamente as 7 etapas operacionais:
  * 1. Seleção de acontecimentos reais persistidos (priorizando interesses seguidos)
- * 2. Criação do registro de Briefing (type: 'MORNING' | 'EVENING', status: 'GENERATING')
- * 3. Persistência ordenada em public.briefing_items
+ * 2. Criação do registro de Briefing (type: 'MORNING' | 'EVENING', local_date, period_start, period_end, status: 'GENERATING')
+ * 3. Persistência ordenada em public.briefing_items (position + section restrito ao enum canônico do PostgreSQL)
  * 4. Atualização de status para 'READY' (ou 'FAILED' se não houver eventos reais)
  * 5. Criação idempotente de notificação BRIEFING_READY
  * 6. Disparo de e-mail via Resend apenas quando habilitado e operacional
@@ -19,6 +19,19 @@ import { getServerKeys } from './common.js';
 import { notificationEngine } from './notificationEngine.js';
 
 export type BriefingEditionType = 'MORNING' | 'EVENING';
+
+export const ALLOWED_BRIEFING_SECTIONS = [
+  'TOP_STORIES',
+  'UPDATES',
+  'DEVELOPING',
+  'WATCH_NEXT',
+] as const;
+
+export type BriefingItemSection = (typeof ALLOWED_BRIEFING_SECTIONS)[number];
+
+export const DEFAULT_BRIEFING_TIMEZONE = 'America/Sao_Paulo';
+export const DEFAULT_MORNING_TIME = '07:00';
+export const DEFAULT_EVENING_TIME = '20:00';
 
 export interface BriefingEventCandidate {
   id: string;
@@ -37,13 +50,24 @@ export interface EligibleBriefingUser {
   eveningEnabled: boolean;
   weekendEdition: boolean;
   timezone: string;
+  morningTime: string;
+  eveningTime: string;
 }
 
 export interface GenerateBriefingResult {
   userId: string;
   type: BriefingEditionType;
-  status: 'READY' | 'SENT' | 'FAILED' | 'SKIPPED_DUPLICATE' | 'SKIPPED_NO_EVENTS' | 'SKIPPED_DISABLED';
+  status:
+    | 'READY'
+    | 'SENT'
+    | 'FAILED'
+    | 'SKIPPED_DUPLICATE'
+    | 'SKIPPED_NO_EVENTS'
+    | 'SKIPPED_DISABLED';
   briefingId?: string;
+  localDate?: string;
+  periodStart?: string;
+  periodEnd?: string;
   eventsCount: number;
   notificationCreated?: boolean;
   emailSent?: boolean;
@@ -81,50 +105,269 @@ function getDeps(): BriefingEngineDeps {
   );
 }
 
-function isWeekendInTimezone(date: Date, timezone = 'America/Sao_Paulo'): boolean {
+function isMissingColumnError(err: any): boolean {
+  const msg = String(err?.message || '').toLowerCase();
+  const code = String(err?.code || '');
+  return (
+    code === '42703' ||
+    code === 'PGRST204' ||
+    (msg.includes('column') && msg.includes('does not exist')) ||
+    msg.includes('schema cache')
+  );
+}
+
+function isMissingRelationError(err: any): boolean {
+  const msg = String(err?.message || '').toLowerCase();
+  const code = String(err?.code || '');
+  return (
+    code === '42P01' ||
+    code === 'PGRST205' ||
+    (msg.includes('relation') && msg.includes('does not exist')) ||
+    msg.includes('could not find the table')
+  );
+}
+
+export function resolveTimezone(rawTimezone?: string | null): string {
+  const candidate = String(rawTimezone || '').trim() || DEFAULT_BRIEFING_TIMEZONE;
   try {
-    const weekday = new Intl.DateTimeFormat('en-US', { weekday: 'short', timeZone: timezone }).format(date);
-    return weekday === 'Sat' || weekday === 'Sun';
+    new Intl.DateTimeFormat('en-US', { timeZone: candidate });
+    return candidate;
   } catch {
-    const day = date.getUTCDay();
-    return day === 0 || day === 6;
+    return DEFAULT_BRIEFING_TIMEZONE;
   }
 }
 
-function getBriefingPeriodWindow(
-  type: BriefingEditionType,
-  referenceDate: Date
+export function normalizeScheduleTime(raw: unknown, fallback: string): string {
+  const str = String(raw || '').trim();
+  const match = /^(\d{1,2}):(\d{2})/.exec(str);
+  if (!match) return fallback;
+  const h = Number(match[1]);
+  const m = Number(match[2]);
+  if (!Number.isInteger(h) || !Number.isInteger(m) || h < 0 || h > 23 || m < 0 || m > 59) {
+    return fallback;
+  }
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
+export function parseTimeToMinutes(hhmm: string): number {
+  const [hStr, mStr] = hhmm.split(':');
+  return Number(hStr || 0) * 60 + Number(mStr || 0);
+}
+
+export function getZonedDateParts(
+  date: Date,
+  timezone = DEFAULT_BRIEFING_TIMEZONE
 ): {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+  localDate: string;
+  dateLabelPt: string;
+  weekdayShort: string;
+} {
+  const tz = resolveTimezone(timezone);
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    weekday: 'short',
+    hourCycle: 'h23',
+  });
+
+  const partsMap: Record<string, string> = {};
+  for (const part of formatter.formatToParts(date)) {
+    if (part.type !== 'literal') {
+      partsMap[part.type] = part.value;
+    }
+  }
+
+  const year = Number(partsMap.year);
+  const month = Number(partsMap.month);
+  const day = Number(partsMap.day);
+  const rawHour = Number(partsMap.hour);
+  const hour = rawHour === 24 ? 0 : rawHour;
+  const minute = Number(partsMap.minute);
+  const second = Number(partsMap.second);
+
+  const mm = String(month).padStart(2, '0');
+  const dd = String(day).padStart(2, '0');
+
+  return {
+    year,
+    month,
+    day,
+    hour,
+    minute,
+    second,
+    localDate: `${year}-${mm}-${dd}`,
+    dateLabelPt: `${dd}/${mm}/${year}`,
+    weekdayShort: partsMap.weekday || '',
+  };
+}
+
+export function shiftLocalDate(localDate: string, deltaDays: number): string {
+  const [y, m, d] = localDate.split('-').map(Number);
+  const shifted = new Date(Date.UTC(y, m - 1, d + deltaDays));
+  const yy = shifted.getUTCFullYear();
+  const mm = String(shifted.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(shifted.getUTCDate()).padStart(2, '0');
+  return `${yy}-${mm}-${dd}`;
+}
+
+export function zonedWallTimeToUtcDate(
+  localDate: string,
+  hhmm: string,
+  timezone = DEFAULT_BRIEFING_TIMEZONE,
+  second = 0,
+  ms = 0
+): Date {
+  const tz = resolveTimezone(timezone);
+  const [y, m, d] = localDate.split('-').map(Number);
+  const normalizedTime = normalizeScheduleTime(hhmm, '00:00');
+  const [hh, mm] = normalizedTime.split(':').map(Number);
+
+  const targetAsUtc = Date.UTC(y, m - 1, d, hh, mm, second, ms);
+
+  const firstParts = getZonedDateParts(new Date(targetAsUtc), tz);
+  const firstViewedAsUtc = Date.UTC(
+    firstParts.year,
+    firstParts.month - 1,
+    firstParts.day,
+    firstParts.hour,
+    firstParts.minute,
+    firstParts.second,
+    ms
+  );
+  const refined = targetAsUtc + (targetAsUtc - firstViewedAsUtc);
+
+  const secondParts = getZonedDateParts(new Date(refined), tz);
+  const secondViewedAsUtc = Date.UTC(
+    secondParts.year,
+    secondParts.month - 1,
+    secondParts.day,
+    secondParts.hour,
+    secondParts.minute,
+    secondParts.second,
+    ms
+  );
+
+  return new Date(refined + (targetAsUtc - secondViewedAsUtc));
+}
+
+function isWeekendInTimezone(date: Date, timezone = DEFAULT_BRIEFING_TIMEZONE): boolean {
+  const tz = resolveTimezone(timezone);
+  const parts = getZonedDateParts(date, tz);
+  return parts.weekdayShort === 'Sat' || parts.weekdayShort === 'Sun';
+}
+
+export function getBriefingPeriodWindow(
+  type: BriefingEditionType,
+  referenceDate: Date,
+  options?: {
+    timezone?: string | null;
+    morningTime?: string | null;
+    eveningTime?: string | null;
+  }
+): {
+  timezone: string;
+  morningTime: string;
+  eveningTime: string;
+  localDate: string;
   dayStart: string;
   dayEnd: string;
   periodStart: string;
   periodEnd: string;
+  scheduledFor: string;
   dateLabelPt: string;
 } {
-  const y = referenceDate.getUTCFullYear();
-  const m = String(referenceDate.getUTCMonth() + 1).padStart(2, '0');
-  const d = String(referenceDate.getUTCDate()).padStart(2, '0');
-  const dayStart = `${y}-${m}-${d}T00:00:00.000Z`;
-  const dayEnd = `${y}-${m}-${d}T23:59:59.999Z`;
-  const dateLabelPt = `${d}/${m}/${y}`;
+  const timezone = resolveTimezone(options?.timezone);
+  const morningTime = normalizeScheduleTime(options?.morningTime, DEFAULT_MORNING_TIME);
+  const eveningTime = normalizeScheduleTime(options?.eveningTime, DEFAULT_EVENING_TIME);
+
+  const zonedNow = getZonedDateParts(referenceDate, timezone);
+  const localDate = zonedNow.localDate;
+  const prevLocalDate = shiftLocalDate(localDate, -1);
+
+  const dayStart = zonedWallTimeToUtcDate(localDate, '00:00', timezone, 0, 0).toISOString();
+  const dayEnd = zonedWallTimeToUtcDate(localDate, '23:59', timezone, 59, 999).toISOString();
 
   if (type === 'EVENING') {
+    const startDate =
+      parseTimeToMinutes(eveningTime) > parseTimeToMinutes(morningTime)
+        ? zonedWallTimeToUtcDate(localDate, morningTime, timezone, 0, 0)
+        : zonedWallTimeToUtcDate(localDate, '00:00', timezone, 0, 0);
+    const endDate = zonedWallTimeToUtcDate(localDate, eveningTime, timezone, 59, 999);
+
     return {
+      timezone,
+      morningTime,
+      eveningTime,
+      localDate,
       dayStart,
       dayEnd,
-      periodStart: `${y}-${m}-${d}T12:00:00.000Z`,
-      periodEnd: dayEnd,
-      dateLabelPt,
+      periodStart: startDate.toISOString(),
+      periodEnd: endDate.toISOString(),
+      scheduledFor: zonedWallTimeToUtcDate(localDate, eveningTime, timezone, 0, 0).toISOString(),
+      dateLabelPt: zonedNow.dateLabelPt,
     };
   }
 
+  const morningStartDate = zonedWallTimeToUtcDate(prevLocalDate, eveningTime, timezone, 0, 0);
+  const morningEndDate = zonedWallTimeToUtcDate(localDate, morningTime, timezone, 59, 999);
+
   return {
+    timezone,
+    morningTime,
+    eveningTime,
+    localDate,
     dayStart,
     dayEnd,
-    periodStart: dayStart,
-    periodEnd: `${y}-${m}-${d}T11:59:59.999Z`,
-    dateLabelPt,
+    periodStart: morningStartDate.toISOString(),
+    periodEnd: morningEndDate.toISOString(),
+    scheduledFor: zonedWallTimeToUtcDate(localDate, morningTime, timezone, 0, 0).toISOString(),
+    dateLabelPt: zonedNow.dateLabelPt,
   };
+}
+
+export function isUserWithinScheduleWindow(
+  user: Pick<EligibleBriefingUser, 'timezone' | 'morningTime' | 'eveningTime'>,
+  type: BriefingEditionType,
+  referenceDate: Date
+): boolean {
+  const parts = getZonedDateParts(referenceDate, user.timezone);
+  const currentLocalMinutes = parts.hour * 60 + parts.minute;
+  const targetMinutes = parseTimeToMinutes(
+    type === 'EVENING' ? user.eveningTime : user.morningTime
+  );
+  return currentLocalMinutes >= targetMinutes;
+}
+
+/**
+ * Classificação editorial estritamente compatível com a constraint real de public.briefing_items.section:
+ * 'TOP_STORIES' | 'UPDATES' | 'DEVELOPING' | 'WATCH_NEXT'.
+ */
+export function classifyBriefingItemSection(
+  ev: BriefingEventCandidate,
+  index: number,
+  total: number
+): BriefingItemSection {
+  if (ev.isFollowedMatch || index < 2) {
+    return 'TOP_STORIES';
+  }
+  if (ev.relevance_score >= 85 && index < 4) {
+    return 'DEVELOPING';
+  }
+  if (index === total - 1 && total >= 4) {
+    return 'WATCH_NEXT';
+  }
+  return 'UPDATES';
 }
 
 function escapeHtml(raw: string): string {
@@ -172,25 +415,115 @@ function renderBriefingEmailHtml(params: {
 </html>`;
 }
 
+async function fetchUserSchedulePreferences(
+  supabase: any,
+  userId: string
+): Promise<{
+  timezone: string;
+  morningTime: string;
+  eveningTime: string;
+}> {
+  let prefRow: any = null;
+  let settingsRow: any = null;
+
+  try {
+    let { data, error } = await supabase
+      .from('user_preferences')
+      .select('timezone, morning_time, evening_time')
+      .eq('id', userId)
+      .maybeSingle();
+
+    if (error && isMissingColumnError(error)) {
+      const retry = await supabase
+        .from('user_preferences')
+        .select('timezone')
+        .eq('id', userId)
+        .maybeSingle();
+      data = retry.data;
+    }
+    prefRow = data || null;
+  } catch {}
+
+  try {
+    let { data, error } = await supabase
+      .from('user_settings')
+      .select('timezone, morning_time, evening_time')
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    if (error && isMissingColumnError(error)) {
+      const retry = await supabase
+        .from('user_settings')
+        .select('timezone')
+        .eq('user_id', userId)
+        .maybeSingle();
+      data = retry.data;
+    }
+    settingsRow = data || null;
+  } catch {}
+
+  return {
+    timezone: resolveTimezone(prefRow?.timezone || settingsRow?.timezone),
+    morningTime: normalizeScheduleTime(
+      prefRow?.morning_time || settingsRow?.morning_time,
+      DEFAULT_MORNING_TIME
+    ),
+    eveningTime: normalizeScheduleTime(
+      prefRow?.evening_time || settingsRow?.evening_time,
+      DEFAULT_EVENING_TIME
+    ),
+  };
+}
+
 export const briefingEngine = {
   /**
-   * Lista usuários elegíveis a partir de public.user_preferences / public.user_settings.
+   * Lista usuários elegíveis a partir de public.user_preferences / public.user_settings,
+   * respeitando preferências de horário (morning_time / evening_time) e fuso horário individual.
    */
-  async listEligibleUsers(type: BriefingEditionType, referenceDate = new Date()): Promise<EligibleBriefingUser[]> {
+  async listEligibleUsers(
+    type: BriefingEditionType,
+    referenceDate = new Date(),
+    options?: { respectScheduleWindow?: boolean }
+  ): Promise<EligibleBriefingUser[]> {
     const { getServerSupabase: getSb } = getDeps();
     const supabase = getSb();
 
-    const [prefsRes, settingsRes] = await Promise.all([
-      (supabase as any)
+    const fetchPrefs = async () => {
+      const full = await (supabase as any)
         .from('user_preferences')
-        .select('id, briefing_email, email_morning_briefing, email_evening_briefing, weekend_edition, timezone'),
-      (supabase as any)
-        .from('user_settings')
-        .select('user_id, briefing_email, email_morning_briefing, email_evening_briefing, weekend_edition, timezone, notification_settings')
-    ]);
+        .select(
+          'id, briefing_email, email_morning_briefing, email_evening_briefing, weekend_edition, timezone, morning_time, evening_time'
+        );
+      if (full?.error && isMissingColumnError(full.error)) {
+        return (supabase as any)
+          .from('user_preferences')
+          .select(
+            'id, briefing_email, email_morning_briefing, email_evening_briefing, weekend_edition, timezone'
+          );
+      }
+      return full;
+    };
 
-    const prefsMissing = prefsRes?.error && (prefsRes.error.code === '42P01' || prefsRes.error.code === 'PGRST205');
-    const settingsMissing = settingsRes?.error && (settingsRes.error.code === '42P01' || settingsRes.error.code === 'PGRST205');
+    const fetchSettings = async () => {
+      const full = await (supabase as any)
+        .from('user_settings')
+        .select(
+          'user_id, briefing_email, email_morning_briefing, email_evening_briefing, weekend_edition, timezone, morning_time, evening_time, notification_settings'
+        );
+      if (full?.error && isMissingColumnError(full.error)) {
+        return (supabase as any)
+          .from('user_settings')
+          .select(
+            'user_id, briefing_email, email_morning_briefing, email_evening_briefing, weekend_edition, timezone, notification_settings'
+          );
+      }
+      return full;
+    };
+
+    const [prefsRes, settingsRes] = await Promise.all([fetchPrefs(), fetchSettings()]);
+
+    const prefsMissing = Boolean(prefsRes?.error && isMissingRelationError(prefsRes.error));
+    const settingsMissing = Boolean(settingsRes?.error && isMissingRelationError(settingsRes.error));
 
     if (prefsRes?.error && !prefsMissing) {
       throw new Error(`Falha ao consultar user_preferences: ${prefsRes.error.message}`);
@@ -216,8 +549,10 @@ export const briefingEngine = {
         email_morning_briefing: sRow.email_morning_briefing ?? existing.email_morning_briefing,
         email_evening_briefing: sRow.email_evening_briefing ?? existing.email_evening_briefing,
         weekend_edition: sRow.weekend_edition ?? existing.weekend_edition,
-        timezone: sRow.timezone ?? existing.timezone,
-        notification_settings: sRow.notification_settings ?? existing.notification_settings
+        timezone: existing.timezone ?? sRow.timezone,
+        morning_time: existing.morning_time ?? sRow.morning_time,
+        evening_time: existing.evening_time ?? sRow.evening_time,
+        notification_settings: sRow.notification_settings ?? existing.notification_settings,
       });
     }
 
@@ -226,20 +561,33 @@ export const briefingEngine = {
       const morningEnabled = row.email_morning_briefing !== false;
       const eveningEnabled = row.email_evening_briefing !== false;
       const weekendEdition = Boolean(row.weekend_edition);
-      const timezone = String(row.timezone || 'America/Sao_Paulo');
+      const timezone = resolveTimezone(row.timezone);
+      const morningTime = normalizeScheduleTime(row.morning_time, DEFAULT_MORNING_TIME);
+      const eveningTime = normalizeScheduleTime(row.evening_time, DEFAULT_EVENING_TIME);
 
       if (type === 'MORNING' && !morningEnabled) continue;
       if (type === 'EVENING' && !eveningEnabled) continue;
       if (!weekendEdition && isWeekendInTimezone(referenceDate, timezone)) continue;
 
-      users.push({
+      const userCandidate: EligibleBriefingUser = {
         userId: uid,
         email: row.briefing_email ? String(row.briefing_email).trim() : null,
         morningEnabled,
         eveningEnabled,
         weekendEdition,
         timezone,
-      });
+        morningTime,
+        eveningTime,
+      };
+
+      if (
+        options?.respectScheduleWindow &&
+        !isUserWithinScheduleWindow(userCandidate, type, referenceDate)
+      ) {
+        continue;
+      }
+
+      users.push(userCandidate);
     }
 
     return users;
@@ -250,13 +598,14 @@ export const briefingEngine = {
    */
   async selectEventsForUser(
     userId: string,
-    options?: { windowHours?: number; limit?: number }
+    options?: { windowHours?: number; limit?: number; referenceDate?: Date }
   ): Promise<BriefingEventCandidate[]> {
     const { getServerSupabase: getSb } = getDeps();
     const supabase = getSb();
     const limit = Math.max(1, Math.min(10, options?.limit ?? 6));
     const windowHours = Math.max(6, options?.windowHours ?? 36);
-    const cutoffIso = new Date(Date.now() - windowHours * 3600 * 1000).toISOString();
+    const anchorMs = (options?.referenceDate || new Date()).getTime();
+    const cutoffIso = new Date(anchorMs - windowHours * 3600 * 1000).toISOString();
 
     const [entFollowRes, topicFollowRes, recentEventsRes] = await Promise.all([
       (supabase as any).from('user_entity_follows').select('entity_id').eq('user_id', userId),
@@ -340,7 +689,7 @@ export const briefingEngine = {
   },
 
   /**
-   * Executa as etapas 1..7 para um usuário específico com prevenção de duplicidade.
+   * Executa as etapas 1..7 para um usuário específico com prevenção de duplicidade por (user_id, type, local_date).
    */
   async generateForUser(params: {
     userId: string;
@@ -348,43 +697,81 @@ export const briefingEngine = {
     briefingEmail?: string | null;
     sendEmail?: boolean;
     referenceDate?: Date;
+    timezone?: string | null;
+    morningTime?: string | null;
+    eveningTime?: string | null;
   }): Promise<GenerateBriefingResult> {
     const { getServerSupabase: getSb, getServerKeys: getKeys, fetchFn } = getDeps();
     const supabase = getSb();
     const refDate = params.referenceDate || new Date();
-    const { dayStart, dayEnd, periodStart, periodEnd, dateLabelPt } = getBriefingPeriodWindow(
-      params.type,
-      refDate
-    );
 
-    // Verifica duplicidade utilizando janela do período (period_start/period_end) ou scheduled_for do dia
+    const userSchedule =
+      params.timezone && params.morningTime && params.eveningTime
+        ? {
+            timezone: resolveTimezone(params.timezone),
+            morningTime: normalizeScheduleTime(params.morningTime, DEFAULT_MORNING_TIME),
+            eveningTime: normalizeScheduleTime(params.eveningTime, DEFAULT_EVENING_TIME),
+          }
+        : await fetchUserSchedulePreferences(supabase, params.userId);
+
+    const effectiveTimezone = params.timezone ? resolveTimezone(params.timezone) : userSchedule.timezone;
+    const effectiveMorningTime = params.morningTime
+      ? normalizeScheduleTime(params.morningTime, DEFAULT_MORNING_TIME)
+      : userSchedule.morningTime;
+    const effectiveEveningTime = params.eveningTime
+      ? normalizeScheduleTime(params.eveningTime, DEFAULT_EVENING_TIME)
+      : userSchedule.eveningTime;
+
+    const { localDate, dayStart, dayEnd, periodStart, periodEnd, scheduledFor, dateLabelPt } =
+      getBriefingPeriodWindow(params.type, refDate, {
+        timezone: effectiveTimezone,
+        morningTime: effectiveMorningTime,
+        eveningTime: effectiveEveningTime,
+      });
+
+    // Verifica duplicidade utilizando preferencialmente (user_id, type, local_date),
+    // alinhado a idx_briefing_delivery_slot, com fallback para (period_start, period_end) ou dia local.
     let existing: { id?: string; status?: string } | null = null;
     let dupErr: any = null;
 
-    const periodCheck = await (supabase as any)
+    const localDateCheck = await (supabase as any)
       .from('briefings')
       .select('id, status')
       .eq('user_id', params.userId)
       .eq('type', params.type)
-      .eq('period_start', periodStart)
-      .eq('period_end', periodEnd)
+      .eq('local_date', localDate)
       .maybeSingle();
 
-    if (!periodCheck.error && periodCheck.data?.id) {
-      existing = periodCheck.data;
-    } else if (periodCheck.error && periodCheck.error.code !== '42703' && periodCheck.error.code !== 'PGRST204') {
-      dupErr = periodCheck.error;
-    } else {
-      const dayCheck = await (supabase as any)
+    if (!localDateCheck.error) {
+      existing = localDateCheck.data;
+    } else if (isMissingColumnError(localDateCheck.error)) {
+      const periodCheck = await (supabase as any)
         .from('briefings')
         .select('id, status')
         .eq('user_id', params.userId)
         .eq('type', params.type)
-        .gte('scheduled_for', dayStart)
-        .lte('scheduled_for', dayEnd)
+        .eq('period_start', periodStart)
+        .eq('period_end', periodEnd)
         .maybeSingle();
-      existing = dayCheck.data;
-      dupErr = dayCheck.error;
+
+      if (!periodCheck.error) {
+        existing = periodCheck.data;
+      } else if (isMissingColumnError(periodCheck.error)) {
+        const dayCheck = await (supabase as any)
+          .from('briefings')
+          .select('id, status')
+          .eq('user_id', params.userId)
+          .eq('type', params.type)
+          .gte('scheduled_for', dayStart)
+          .lte('scheduled_for', dayEnd)
+          .maybeSingle();
+        existing = dayCheck.data;
+        dupErr = dayCheck.error;
+      } else {
+        dupErr = periodCheck.error;
+      }
+    } else {
+      dupErr = localDateCheck.error;
     }
 
     if (dupErr) {
@@ -392,6 +779,9 @@ export const briefingEngine = {
         userId: params.userId,
         type: params.type,
         status: 'FAILED',
+        localDate,
+        periodStart,
+        periodEnd,
         eventsCount: 0,
         error: `Falha ao verificar duplicidade de briefing: ${dupErr.message}`,
       };
@@ -403,17 +793,25 @@ export const briefingEngine = {
         type: params.type,
         status: 'SKIPPED_DUPLICATE',
         briefingId: String(existing.id),
+        localDate,
+        periodStart,
+        periodEnd,
         eventsCount: 0,
       };
     }
 
     // Etapa 1: Selecionar acontecimentos reais (não cria briefing vazio como completo!)
-    const selectedEvents = await this.selectEventsForUser(params.userId);
+    const selectedEvents = await this.selectEventsForUser(params.userId, {
+      referenceDate: refDate,
+    });
     if (selectedEvents.length === 0) {
       return {
         userId: params.userId,
         type: params.type,
         status: 'SKIPPED_NO_EVENTS',
+        localDate,
+        periodStart,
+        periodEnd,
         eventsCount: 0,
       };
     }
@@ -427,36 +825,74 @@ export const briefingEngine = {
         ? 'O fechamento dos principais acontecimentos apurados ao longo do dia.'
         : 'Os principais acontecimentos consolidados para iniciar o dia.';
 
-    // Etapa 2: Criação do registro com period_start, period_end, status GENERATING e type canônico
-    const { data: createdRow, error: createErr } = await (supabase as any)
+    // Etapa 2: Criação do registro com local_date, period_start, period_end, status GENERATING e type canônico
+    const baseInsertPayload = {
+      user_id: params.userId,
+      type: params.type,
+      local_date: localDate,
+      title,
+      description,
+      status: 'GENERATING',
+      period_start: periodStart,
+      period_end: periodEnd,
+      scheduled_for: scheduledFor,
+    };
+
+    let { data: createdRow, error: createErr } = await (supabase as any)
       .from('briefings')
-      .insert({
-        user_id: params.userId,
-        type: params.type,
-        title,
-        description,
-        status: 'GENERATING',
-        period_start: periodStart,
-        period_end: periodEnd,
-        scheduled_for: refDate.toISOString(),
-      })
+      .insert(baseInsertPayload)
       .select('id')
       .single();
 
+    if (
+      createErr &&
+      isMissingColumnError(createErr) &&
+      String(createErr.message || '').toLowerCase().includes('local_date')
+    ) {
+      const { local_date: _omitted, ...fallbackPayload } = baseInsertPayload;
+      const retry = await (supabase as any)
+        .from('briefings')
+        .insert(fallbackPayload)
+        .select('id')
+        .single();
+      createdRow = retry.data;
+      createErr = retry.error;
+    }
+
     if (createErr || !createdRow?.id) {
       if (createErr?.code === '23505') {
-        const { data: conflictRow } = await (supabase as any)
+        let conflictId: string | undefined;
+        const byLocalDate = await (supabase as any)
           .from('briefings')
           .select('id')
           .eq('user_id', params.userId)
           .eq('type', params.type)
-          .eq('period_start', periodStart)
+          .eq('local_date', localDate)
           .maybeSingle();
+
+        if (!byLocalDate.error && byLocalDate.data?.id) {
+          conflictId = String(byLocalDate.data.id);
+        } else {
+          const byPeriod = await (supabase as any)
+            .from('briefings')
+            .select('id')
+            .eq('user_id', params.userId)
+            .eq('type', params.type)
+            .eq('period_start', periodStart)
+            .maybeSingle();
+          if (byPeriod?.data?.id) {
+            conflictId = String(byPeriod.data.id);
+          }
+        }
+
         return {
           userId: params.userId,
           type: params.type,
           status: 'SKIPPED_DUPLICATE',
-          briefingId: conflictRow?.id ? String(conflictRow.id) : undefined,
+          briefingId: conflictId,
+          localDate,
+          periodStart,
+          periodEnd,
           eventsCount: 0,
         };
       }
@@ -464,6 +900,9 @@ export const briefingEngine = {
         userId: params.userId,
         type: params.type,
         status: 'FAILED',
+        localDate,
+        periodStart,
+        periodEnd,
         eventsCount: 0,
         error: createErr?.message || 'Falha ao inserir registro inicial de briefing.',
       };
@@ -471,12 +910,12 @@ export const briefingEngine = {
 
     const briefingId = String(createdRow.id);
 
-    // Etapa 3: Persistir itens ordenados em public.briefing_items (position + section canônicos)
+    // Etapa 3: Persistir itens ordenados em public.briefing_items (position + section canônicos do PostgreSQL)
     const itemsPayload = selectedEvents.map((ev, index) => ({
       briefing_id: briefingId,
       event_id: ev.id,
       position: index + 1,
-      section: ev.isFollowedMatch ? 'Para você' : index < 2 ? 'Destaques' : 'Panorama',
+      section: classifyBriefingItemSection(ev, index, selectedEvents.length),
     }));
 
     const { error: itemsErr } = await (supabase as any).from('briefing_items').insert(itemsPayload);
@@ -490,6 +929,9 @@ export const briefingEngine = {
         type: params.type,
         status: 'FAILED',
         briefingId,
+        localDate,
+        periodStart,
+        periodEnd,
         eventsCount: 0,
         error: `Falha ao persistir itens do briefing: ${itemsErr.message}`,
       };
@@ -507,6 +949,9 @@ export const briefingEngine = {
         type: params.type,
         status: 'FAILED',
         briefingId,
+        localDate,
+        periodStart,
+        periodEnd,
         eventsCount: selectedEvents.length,
         error: `Itens salvos, mas falhou atualização para READY: ${readyErr.message}`,
       };
@@ -528,6 +973,9 @@ export const briefingEngine = {
         type: params.type,
         status: 'READY',
         briefingId,
+        localDate,
+        periodStart,
+        periodEnd,
         eventsCount: selectedEvents.length,
         notificationCreated: Boolean(notifRes.success && !notifRes.skipped),
         emailSent: false,
@@ -541,6 +989,9 @@ export const briefingEngine = {
         type: params.type,
         status: 'READY',
         briefingId,
+        localDate,
+        periodStart,
+        periodEnd,
         eventsCount: selectedEvents.length,
         notificationCreated: Boolean(notifRes.success && !notifRes.skipped),
         emailSent: false,
@@ -579,6 +1030,9 @@ export const briefingEngine = {
           type: params.type,
           status: 'READY',
           briefingId,
+          localDate,
+          periodStart,
+          periodEnd,
           eventsCount: selectedEvents.length,
           notificationCreated: Boolean(notifRes.success && !notifRes.skipped),
           emailSent: false,
@@ -598,6 +1052,9 @@ export const briefingEngine = {
         type: params.type,
         status: 'SENT',
         briefingId,
+        localDate,
+        periodStart,
+        periodEnd,
         eventsCount: selectedEvents.length,
         notificationCreated: Boolean(notifRes.success && !notifRes.skipped),
         emailSent: true,
@@ -608,6 +1065,9 @@ export const briefingEngine = {
         type: params.type,
         status: 'READY',
         briefingId,
+        localDate,
+        periodStart,
+        periodEnd,
         eventsCount: selectedEvents.length,
         notificationCreated: Boolean(notifRes.success && !notifRes.skipped),
         emailSent: false,
@@ -618,11 +1078,14 @@ export const briefingEngine = {
 
   /**
    * Executa um ciclo completo de geração para todos os usuários elegíveis.
+   * Quando `respectScheduleWindow: true`, gera apenas para usuários cuja janela horária
+   * configurada (`morning_time` / `evening_time` em `timezone`) já foi atingida no dia local.
    */
   async runGenerationCycle(options: {
     type: BriefingEditionType;
     sendEmail?: boolean;
     referenceDate?: Date;
+    respectScheduleWindow?: boolean;
   }): Promise<{
     eligibleUsers: number;
     ready: number;
@@ -632,7 +1095,9 @@ export const briefingEngine = {
     failed: number;
     results: GenerateBriefingResult[];
   }> {
-    const eligible = await this.listEligibleUsers(options.type, options.referenceDate);
+    const eligible = await this.listEligibleUsers(options.type, options.referenceDate, {
+      respectScheduleWindow: Boolean(options.respectScheduleWindow),
+    });
     const results: GenerateBriefingResult[] = [];
 
     let ready = 0;
@@ -648,6 +1113,9 @@ export const briefingEngine = {
         briefingEmail: u.email,
         sendEmail: Boolean(options.sendEmail),
         referenceDate: options.referenceDate,
+        timezone: u.timezone,
+        morningTime: u.morningTime,
+        eveningTime: u.eveningTime,
       });
       results.push(res);
 

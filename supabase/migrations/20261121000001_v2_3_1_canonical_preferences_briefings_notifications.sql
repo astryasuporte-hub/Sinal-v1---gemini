@@ -10,7 +10,9 @@
 --    public.user_settings e public.user_preferences, sem conflitar caso apenas uma exista.
 -- 4. Garante coluna read_at TIMESTAMPTZ em public.notifications e índices únicos
 --    parciais de deduplicação somente quando não há duplicatas preexistentes.
--- 5. NÃO recria tabelas legadas com checks incompatíveis (ex.: type lowercase).
+-- 5. Evita criação de índices redundantes em public.briefings quando o banco já
+--    possuir índice equivalente (ex: idx_briefing_delivery_slot).
+-- 6. NÃO recria tabelas legadas com checks incompatíveis (ex.: type lowercase).
 -- ==============================================================================
 
 -- 1. Armazenamento canônico de preferências de alerta e agendamento em public.user_settings
@@ -139,27 +141,39 @@ BEGIN
   END IF;
 END $$;
 
--- 4. Índices de consulta e proteção de duplicidade diária em public.briefings (sem alterar check constraints canônicas)
+-- 4. Proteção de duplicidade por (user_id, type, local_date) em public.briefings
+-- Somente cria índice se não houver índice equivalente preexistente (ex: idx_briefing_delivery_slot).
 DO $$
 BEGIN
   IF to_regclass('public.briefings') IS NOT NULL THEN
+    ALTER TABLE public.briefings
+      ADD COLUMN IF NOT EXISTS local_date DATE;
+
+    UPDATE public.briefings
+       SET local_date = COALESCE(local_date, (COALESCE(scheduled_for, created_at) AT TIME ZONE 'America/Sao_Paulo')::date)
+     WHERE local_date IS NULL;
+
     IF NOT EXISTS (
       SELECT 1 FROM pg_indexes
       WHERE schemaname = 'public'
         AND tablename = 'briefings'
-        AND indexname = 'idx_briefings_user_type_day_active'
+        AND indexname IN (
+          'idx_briefing_delivery_slot',
+          'idx_briefings_user_type_local_date_active',
+          'idx_briefings_user_type_day_active'
+        )
     ) THEN
       IF NOT EXISTS (
         SELECT 1
         FROM public.briefings
         WHERE status NOT IN ('FAILED', 'CANCELED')
-          AND scheduled_for IS NOT NULL
-        GROUP BY user_id, type, ((scheduled_for AT TIME ZONE 'UTC')::date)
+          AND local_date IS NOT NULL
+        GROUP BY user_id, type, local_date
         HAVING COUNT(*) > 1
       ) THEN
-        CREATE UNIQUE INDEX idx_briefings_user_type_day_active
-          ON public.briefings (user_id, type, ((scheduled_for AT TIME ZONE 'UTC')::date))
-          WHERE status NOT IN ('FAILED', 'CANCELED') AND scheduled_for IS NOT NULL;
+        CREATE UNIQUE INDEX idx_briefings_user_type_local_date_active
+          ON public.briefings (user_id, type, local_date)
+          WHERE status NOT IN ('FAILED', 'CANCELED') AND local_date IS NOT NULL;
       END IF;
     END IF;
   END IF;

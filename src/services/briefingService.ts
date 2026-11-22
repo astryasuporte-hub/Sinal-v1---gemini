@@ -31,6 +31,21 @@ export type CanonicalBriefingStatus =
   | 'FAILED'
   | 'CANCELED';
 
+export const ALLOWED_BRIEFING_SECTIONS = [
+  'TOP_STORIES',
+  'UPDATES',
+  'DEVELOPING',
+  'WATCH_NEXT',
+] as const;
+
+export type BriefingItemSection = (typeof ALLOWED_BRIEFING_SECTIONS)[number];
+
+export interface BriefingItemSectionMeta {
+  code: BriefingItemSection;
+  label: string;
+  position: number;
+}
+
 export interface RealBriefingItem {
   id: string;
   type: 'morning' | 'evening';
@@ -42,10 +57,12 @@ export interface RealBriefingItem {
   timeFormatted: string;
   dateLabel: string;
   groupDate: string; // 'Hoje' | 'Ontem' | Data formatada
+  localDate?: string;
   status: BriefingStatusLabel;
   rawStatus: CanonicalBriefingStatus;
   bgImage: string;
   rawEvents: Event[];
+  itemSections?: Record<string, BriefingItemSectionMeta>;
   createdAt: string;
   scheduledFor: string;
   periodStart?: string;
@@ -101,6 +118,25 @@ function isSessionExpiredError(err: any): boolean {
 export function normalizeBriefingType(raw: unknown): CanonicalBriefingType {
   const upper = String(raw || 'MORNING').trim().toUpperCase();
   return upper === 'EVENING' ? 'EVENING' : 'MORNING';
+}
+
+export function mapBriefingSectionLabel(raw: unknown): {
+  code: BriefingItemSection;
+  label: string;
+} {
+  const upper = String(raw || 'TOP_STORIES').trim().toUpperCase();
+  switch (upper) {
+    case 'TOP_STORIES':
+      return { code: 'TOP_STORIES', label: 'Principais fatos' };
+    case 'UPDATES':
+      return { code: 'UPDATES', label: 'Atualizações' };
+    case 'DEVELOPING':
+      return { code: 'DEVELOPING', label: 'Em andamento' };
+    case 'WATCH_NEXT':
+      return { code: 'WATCH_NEXT', label: 'Para acompanhar' };
+    default:
+      return { code: 'TOP_STORIES', label: 'Principais fatos' };
+  }
 }
 
 export function mapBriefingStatus(raw: unknown): {
@@ -265,16 +301,25 @@ export const briefingService = {
           .filter((it: any) => it.briefing_id === b.id)
           .sort((a: any, bItem: any) => Number(a.position ?? a.order_index ?? 0) - Number(bItem.position ?? bItem.order_index ?? 0));
 
+        const itemSections: RealBriefingItem['itemSections'] = {};
         const relatedEvents: Event[] = briefingItems
-          .map((it: any) => {
+          .map((it: any, idx: number) => {
             const evId = it.event_id ? String(it.event_id) : null;
-            if (evId && eventsMap.has(evId)) {
-              return eventsMap.get(evId)!;
+            const resolvedEvent =
+              evId && eventsMap.has(evId)
+                ? eventsMap.get(evId)!
+                : it.events
+                  ? mapDbEventToFrontendEvent(it.events)
+                  : null;
+            if (resolvedEvent) {
+              const sec = mapBriefingSectionLabel(it.section);
+              itemSections[resolvedEvent.id] = {
+                code: sec.code,
+                label: sec.label,
+                position: Number(it.position ?? it.order_index ?? idx + 1),
+              };
             }
-            if (it.events) {
-              return mapDbEventToFrontendEvent(it.events);
-            }
-            return null;
+            return resolvedEvent;
           })
           .filter((ev: any): ev is Event => Boolean(ev));
 
@@ -318,10 +363,12 @@ export const briefingService = {
           timeFormatted,
           dateLabel,
           groupDate,
+          localDate: b.local_date ? String(b.local_date) : undefined,
           status: statusLabel,
           rawStatus,
           bgImage,
           rawEvents: relatedEvents,
+          itemSections,
           createdAt: b.created_at,
           scheduledFor: scheduledIso,
           periodStart: b.period_start || undefined,

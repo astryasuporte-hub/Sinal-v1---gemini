@@ -15,7 +15,8 @@ export const ALLOWED_UPSTREAM_DOMAINS = [
   'api.worldnewsapi.com',
   'integrate.api.nvidia.com',
   'api.resend.com',
-  'api.zynpay.com.br'
+  'api.cakto.com.br',
+  'pay.cakto.com.br'
 ];
 
 export function isAllowedDomain(urlStr: string): boolean {
@@ -55,7 +56,7 @@ export function getClientIp(req: any): string {
 export function setCorsHeaders(res: any): void {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, x-zynpay-signature, x-signature');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, x-cakto-signature, x-cakto-timestamp, x-signature');
 }
 
 export function sendJson(res: any, statusCode: number, data: any, headers?: Record<string, string>): void {
@@ -113,8 +114,15 @@ export function getServerKeys() {
     WORLD_NEWS: process.env.WORLD_NEWS_API_KEY || '',
     NVIDIA_NIM: process.env.NVIDIA_NIM_API_KEY || '',
     RESEND: process.env.RESEND_API_KEY || '',
-    ZYNPAY: process.env.ZYNPAY_API_KEY || '',
-    ZYNPAY_WEBHOOK_SECRET: (process.env.ZYNPAY_WEBHOOK_SECRET || '').trim(),
+    PAYMENTS_ACTIVE_PROVIDER: (process.env.PAYMENTS_ACTIVE_PROVIDER || 'cakto').trim().toLowerCase(),
+    CAKTO_CLIENT_ID: (process.env.CAKTO_CLIENT_ID || '').trim(),
+    CAKTO_CLIENT_SECRET: (process.env.CAKTO_CLIENT_SECRET || '').trim(),
+    CAKTO_WEBHOOK_SECRET: (process.env.CAKTO_WEBHOOK_SECRET || '').trim(),
+    CAKTO_COMMERCIAL_ENABLED: (process.env.CAKTO_COMMERCIAL_ENABLED || 'false').trim().toLowerCase() === 'true',
+    CAKTO_METHODS_VERIFIED: (process.env.CAKTO_METHODS_VERIFIED || 'false').trim().toLowerCase() === 'true',
+    CAKTO_PRODUCT_ID: (process.env.CAKTO_PRODUCT_ID || 'c8731178-55c9-47f6-8b98-987f31206ed8').trim(),
+    CAKTO_OFFER_ID: (process.env.CAKTO_OFFER_ID || 'vjw92gx').trim(),
+    CAKTO_CHECKOUT_ID: (process.env.CAKTO_CHECKOUT_ID || '1356033').trim(),
     ADMIN_SECRET: process.env.ADMIN_SECRET || ''
   };
 }

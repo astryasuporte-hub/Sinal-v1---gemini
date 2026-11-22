@@ -2,23 +2,31 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * FATOSBR V2.3.2 — SUÍTE DE VALIDAÇÃO ESTRITA DE CONTRATO POSTGRESQL & SEGURANÇA
+ * FATOSBR V2.3.2 — SUÍTE DE VALIDAÇÃO ESTRITA DE CONTRATO POSTGRESQL, FUSO HORÁRIO & SEGURANÇA
  *
- * Valida explicitamente os 8 pontos da V2.3.2:
- * 1. Preenchimento obrigatório de period_start e period_end em public.briefings.
- * 2. Preenchimento obrigatório de position e section em public.briefing_items (sem order_index).
- * 3. Deduplicação utilizando índices existentes (period_start/period_end + 23505 em briefings e notifications).
- * 4. Compatibilidade das preferências entre public.user_preferences e public.user_settings.
- * 5. Persistência real de notification_settings (JSONB) sem falso sucesso.
- * 6. Correções no motor de notificações (7 tipos aceitos, fail-closed, 6 preferências).
- * 7. Preparação do agendamento automático (/api/notifications/generate-briefings GET/POST com CRON_SECRET).
- * 8. Migração incremental V2.3.2 e preservação de limites/escopo.
+ * Valida explicitamente os requisitos finais da V2.3.2:
+ * 1. public.briefing_items.section aceita exclusivamente TOP_STORIES | UPDATES | DEVELOPING | WATCH_NEXT.
+ * 2. Nomes amigáveis em português são mapeados exclusivamente na interface (briefingService/BriefingView).
+ * 3. Preenchimento obrigatório de position, local_date, period_start e period_end em America/Sao_Paulo e fusos customizados.
+ * 4. Horários configuráveis (morning_time / evening_time) + respeito à janela de agendamento por usuário.
+ * 5. Deduplicação por (user_id, type, local_date) alinhada a idx_briefing_delivery_slot + tratamento 23505.
+ * 6. Preferências, notification_settings (JSONB), fail-closed e endpoint /api/notifications/generate-briefings.
+ * 7. Migração SQL V2.3.2 com DEFAULT 'TOP_STORIES' e sem criação redundante frente a idx_briefing_delivery_slot.
  */
 
 import fs from 'fs';
 import path from 'path';
-import { briefingEngine, setBriefingEngineTestDeps } from '../api/_lib/briefingEngine.js';
-import { briefingService, setTestBriefingServiceClient } from '../src/services/briefingService.js';
+import {
+  ALLOWED_BRIEFING_SECTIONS,
+  briefingEngine,
+  getBriefingPeriodWindow,
+  setBriefingEngineTestDeps
+} from '../api/_lib/briefingEngine.js';
+import {
+  briefingService,
+  mapBriefingSectionLabel,
+  setTestBriefingServiceClient
+} from '../src/services/briefingService.js';
 import { notificationEngine, setNotificationEngineTestDeps } from '../api/_lib/notificationEngine.js';
 import { userService, setTestUserServiceClient } from '../src/services/userService.js';
 import generateBriefingsHandler from '../api/_lib/handlers/notifications/generateBriefings.js';
@@ -72,16 +80,16 @@ function createMockRes() {
 
 async function run() {
   console.log('======================================================================');
-  console.log('🛡️  FATOSBR V2.3.2 — AUDITORIA & TESTES DE CONTRATO REAL');
+  console.log('🛡️  FATOSBR V2.3.2 — AUDITORIA & TESTES DE CONTRATO FINAL');
   console.log('======================================================================\n');
 
   const userA = 'user-v232-aaaa-1111-2222-333344445555';
   const userB = 'user-v232-bbbb-6666-7777-888899990000';
 
   // ---------------------------------------------------------------------------
-  // 1-3. BRIEFINGS: PERIOD_START/END, BRIEFING_ITEMS: POSITION/SECTION, DEDUP 23505
+  // 1. CONTRATO ESTRITO POSTGRESQL: SECTION ENUM, TIMEZONE, LOCAL_DATE, PERIOD & DEDUP
   // ---------------------------------------------------------------------------
-  console.log('--- 1. Contrato estrito PostgreSQL: period_start, period_end, position, section & dedup ---');
+  console.log('--- 1. Contrato estrito PostgreSQL: section enum, local_date, timezone, horarios & dedup ---');
   try {
     const strictBriefings: any[] = [];
     const strictItems: any[] = [];
@@ -95,7 +103,6 @@ async function run() {
         const chain: any = {
           select(sel?: string) {
             if (table === 'briefing_items' && sel && sel.includes('order_index')) {
-              // Simula esquema real sem coluna order_index
               chain._missingOrderIndex = true;
             }
             return chain;
@@ -126,6 +133,20 @@ async function run() {
                     summary: 'Alívio em serviços desacelera índice.',
                     relevance_score: 88,
                     published_at: '2026-11-23T09:00:00.000Z'
+                  },
+                  {
+                    id: 'ev-dev-3',
+                    title: 'Copom sinaliza manutenção de juros em comunicado',
+                    summary: 'Autoridade monetária monitora câmbio e atividade.',
+                    relevance_score: 86,
+                    published_at: '2026-11-23T09:15:00.000Z'
+                  },
+                  {
+                    id: 'ev-watch-4',
+                    title: 'Agenda econômica da semana inclui dados fiscais',
+                    summary: 'Tesouro divulga relatório bimestral na sexta-feira.',
+                    relevance_score: 79,
+                    published_at: '2026-11-23T09:30:00.000Z'
                   }
                 ],
                 error: null
@@ -140,6 +161,34 @@ async function run() {
             return Promise.resolve({ data: [], error: null });
           },
           maybeSingle() {
+            if (table === 'user_preferences') {
+              if (eqFilters.id === userA) {
+                return Promise.resolve({
+                  data: {
+                    id: userA,
+                    timezone: 'America/Sao_Paulo',
+                    morning_time: '07:30',
+                    evening_time: '20:30'
+                  },
+                  error: null
+                });
+              }
+              return Promise.resolve({ data: null, error: null });
+            }
+            if (table === 'user_settings') {
+              if (eqFilters.user_id === userA) {
+                return Promise.resolve({
+                  data: {
+                    user_id: userA,
+                    timezone: 'America/Sao_Paulo',
+                    morning_time: '07:30',
+                    evening_time: '20:30'
+                  },
+                  error: null
+                });
+              }
+              return Promise.resolve({ data: null, error: null });
+            }
             if (table === 'briefings') {
               if (simulateConcurrent23505 && !eqFilters.id && strictBriefings.length > 0 && !updatePatch) {
                 simulateConcurrent23505 = false;
@@ -149,6 +198,7 @@ async function run() {
                 (b) =>
                   b.user_id === eqFilters.user_id &&
                   b.type === eqFilters.type &&
+                  (!eqFilters.local_date || b.local_date === eqFilters.local_date) &&
                   (!eqFilters.period_start || b.period_start === eqFilters.period_start) &&
                   (!eqFilters.period_end || b.period_end === eqFilters.period_end)
               );
@@ -158,25 +208,22 @@ async function run() {
           },
           insert(payload: any) {
             if (table === 'briefings') {
-              // Impõe NOT NULL em period_start e period_end exatamente como PostgreSQL
-              if (!payload.period_start || !payload.period_end) {
+              if (!payload.period_start || !payload.period_end || !payload.local_date) {
                 return {
                   select: () => ({
                     single: () =>
                       Promise.resolve({
                         data: null,
-                        error: { code: '23502', message: 'null value in column "period_start"/"period_end" violates not-null constraint' }
+                        error: { code: '23502', message: 'null value in column "period_start"/"period_end"/"local_date" violates not-null constraint' }
                       })
                   })
                 };
               }
-              // Simula índice único existente em (user_id, type, period_start, period_end)
               const collision = strictBriefings.find(
                 (b) =>
                   b.user_id === payload.user_id &&
                   b.type === payload.type &&
-                  b.period_start === payload.period_start &&
-                  b.period_end === payload.period_end &&
+                  b.local_date === payload.local_date &&
                   b.status !== 'FAILED' &&
                   b.status !== 'CANCELED'
               );
@@ -186,7 +233,7 @@ async function run() {
                     single: () =>
                       Promise.resolve({
                         data: null,
-                        error: { code: '23505', message: 'duplicate key value violates unique constraint "idx_briefings_user_type_period_active"' }
+                        error: { code: '23505', message: 'duplicate key value violates unique constraint "idx_briefing_delivery_slot"' }
                       })
                   })
                 };
@@ -202,7 +249,6 @@ async function run() {
             if (table === 'briefing_items') {
               const rows = Array.isArray(payload) ? payload : [payload];
               for (const r of rows) {
-                // Rejeita order_index (inexistente) e exige position + section NOT NULL
                 if ('order_index' in r) {
                   return Promise.resolve({
                     error: { code: '42703', message: 'column "order_index" of relation "briefing_items" does not exist' }
@@ -211,6 +257,14 @@ async function run() {
                 if (typeof r.position !== 'number' || !r.section) {
                   return Promise.resolve({
                     error: { code: '23502', message: 'null value in column "position" or "section" violates not-null constraint' }
+                  });
+                }
+                if (!(ALLOWED_BRIEFING_SECTIONS as readonly string[]).includes(r.section)) {
+                  return Promise.resolve({
+                    error: {
+                      code: '23514',
+                      message: `new row for relation "briefing_items" violates check constraint "briefing_items_section_check" (got: ${r.section})`
+                    }
                   });
                 }
               }
@@ -258,13 +312,13 @@ async function run() {
             if (table === 'briefing_items') {
               const mapped = strictItems
                 .slice()
-                .reverse() // força fora de ordem para validar sort por position
+                .reverse()
                 .map((it, idx) => ({
                   id: `bi-${idx + 1}`,
                   ...it,
                   events: {
                     id: it.event_id,
-                    title: it.event_id === 'ev-follow-1' ? 'Petrobras' : 'IPCA-15',
+                    title: `Evento ${it.event_id}`,
                     summary: 'Resumo real',
                     relevance_score: 90,
                     published_at: '2026-11-23T09:00:00.000Z'
@@ -290,7 +344,9 @@ async function run() {
                     email_morning_briefing: true,
                     email_evening_briefing: true,
                     weekend_edition: true,
-                    timezone: 'America/Sao_Paulo'
+                    timezone: 'America/Sao_Paulo',
+                    morning_time: '07:30',
+                    evening_time: '20:30'
                   }
                 ],
                 error: null
@@ -324,50 +380,103 @@ async function run() {
       getServerKeys: () => ({ RESEND: '' } as any)
     });
 
+    // 2026-11-23T10:30:00Z = 07:30 America/Sao_Paulo
     const gen = await briefingEngine.generateForUser({
       userId: userA,
       type: 'MORNING',
       sendEmail: false,
-      referenceDate: new Date('2026-11-23T10:00:00.000Z')
+      referenceDate: new Date('2026-11-23T10:30:00.000Z')
     });
 
-    assert(gen.status === 'READY' && gen.eventsCount === 2, 'Geração passa em schema estrito sem order_index e com NOT NULL em period_start/end + position/section');
     assert(
-      strictBriefings[0]?.period_start === '2026-11-23T00:00:00.000Z' &&
-        strictBriefings[0]?.period_end === '2026-11-23T11:59:59.999Z',
-      'public.briefings recebe period_start e period_end válidos para a edição MORNING'
+      gen.status === 'READY' && gen.eventsCount === 4,
+      'Geração passa na check constraint real de section, sem order_index e com period_start/end + local_date'
     );
     assert(
-      strictItems[0]?.position === 1 &&
-        strictItems[0]?.section === 'Para você' &&
-        strictItems[1]?.position === 2 &&
-        strictItems[1]?.section === 'Destaques',
-      'public.briefing_items recebe position (1..N) e section sem enviar coluna inexistente order_index'
+      strictBriefings[0]?.local_date === '2026-11-23' &&
+        strictBriefings[0]?.period_start === '2026-11-22T23:30:00.000Z' &&
+        strictBriefings[0]?.period_end === '2026-11-23T10:30:59.999Z' &&
+        strictBriefings[0]?.scheduled_for === '2026-11-23T10:30:00.000Z',
+      'Janela editorial MORNING calculada no fuso America/Sao_Paulo e horario customizado 07:30 (20:30 ant -> 07:30 dia)'
+    );
+    assert(
+      strictItems.every((r) => (ALLOWED_BRIEFING_SECTIONS as readonly string[]).includes(r.section)) &&
+        strictItems[0]?.section === 'TOP_STORIES' &&
+        strictItems[2]?.section === 'DEVELOPING' &&
+        strictItems[3]?.section === 'WATCH_NEXT',
+      'public.briefing_items persiste exclusivamente enum canônico (TOP_STORIES / DEVELOPING / WATCH_NEXT / UPDATES)'
     );
 
-    // Simula corrida concorrente batendo no índice único 23505
+    // Simula corrida concorrente batendo no índice único idx_briefing_delivery_slot (23505)
     simulateConcurrent23505 = true;
     const race = await briefingEngine.generateForUser({
       userId: userA,
       type: 'MORNING',
       sendEmail: false,
-      referenceDate: new Date('2026-11-23T10:05:00.000Z')
+      referenceDate: new Date('2026-11-23T11:00:00.000Z')
     });
     assert(
       race.status === 'SKIPPED_DUPLICATE' && Boolean(race.briefingId),
-      'Corrida concorrente 23505 no índice de período retorna SKIPPED_DUPLICATE sem criar duplicata'
+      'Corrida concorrente 23505 em idx_briefing_delivery_slot retorna SKIPPED_DUPLICATE sem duplicar'
     );
     simulateConcurrent23505 = false;
 
-    // Leitura pelo briefingService no esquema com position + section + period_start/end
+    // Teste de virada de dia UTC vs America/Sao_Paulo:
+    // 2026-11-24T01:30:00Z == 2026-11-23 22:30:00 em America/Sao_Paulo -> local_date = '2026-11-23'!
+    const eveningLate = await briefingEngine.generateForUser({
+      userId: userA,
+      type: 'EVENING',
+      sendEmail: false,
+      referenceDate: new Date('2026-11-24T01:30:00.000Z')
+    });
+    assert(
+      eveningLate.status === 'READY' &&
+        eveningLate.localDate === '2026-11-23' &&
+        strictBriefings[1]?.local_date === '2026-11-23' &&
+        strictBriefings[1]?.period_start === '2026-11-23T10:30:00.000Z' &&
+        strictBriefings[1]?.period_end === '2026-11-23T23:30:59.999Z',
+      'Virada de dia UTC (2026-11-24T01:30Z) preserva local_date=2026-11-23 e period_start/end em America/Sao_Paulo'
+    );
+
+    // Leitura pelo briefingService + mapeamento amigável exclusivo de UI
     setTestBriefingServiceClient({ client: strictPostgresMock, configured: true });
     const fetched = await briefingService.getUserBriefingsDetailed(userA, []);
     assert(
-      fetched.items.length === 1 &&
-        fetched.items[0].periodStart === '2026-11-23T00:00:00.000Z' &&
-        fetched.items[0].periodEnd === '2026-11-23T11:59:59.999Z' &&
-        fetched.items[0].rawEvents[0]?.id === 'ev-follow-1',
-      'briefingService lê periodStart, periodEnd e ordena acontecimentos por position ASC sem depender de order_index'
+      fetched.items.length === 2 &&
+        fetched.items[0]?.itemSections?.['ev-follow-1']?.code === 'TOP_STORIES' &&
+        fetched.items[0]?.itemSections?.['ev-follow-1']?.label === 'Principais fatos' &&
+        mapBriefingSectionLabel('UPDATES').label === 'Atualizações' &&
+        mapBriefingSectionLabel('DEVELOPING').label === 'Em andamento' &&
+        mapBriefingSectionLabel('WATCH_NEXT').label === 'Para acompanhar',
+      'briefingService ordena por position e traduz enum de section para rótulos amigáveis somente no frontend'
+    );
+
+    // Valida respeto à janela de agendamento por horário do usuário (respectScheduleWindow: true)
+    const beforeWindowUsers = await briefingEngine.listEligibleUsers(
+      'MORNING',
+      new Date('2026-11-24T10:00:00.000Z'), // 07:00 BRT (userA configurou 07:30)
+      { respectScheduleWindow: true }
+    );
+    const insideWindowUsers = await briefingEngine.listEligibleUsers(
+      'MORNING',
+      new Date('2026-11-24T10:35:00.000Z'), // 07:35 BRT (>= 07:30)
+      { respectScheduleWindow: true }
+    );
+    assert(
+      beforeWindowUsers.length === 0 && insideWindowUsers.length === 1,
+      'Agendamento respeita morning_time=07:30 em America/Sao_Paulo (aguarda 07:30 e libera às 07:35)'
+    );
+
+    // Valida fuso diferente (ex: Europe/London)
+    const londonWindow = getBriefingPeriodWindow(
+      'EVENING',
+      new Date('2026-11-23T19:15:00.000Z'),
+      { timezone: 'Europe/London', morningTime: '08:00', eveningTime: '19:00' }
+    );
+    assert(
+      londonWindow.localDate === '2026-11-23' &&
+        londonWindow.scheduledFor === '2026-11-23T19:00:00.000Z',
+      'Suporte multi-fuso horário calcula local_date e scheduledFor corretamente fora do BRT'
     );
   } finally {
     setBriefingEngineTestDeps(null);
@@ -376,7 +485,7 @@ async function run() {
   }
 
   // ---------------------------------------------------------------------------
-  // 4-6. PREFERÊNCIAS, NOTIFICATION_SETTINGS & FAIL-CLOSED USER_SETTINGS
+  // 2. PREFERÊNCIAS, NOTIFICATION_SETTINGS & FAIL-CLOSED USER_SETTINGS
   // ---------------------------------------------------------------------------
   console.log('\n--- 2. Preferências Supabase, notification_settings e fail-closed em user_settings ---');
   try {
@@ -412,6 +521,9 @@ async function run() {
     setTestUserServiceClient({ client, configured: true });
     const saved = await userService.updateUserPreferencesDetailed(userB, {
       email_breaking_alerts: false,
+      morning_time: '06:45',
+      evening_time: '21:15',
+      timezone: 'America/Sao_Paulo',
       notification_settings: {
         urgentEvents: false,
         entityUpdates: true,
@@ -424,12 +536,13 @@ async function run() {
     const loaded = await userService.getUserPreferencesDetailed(userB);
     assert(
       saved.success &&
+        loaded.data?.morning_time === '06:45' &&
+        loaded.data?.evening_time === '21:15' &&
         loaded.data?.notification_settings?.urgentEvents === false &&
         loaded.data?.notification_settings?.dailyBriefings === false,
-      'Persistência real de notification_settings sobrevive ao reload sem perder nenhum dos 6 toggles'
+      'Persistência real de notification_settings + morning_time + evening_time sobrevive ao reload'
     );
 
-    // Fail-closed quando user_settings falha mesmo que user_preferences esteja acessível
     const partialBrokenMock = {
       from(table: string) {
         const chain: any = {
@@ -472,7 +585,7 @@ async function run() {
     });
     assert(
       partialFail.created === 0 && partialFail.errors > 0,
-      'Fail-closed bloqueia disparo se user_settings retornar erro (não ignora opt-outs)'
+      'Fail-closed bloqueia disparo se user_settings retornar erro'
     );
   } finally {
     setTestUserServiceClient(null);
@@ -480,9 +593,9 @@ async function run() {
   }
 
   // ---------------------------------------------------------------------------
-  // 7-8. AGENDAMENTO AUTOMÁTICO (GET/POST CRON_SECRET) & MIGRAÇÃO V2.3.2
+  // 3. AGENDAMENTO AUTOMÁTICO & AUDITORIA DAS MIGRAÇÕES SQL
   // ---------------------------------------------------------------------------
-  console.log('\n--- 3. Agendamento Automático & Migração Incremental V2.3.2 ---');
+  console.log('\n--- 3. Agendamento Automático (BRT) & Migração SQL V2.3.2 ---');
   const prevCron = process.env.CRON_SECRET;
   process.env.CRON_SECRET = 'cron-v232-secret';
   try {
@@ -499,18 +612,21 @@ async function run() {
     await generateBriefingsHandler({ method: 'GET', headers: {}, url: '/api/notifications/generate-briefings' }, getUnauth.res);
     assert(getUnauth.getStatus() === 401, 'GET /api/notifications/generate-briefings sem CRON_SECRET retorna 401');
 
-    const getCron = createMockRes();
+    // 2026-11-24T01:30:00.000Z = 22:30 America/Sao_Paulo -> sem type explícito deve detectar EVENING no BRT!
+    const getCronAutoType = createMockRes();
     await generateBriefingsHandler(
       {
         method: 'GET',
         headers: { authorization: 'Bearer cron-v232-secret' },
-        url: '/api/notifications/generate-briefings?type=EVENING&sendEmail=false&referenceDate=2026-11-23T21:00:00.000Z'
+        url: '/api/notifications/generate-briefings?respectSchedule=true&sendEmail=false&referenceDate=2026-11-24T01:30:00.000Z'
       },
-      getCron.res
+      getCronAutoType.res
     );
     assert(
-      getCron.getStatus() === 200 && getCron.getJson().type === 'EVENING' && getCron.getJson().mode === 'BATCH_CYCLE',
-      'GET /api/notifications/generate-briefings autenticado com CRON_SECRET executa ciclo automático EVENING'
+      getCronAutoType.getStatus() === 200 &&
+        getCronAutoType.getJson().type === 'EVENING' &&
+        getCronAutoType.getJson().respectScheduleWindow === true,
+      'Handler infere edição EVENING em America/Sao_Paulo mesmo após 00:00 UTC e propaga respectScheduleWindow'
     );
   } finally {
     setBriefingEngineTestDeps(null);
@@ -523,12 +639,13 @@ async function run() {
     'utf-8'
   );
   assert(
-    mig232.includes('period_start') &&
-      mig232.includes('period_end') &&
-      mig232.includes('position') &&
-      mig232.includes('section') &&
-      mig232.includes('idx_briefings_user_type_period_active'),
-    'Migração incremental V2.3.2 cobre period_start, period_end, position, section e índice de deduplicação'
+    mig232.includes("DEFAULT 'TOP_STORIES'") &&
+      !mig232.includes("DEFAULT 'Destaques'") &&
+      mig232.includes('local_date') &&
+      mig232.includes('idx_briefing_delivery_slot') &&
+      !mig232.includes('DROP TABLE') &&
+      !mig232.includes('DROP CONSTRAINT'),
+    'Migração V2.3.2 usa DEFAULT TOP_STORIES, respeita idx_briefing_delivery_slot e não destrói constraints'
   );
 
   console.log('\n======================================================================');

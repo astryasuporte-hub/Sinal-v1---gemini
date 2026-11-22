@@ -768,7 +768,7 @@ export const AdminMobileView: React.FC<AdminMobileViewProps> = ({
               </div>
               <div className="flex items-center justify-between pt-0.5">
                 <span className="text-[10px] text-[#20D6A0] font-semibold">
-                  {metrics.proSubscriptions > 0 ? 'PIX Ativo' : 'R$ 0,00'}
+                  {metrics.proSubscriptions > 0 ? 'PRO Ativo' : 'R$ 0,00'}
                 </span>
                 {/* Sparkline SVG */}
                 <svg className="w-16 h-4 text-[#41C8F4]" viewBox="0 0 60 16" fill="none">
@@ -1821,7 +1821,7 @@ export const AdminMobileView: React.FC<AdminMobileViewProps> = ({
                             : 'bg-[#20D6A0]/15 text-[#20D6A0] border border-[#20D6A0]/30'
                         }`}
                       >
-                        {isUserAdmin ? 'ISENTO' : u.planName.includes('PRO') ? 'PRO R$ 29,90' : 'TRIAL 7D'}
+                        {isUserAdmin ? 'ISENTO' : u.planName.includes('PRO') ? 'PRO R$ 34,90' : 'TRIAL 7D'}
                       </span>
                     </div>
 

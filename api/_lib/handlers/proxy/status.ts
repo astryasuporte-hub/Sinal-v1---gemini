@@ -118,9 +118,11 @@ export default async function handler(req: any, res: any) {
       name: 'Resend E-mails',
       configured: Boolean(keys.RESEND)
     },
-    zynpay: {
-      name: 'ZynPay Pix Gateway',
-      configured: Boolean(keys.ZYNPAY)
+    cakto: {
+      name: 'Cakto Assinaturas (Payments V1)',
+      configured: Boolean(keys.CAKTO_CLIENT_ID && keys.CAKTO_CLIENT_SECRET),
+      commercialEnabled: keys.CAKTO_COMMERCIAL_ENABLED,
+      methodsVerified: keys.CAKTO_METHODS_VERIFIED
     }
   };
 

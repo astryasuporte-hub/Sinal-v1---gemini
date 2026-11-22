@@ -15,6 +15,15 @@
 
 import { Pool, PoolClient, QueryResult, QueryResultRow } from 'pg';
 let globalPool: Pool | null = null;
+let testPoolOverride: any = null;
+
+export function setTestPostgresPool(pool: any): void {
+  const isTestEnv = process.env.NODE_ENV === 'test' || process.env.FATOSBR_TEST_MODE === 'true';
+  if (!isTestEnv && pool !== null) {
+    throw new Error('SECURITY_VIOLATION: Override de Pool PostgreSQL só é permitido em ambiente de teste.');
+  }
+  testPoolOverride = pool;
+}
 
 
 // Bundle público oficial de CA da Supabase (Root CA 2021 + Intermediate CA 2021)
@@ -372,10 +381,14 @@ function createServerlessPool(): Pool | null {
 }
 
 export function isPostgresConfigured(): boolean {
+  if (testPoolOverride) return true;
   return Boolean(resolveCanonicalDbConfig());
 }
 
 export function getPostgresPool(): Pool {
+  if (testPoolOverride) {
+    return testPoolOverride;
+  }
   if (!globalPool) {
     globalPool = createServerlessPool();
   }

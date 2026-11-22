@@ -100,17 +100,39 @@ export type SubscriptionStatus =
   | 'ACTIVE'
   | 'RENEWAL_PENDING'
   | 'PAST_DUE'
-  | 'CANCELED';
+  | 'CANCELED'
+  | 'EXPIRED'
+  | 'PAYMENT_REFUSED';
 
 export interface UserSubscription {
   status: SubscriptionStatus;
+  planId?: 'pro' | 'trial';
   planName: string;
   amount: number;
+  amountCents?: number;
+  currency?: 'BRL';
   trialDaysLeft: number;
+  trialTotalDays?: number;
+  trialStartsAt?: string;
   trialEndsAt: string;
   currentPeriodEnd: string;
-  gateway: 'FatosBR Gateway' | string;
-  paymentMethod: 'PIX';
+  canceledAt?: string | null;
+  graceUntil?: string | null;
+  gateway: string;
+  provider?: 'cakto' | 'sharpify';
+  paymentMethod: string;
+  allowedMethods?: ('credit_card' | 'pix_auto')[];
+  isAdminExempt?: boolean;
+  hasProAccess?: boolean;
+  providerSubscriptionId?: string | null;
+  commercialReadiness?: {
+    ready: boolean;
+    blockedReasonCode?: string;
+    blockedMessage?: string;
+    commercialEnabled: boolean;
+    methodsVerified: boolean;
+    allowedMethods: string[];
+  };
 }
 
 export interface Briefing {

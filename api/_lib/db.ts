@@ -19,7 +19,6 @@
 
 import { executeSql, isPostgresConfigured } from './postgres.js';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import type { ZynPayOfficialChargeResponse } from './zynpayClient.js';
 
 const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '';
 const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
@@ -107,7 +106,7 @@ export function setTestDatabaseAdapter(adapter: TestDatabaseAdapter | null): voi
 
 export interface StoredCharge {
   id: string; // UUID em internal.billing_payments
-  providerPaymentId: string; // ID externo do provedor (ex: zyn_...)
+  providerPaymentId: string; // ID externo do provedor (ex: cakto_...)
   userEmail?: string;
   userId?: string | null;
   amount: number; // Inteiro em centavos na coluna amount
@@ -281,140 +280,7 @@ export async function cancelOrExpirePendingCharge(chargeId: string, reason = 'EX
 }
 
 /**
- * Grava a cobrança oficial gerada pelo gateway ZynPay na tabela canônica internal.billing_payments.
- * Utiliza o provider_payment_id retornado pelo gateway oficial da ZynPay.
- */
-export async function recordOfficialZynPayCharge(params: {
-  userId: string;
-  gatewayCharge: ZynPayOfficialChargeResponse;
-  planId: string;
-  userEmail: string;
-  description: string;
-  idempotencyKey?: string;
-}): Promise<StoredCharge> {
-  if (activeTestAdapter) {
-    await activeTestAdapter.recordPendingCharge({
-      providerPaymentId: params.gatewayCharge.id,
-      userId: params.userId,
-      userEmail: params.userEmail,
-      amountCents: params.gatewayCharge.amount,
-      description: params.description,
-      qrCodeText: params.gatewayCharge.qrCodeText
-    });
-    return {
-      id: `uuid_${Date.now()}`,
-      providerPaymentId: params.gatewayCharge.id,
-      userId: params.userId,
-      userEmail: params.userEmail,
-      amount: params.gatewayCharge.amount,
-      amountCents: params.gatewayCharge.amount,
-      currency: params.gatewayCharge.currency || 'BRL',
-      status: params.gatewayCharge.status || 'PENDING',
-      description: params.description,
-      planId: params.planId,
-      idempotencyKey: params.idempotencyKey,
-      qrCodeText: params.gatewayCharge.qrCodeText,
-      expirationDate: params.gatewayCharge.expirationDate,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    };
-  }
-
-  if (!isPostgresConfigured()) {
-    throw new Error('POSTGRES_UNAVAILABLE: Gravação da cobrança exige conexão PostgreSQL server-side configurada.');
-  }
-
-  const checkoutData = JSON.stringify({
-    plan_id: params.planId,
-    user_email: params.userEmail,
-    description: params.description,
-    qr_code_text: params.gatewayCharge.qrCodeText,
-    idempotency_key: params.idempotencyKey || null,
-    attempt_state: 'PENDING'
-  });
-
-  try {
-    const insertSql = `
-      INSERT INTO internal.billing_payments (
-        id,
-        user_id,
-        provider,
-        provider_payment_id,
-        amount,
-        currency,
-        status,
-        type,
-        request_state,
-        expiration_date,
-        checkout_data,
-        last_synced_at,
-        created_at,
-        updated_at
-      ) VALUES (
-        gen_random_uuid(),
-        $1,
-        'zynpay',
-        $2,
-        $3,
-        $4,
-        $5,
-        'PIX',
-        'PENDING',
-        $6,
-        $7::jsonb,
-        NOW(),
-        NOW(),
-        NOW()
-      )
-      RETURNING id, provider_payment_id, user_id, amount, currency, status, checkout_data, expiration_date, created_at, updated_at
-    `;
-
-    const res = await executeSql(insertSql, [
-      params.userId,
-      params.gatewayCharge.id,
-      params.gatewayCharge.amount,
-      params.gatewayCharge.currency || 'BRL',
-      params.gatewayCharge.status || 'PENDING',
-      params.gatewayCharge.expirationDate || null,
-      checkoutData
-    ]);
-
-    const row = res.rows[0];
-    return {
-      id: row.id,
-      providerPaymentId: row.provider_payment_id,
-      userId: row.user_id,
-      userEmail: row.checkout_data?.user_email || params.userEmail,
-      amount: Number(row.amount || 0),
-      amountCents: Number(row.amount || 0),
-      currency: row.currency || 'BRL',
-      status: row.status,
-      description: row.checkout_data?.description || params.description,
-      qrCodeText: row.checkout_data?.qr_code_text || params.gatewayCharge.qrCodeText,
-      expirationDate: row.expiration_date,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at
-    };
-  } catch (err: any) {
-    if (err.code === '23505' || err.message?.includes('billing_one_pending') || err.message?.includes('provider_payment_id')) {
-      console.warn('[Concurrency Handled] Conflito concorrente detectado, recuperando cobrança pendente existente.');
-      const concurrent = await getActivePendingChargeForUser(params.userId, params.userEmail);
-      if (concurrent) {
-        return concurrent;
-      }
-    }
-    console.error(`[Postgres Error] Falha ao gravar cobrança oficial ${params.gatewayCharge.id}:`, err.message);
-    throw new Error(`DATABASE_PERSISTENCE_FAILED: Falha na gravação do pagamento via PostgreSQL (${err.message})`);
-  }
-}
-
-/**
- * Reserva transacional durável no PostgreSQL ANTES de qualquer chamada ao Gateway ZynPay.
- * 
- * Garante:
- * 1. Exclusão mútua por idempotency_key e índice parcial billing_one_pending.
- * 2. Bloqueio imediato de chamadas externas duplicadas por concorrência/duplo clique.
- * 3. Rastreabilidade durável da tentativa antes do tráfego de rede.
+ * Reserva transacional durável no PostgreSQL antes da criação da intenção no provedor de pagamento.
  */
 export async function reserveCheckoutAttempt(params: {
   userId: string;
@@ -424,6 +290,7 @@ export async function reserveCheckoutAttempt(params: {
   currency?: string;
   idempotencyKey: string;
   description: string;
+  provider?: string;
 }): Promise<{
   id: string;
   alreadyCompleted?: boolean;
@@ -439,8 +306,8 @@ export async function reserveCheckoutAttempt(params: {
   }
 
   const currency = params.currency || 'BRL';
+  const provider = params.provider || 'cakto';
 
-  // 1. Verifica se já existe tentativa registrada com a mesma chave de idempotência
   const existingSql = `
     SELECT id, provider_payment_id, user_id, amount, currency, status, request_state, checkout_data, expiration_date, created_at, updated_at
     FROM internal.billing_payments
@@ -480,14 +347,12 @@ export async function reserveCheckoutAttempt(params: {
       return { id: row.id, alreadyCompleted: true, charge: mapped };
     }
 
-    // Se estiver em estado CREATING registrado há menos de 30s: requisição simultânea em andamento
     const ageSeconds = (Date.now() - new Date(row.created_at).getTime()) / 1000;
     if (row.request_state === 'CREATING' && ageSeconds < 30) {
       return { id: row.id, inProgress: true, charge: mapped };
     }
   }
 
-  // 2. Reserva atômica no PostgreSQL com provider_payment_id provisório único
   const reservedPaymentId = `reserved_${Date.now()}_${Math.floor(100000 + Math.random() * 900000)}`;
   const checkoutData = JSON.stringify({
     plan_id: params.planId,
@@ -515,14 +380,14 @@ export async function reserveCheckoutAttempt(params: {
     ) VALUES (
       gen_random_uuid(),
       $1,
-      'zynpay',
       $2,
       $3,
       $4,
+      $5,
       'PENDING',
-      'PIX',
+      'SUBSCRIPTION',
       'CREATING',
-      $5::jsonb,
+      $6::jsonb,
       NOW(),
       NOW()
     )
@@ -531,6 +396,7 @@ export async function reserveCheckoutAttempt(params: {
 
   const res = await executeSql(insertSql, [
     params.userId,
+    provider,
     reservedPaymentId,
     params.amountCents,
     currency,
@@ -544,11 +410,18 @@ export async function reserveCheckoutAttempt(params: {
 }
 
 /**
- * Atualiza e finaliza a tentativa reservada com os dados oficiais do gateway ZynPay.
+ * Atualiza e finaliza a tentativa reservada com os dados do gateway oficial ativo.
  */
 export async function finalizeReservedCheckoutAttempt(params: {
   reservationId: string;
-  gatewayCharge: ZynPayOfficialChargeResponse;
+  gatewayCharge: {
+    id: string;
+    amount: number;
+    currency?: string;
+    status?: string;
+    qrCodeText?: string;
+    expirationDate?: string | null;
+  };
   planId: string;
   userEmail: string;
   description: string;
@@ -566,7 +439,7 @@ export async function finalizeReservedCheckoutAttempt(params: {
     plan_id: params.planId,
     user_email: params.userEmail,
     description: params.description,
-    qr_code_text: params.gatewayCharge.qrCodeText,
+    qr_code_text: params.gatewayCharge.qrCodeText || null,
     idempotency_key: params.idempotencyKey || null,
     attempt_state: 'COMPLETED',
     finalized_at: new Date().toISOString()
@@ -622,7 +495,7 @@ export async function finalizeReservedCheckoutAttempt(params: {
 }
 
 /**
- * Marca a tentativa reservada como FAILED em caso de falha da ZynPay, liberando a constraint billing_one_pending.
+ * Marca a tentativa reservada como FAILED em caso de falha do provedor, liberando a constraint billing_one_pending.
  */
 export async function failReservedCheckoutAttempt(reservationId: string, reason?: string): Promise<boolean> {
   if (activeTestAdapter?.failReservedCheckoutAttempt) {
@@ -686,22 +559,26 @@ export async function linkLegacyChargeToUser(chargeId: string, userId: string): 
 
 /**
  * Verifica se um usuário Supabase autenticado possui papel administrativo para acesso financeiro.
- * Consulta claims de app_metadata e a tabela pública public.user_roles.
+ * Consulta claims assinadas de app_metadata e a tabela interna internal.user_roles (nunca public.user_roles).
  */
 export async function isFinancialAdminUser(user: any): Promise<boolean> {
   if (!user || !user.id) return false;
 
-  // 1. Claims assinadas no app_metadata do Supabase Auth (gerenciadas exclusivamente pelo backend)
   const appMeta = user.app_metadata || {};
-  if (appMeta.is_admin === true || appMeta.role === 'admin' || appMeta.role === 'super_admin' || appMeta.role === 'financial_admin') {
+  const metaRole = String(appMeta.role || '').trim().toLowerCase();
+  if (
+    appMeta.is_admin === true ||
+    metaRole === 'admin' ||
+    metaRole === 'super_admin' ||
+    metaRole === 'financial_admin'
+  ) {
     return true;
   }
 
-  // 2. Consulta tabela de papéis de usuário (public.user_roles) no PostgreSQL
   if (isPostgresConfigured()) {
     try {
       const roleRes = await executeSql(
-        `SELECT role FROM public.user_roles WHERE user_id = $1 AND role IN ('admin', 'super_admin', 'financial_admin') LIMIT 1`,
+        `SELECT role FROM internal.user_roles WHERE user_id = $1 AND LOWER(role) IN ('admin', 'super_admin', 'financial_admin') LIMIT 1`,
         [user.id]
       );
       if (roleRes.rows.length > 0) return true;
@@ -774,7 +651,7 @@ export async function createOrReusePixCharge(params: {
 
     const mockCharge: StoredCharge = {
       id: `uuid_${Date.now()}`,
-      providerPaymentId: params.providerPaymentId || `zyn_${Date.now()}`,
+      providerPaymentId: params.providerPaymentId || `pay_${Date.now()}`,
       userId: params.userId || null,
       userEmail: params.userEmail || '',
       amount: params.amountCents,
@@ -828,7 +705,7 @@ export async function createOrReusePixCharge(params: {
   }
 
   // 3. Criação de nova cobrança
-  const providerPaymentId = params.providerPaymentId || `zyn_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
+  const providerPaymentId = params.providerPaymentId || `pay_${Date.now()}_${Math.floor(1000 + Math.random() * 9000)}`;
   const checkoutData = JSON.stringify({
     user_email: userEmail,
     description: params.description,
@@ -853,12 +730,12 @@ export async function createOrReusePixCharge(params: {
       ) VALUES (
         gen_random_uuid(),
         $1,
-        'zynpay',
+        'cakto',
         $2,
         $3,
         'BRL',
         'PENDING',
-        'PIX',
+        'SUBSCRIPTION',
         'PENDING',
         $4::jsonb,
         NOW(),
@@ -927,7 +804,7 @@ export async function recordPendingCharge(charge: {
     return activeTestAdapter.recordPendingCharge(charge);
   }
 
-  const amountCents = Math.round(charge.amountCents ?? (charge.amount ? charge.amount * 100 : 2990));
+  const amountCents = Math.round(charge.amountCents ?? (charge.amount ? charge.amount * 100 : 3490));
   await createOrReusePixCharge({
     providerPaymentId: charge.providerPaymentId || charge.id,
     userId: charge.userId,
@@ -1070,7 +947,7 @@ export async function getChargeByIdempotencyKey(userId: string, idempotencyKey: 
  * Valida idempotência de evento de webhook inserindo registro inicial na tabela real internal.billing_events.
  * Exclusivamente via PostgreSQL server-side.
  */
-export async function checkAndLockWebhookEvent(eventId: string, provider = 'zynpay'): Promise<{ isDuplicate: boolean }> {
+export async function checkAndLockWebhookEvent(eventId: string, provider = 'cakto'): Promise<{ isDuplicate: boolean }> {
   if (activeTestAdapter) {
     return activeTestAdapter.checkAndLockWebhookEvent(eventId, provider);
   }
@@ -1145,9 +1022,9 @@ export async function confirmPaymentAndActivateSubscriptionAtomic(params: {
   }
 
   const paymentId = params.providerPaymentId || params.chargeId;
-  const amount = Math.round(params.expectedAmount ?? params.expectedAmountCents ?? 2990);
+  const amount = Math.round(params.expectedAmount ?? params.expectedAmountCents ?? 3490);
   const currency = params.expectedCurrency || 'BRL';
-  const provider = params.provider || 'zynpay';
+  const provider = params.provider || 'cakto';
   const rawPayload = JSON.stringify(params.rawPayload || {});
 
   try {

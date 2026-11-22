@@ -11,7 +11,12 @@
 import { sendJson, setCorsHeaders, readJsonBody } from '../../common.js';
 import { verifyAdminRequest } from '../../adminAuth.js';
 import { safeCompare } from '../../crypto.js';
-import { briefingEngine, BriefingEditionType } from '../../briefingEngine.js';
+import {
+  briefingEngine,
+  BriefingEditionType,
+  DEFAULT_BRIEFING_TIMEZONE,
+  getZonedDateParts,
+} from '../../briefingEngine.js';
 
 function normalizeEditionType(raw: any): BriefingEditionType | null {
   const upper = String(raw || '').trim().toUpperCase();
@@ -49,7 +54,7 @@ export default async function handler(req: any, res: any) {
     return sendJson(res, 405, {
       success: false,
       error: 'METHOD_NOT_ALLOWED',
-      message: 'Método não permitido. Utilize POST ou GET autenticado.'
+      message: 'Método não permitido. Utilize POST ou GET autenticado.',
     });
   }
 
@@ -58,23 +63,13 @@ export default async function handler(req: any, res: any) {
     return sendJson(res, 401, {
       success: false,
       error: 'UNAUTHORIZED',
-      message: 'Autenticação administrativa ou CRON_SECRET obrigatória para gerar briefings.'
+      message: 'Autenticação administrativa ou CRON_SECRET obrigatória para gerar briefings.',
     });
   }
 
   try {
     const urlObj = new URL(req.url || '/api/notifications/generate-briefings', 'http://localhost');
     const body = req.method === 'POST' ? await readJsonBody(req) : {};
-
-    const requestedType =
-      normalizeEditionType(body?.type ?? urlObj.searchParams.get('type')) ||
-      (new Date().getUTCHours() >= 18 ? 'EVENING' : 'MORNING');
-
-    const sendEmail = Boolean(
-      body?.sendEmail === true || urlObj.searchParams.get('sendEmail') === 'true'
-    );
-    const targetUserId = body?.userId ? String(body.userId).trim() : '';
-    const briefingEmail = body?.briefingEmail ? String(body.briefingEmail).trim() : undefined;
 
     let referenceDate = new Date();
     const rawRefDate = body?.referenceDate ?? urlObj.searchParams.get('referenceDate');
@@ -84,11 +79,25 @@ export default async function handler(req: any, res: any) {
         return sendJson(res, 400, {
           success: false,
           error: 'INVALID_REFERENCE_DATE',
-          message: 'referenceDate inválido. Informe uma data ISO-8601 válida.'
+          message: 'referenceDate inválido. Informe uma data ISO-8601 válida.',
         });
       }
       referenceDate = parsed;
     }
+
+    const defaultBrParts = getZonedDateParts(referenceDate, DEFAULT_BRIEFING_TIMEZONE);
+    const requestedType =
+      normalizeEditionType(body?.type ?? urlObj.searchParams.get('type')) ||
+      (defaultBrParts.hour >= 17 ? 'EVENING' : 'MORNING');
+
+    const sendEmail = Boolean(
+      body?.sendEmail === true || urlObj.searchParams.get('sendEmail') === 'true'
+    );
+    const respectScheduleWindow = Boolean(
+      body?.respectSchedule === true || urlObj.searchParams.get('respectSchedule') === 'true'
+    );
+    const targetUserId = body?.userId ? String(body.userId).trim() : '';
+    const briefingEmail = body?.briefingEmail ? String(body.briefingEmail).trim() : undefined;
 
     if (targetUserId) {
       const result = await briefingEngine.generateForUser({
@@ -96,7 +105,7 @@ export default async function handler(req: any, res: any) {
         type: requestedType,
         briefingEmail,
         sendEmail,
-        referenceDate
+        referenceDate,
       });
 
       const statusCode = result.status === 'FAILED' ? 500 : 200;
@@ -104,14 +113,15 @@ export default async function handler(req: any, res: any) {
         success: result.status !== 'FAILED',
         mode: 'SINGLE_USER',
         type: requestedType,
-        result
+        result,
       });
     }
 
     const cycleSummary = await briefingEngine.runGenerationCycle({
       type: requestedType,
       sendEmail,
-      referenceDate
+      referenceDate,
+      respectScheduleWindow,
     });
 
     return sendJson(res, 200, {
@@ -119,13 +129,14 @@ export default async function handler(req: any, res: any) {
       mode: 'BATCH_CYCLE',
       type: requestedType,
       sendEmail,
-      ...cycleSummary
+      respectScheduleWindow,
+      ...cycleSummary,
     });
   } catch (err: any) {
     return sendJson(res, 500, {
       success: false,
       error: 'BRIEFING_GENERATION_FAILED',
-      message: err?.message || 'Erro interno ao executar geração de briefings.'
+      message: err?.message || 'Erro interno ao executar geração de briefings.',
     });
   }
 }

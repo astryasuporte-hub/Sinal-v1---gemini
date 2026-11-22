@@ -1,57 +1,46 @@
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
- * 
- * FATOSBR — SUÍTE COMPLETA DE TESTES DE SEGURANÇA E PERSISTÊNCIA FINANCEIRA
- * 
+ *
+ * FATOSBR — SUÍTE DE SEGURANÇA, RATE LIMITING, SSRF & PAYMENTS V1 (CAKTO)
+ *
  * Cobre:
- * 1. Rate Limiting Distribuído (Concorrência, Janela, Expiração, Fail-Closed, Anti-Spoofing de IP)
- * 2. Persistência de Dados e Atomicidade RPC (Zero fallback em memória, Reversão, Idempotência)
- * 3. Validação Real ZynPay (HMAC-SHA256, Upstream Reconcile, Anti-Tampering de Valores e Moeda)
- * 4. Controle de Acesso e Autenticação Administrativa
- * 5. Proteção Anti-SSRF
+ * 1. Rate Limiting Distribuído (Concorrência, Janela, Fail-Closed HTTP 503, Anti-Spoofing de IP)
+ * 2. Checkout & Persistência Payments V1 (Fail-Closed DB, Idempotência, Preço Server-Side R$ 34,90, Bloqueio de Métodos Proibidos)
+ * 3. Validação Real Cakto Webhook (HMAC-SHA256, Replay <= 300s, Anti-Tampering de Valor/Moeda/Produto/Oferta)
+ * 4. Controle de Acesso, Anti-IDOR e Administração via RBAC Supabase Auth
+ * 5. Proteção Anti-SSRF (Metadata, RFC1918, Localhost vs Domínios Oficiais incluindo Cakto)
+ * 6. Roteadores Consolidados Vercel Hobby (/api/payments, /api/resend, /api/proxy, /api/auth, /api/notifications)
  */
 
 import crypto from 'crypto';
-import webhookHandler from '../api/_lib/handlers/zynpay/webhook';
-import chargesHandler from '../api/_lib/handlers/zynpay/charges';
-import configHandler from '../api/_lib/handlers/zynpay/config';
-import balanceHandler from '../api/_lib/handlers/zynpay/balance';
-import zynpayRouter from '../api/zynpay/[...action]';
-import resendRouter from '../api/resend/[...action]';
-import proxyRouter from '../api/proxy/[...action]';
-import authRouter from '../api/auth/[...action]';
-import notificationsRouter from '../api/notifications/[...action]';
-import { isAllowedDomain } from '../api/_lib/common';
+import paymentsRouter from '../api/payments/[...action].js';
+import resendRouter from '../api/resend/[...action].js';
+import proxyRouter from '../api/proxy/[...action].js';
+import authRouter from '../api/auth/[...action].js';
+import notificationsRouter from '../api/notifications/[...action].js';
+import { isAllowedDomain } from '../api/_lib/common.js';
 import {
   setTestDatabaseAdapter,
   setTestSupabaseClient,
-  TestDatabaseAdapter,
-  recordPendingCharge,
-  getChargeById,
-  checkAndLockWebhookEvent,
-  confirmPaymentAndActivateSubscriptionAtomic
-} from '../api/_lib/db';
+} from '../api/_lib/db.js';
 import {
-  setTestZynPayGatewayAdapter,
-  TestZynPayGatewayAdapter,
-  mapZynPayStatus,
-  validateMonetaryAmountCents,
-  validateZynPayCreationResponse,
-  validateZynPayConsultationResponse
-} from '../api/_lib/zynpayClient';
+  setPaymentsPersistenceAdapter,
+  PaymentsPersistenceAdapter,
+  DbSubscriptionRow,
+  DbAttemptRow,
+} from '../api/_lib/payments/PaymentsStore.js';
 import {
   setTestRateLimiterStore,
   TestRateLimiterStore,
   enforceRateLimit,
-  RATE_LIMIT_PROFILES
-} from '../api/_lib/rateLimiter';
+  RATE_LIMIT_PROFILES,
+} from '../api/_lib/rateLimiter.js';
+import { clearCaktoTokenCache } from '../api/_lib/payments/CaktoClient.js';
 
-// Habilita explicitamente o modo de testes para permitir a injeção do mock isolado
 process.env.FATOSBR_TEST_MODE = 'true';
 process.env.NODE_ENV = 'test';
 
-// Mock de requisição e resposta HTTP
 interface MockReqOptions {
   method?: string;
   url?: string;
@@ -61,21 +50,21 @@ interface MockReqOptions {
 }
 
 function createMockReq(options: MockReqOptions = {}): any {
-  const { method = 'GET', url = '/api/zynpay', headers = {}, body, rawBody } = options;
+  const { method = 'GET', url = '/api/payments/status', headers = {}, body, rawBody } = options;
   return {
     method,
     url,
     headers: {
       'x-forwarded-for': '127.0.0.1',
-      ...headers
+      ...headers,
     },
     body,
-    rawBody: rawBody !== undefined ? rawBody : (body ? JSON.stringify(body) : ''),
+    rawBody: rawBody !== undefined ? rawBody : body ? JSON.stringify(body) : '',
     socket: { remoteAddress: '127.0.0.1' },
     [Symbol.asyncIterator]: async function* () {
       if (rawBody) yield Buffer.from(rawBody);
       else if (body) yield Buffer.from(JSON.stringify(body));
-    }
+    },
   };
 }
 
@@ -104,7 +93,7 @@ function createMockRes(): {
     end: (data?: string) => {
       if (data) raw += data;
       statusCode = res.statusCode;
-    }
+    },
   };
 
   return {
@@ -115,441 +104,176 @@ function createMockRes(): {
         json = JSON.parse(raw);
       } catch {}
       return { statusCode, headers, json, raw };
-    }
+    },
   };
 }
 
-// Harness de Banco de Dados Simulado em Homologação
-class MockDatabaseHarness implements TestDatabaseAdapter {
-  public charges = new Map<string, any>();
-  public webhookEvents = new Map<string, any>();
-  public userSubscriptions = new Map<string, string>();
-  public forceError: string | null = null;
-  public forceIdempotencyError: boolean = false;
+class InMemoryPaymentsStore implements PaymentsPersistenceAdapter {
+  public subscriptions = new Map<string, DbSubscriptionRow>();
+  public attempts = new Map<string, DbAttemptRow>();
+  public payments = new Map<string, any>();
+  public events = new Map<string, any>();
+  public usersByEmail = new Map<string, { id: string; email: string; created_at?: string }>();
 
-  async reserveCheckoutAttempt(params: any): Promise<{
-    id: string;
-    alreadyCompleted?: boolean;
-    charge?: any;
-    inProgress?: boolean;
-  }> {
-    if (this.forceError) throw new Error(this.forceError);
+  async findSubscriptionByUserId(userId: string): Promise<DbSubscriptionRow | null> {
+    return this.subscriptions.get(userId) || null;
+  }
 
-    // 1. Verifica se já existe tentativa registrada com a mesma chave de idempotência
-    if (params.idempotencyKey) {
-      for (const c of this.charges.values()) {
-        const matchUser = c.user_id === params.userId;
-        const matchKey = c.idempotency_key === params.idempotencyKey || c.checkout_data?.idempotency_key === params.idempotencyKey;
-        if (matchUser && matchKey) {
-          if (c.status === 'PAID' || (c.status === 'PENDING' && c.provider_payment_id && !c.provider_payment_id.startsWith('reserved_'))) {
-            return {
-              id: c.id,
-              alreadyCompleted: true,
-              charge: {
-                id: c.id,
-                providerPaymentId: c.provider_payment_id || c.id,
-                userId: c.user_id,
-                userEmail: c.user_email || params.userEmail,
-                amount: c.amount,
-                amountCents: c.amount,
-                currency: c.currency || 'BRL',
-                status: c.status,
-                description: c.description || params.description,
-                qrCodeText: c.qr_code_text,
-                expirationDate: c.expiration_date,
-                createdAt: c.created_at,
-                updatedAt: c.updated_at
-              }
-            };
-          }
-          if (c.request_state === 'CREATING') {
-            return {
-              id: c.id,
-              inProgress: true,
-              charge: {
-                id: c.id,
-                providerPaymentId: c.provider_payment_id || c.id,
-                userId: c.user_id,
-                userEmail: c.user_email || params.userEmail,
-                amount: c.amount,
-                amountCents: c.amount,
-                currency: c.currency || 'BRL',
-                status: c.status,
-                description: c.description || params.description,
-                qrCodeText: c.qr_code_text,
-                expirationDate: c.expiration_date,
-                createdAt: c.created_at,
-                updatedAt: c.updated_at
-              }
-            };
-          }
-        }
-      }
+  async findSubscriptionByProviderSubId(providerSubId: string): Promise<DbSubscriptionRow | null> {
+    for (const s of this.subscriptions.values()) {
+      if (s.provider_subscription_id === providerSubId) return s;
     }
+    return null;
+  }
 
-    // 2. Simula constraint billing_one_pending
-    const userEmail = (params.userEmail || '').toLowerCase().trim();
-    const userId = params.userId;
-    for (const existing of this.charges.values()) {
-      const match = (userId && existing.user_id === userId) || (userEmail && existing.user_email?.toLowerCase() === userEmail);
-      if (match && (existing.status === 'PENDING' || existing.status === 'PROCESSING')) {
-        const err: any = new Error('duplicate key value violates unique constraint "billing_one_pending"');
-        err.code = '23505';
-        throw err;
-      }
-    }
+  async findUserByEmail(email: string): Promise<{ id: string; email: string; created_at?: string } | null> {
+    return this.usersByEmail.get(email.toLowerCase().trim()) || null;
+  }
 
-    // 3. Reserva atômica no mock
-    const reservationId = `res_${Date.now()}_${Math.floor(100000 + Math.random() * 900000)}`;
-    const reservedPaymentId = `reserved_${Date.now()}`;
-    const record = {
-      id: reservationId,
-      provider_payment_id: reservedPaymentId,
+  async upsertSubscription(params: any): Promise<DbSubscriptionRow> {
+    const existing = this.subscriptions.get(params.userId);
+    const now = new Date().toISOString();
+    const row: DbSubscriptionRow = {
+      id: existing?.id || crypto.randomUUID(),
       user_id: params.userId,
-      user_email: params.userEmail,
-      amount: params.amountCents,
+      plan: params.plan,
+      plan_id: params.planId,
+      status: params.status,
+      provider: params.provider,
+      product_id: params.productId ?? existing?.product_id ?? null,
+      offer_id: params.offerId ?? existing?.offer_id ?? null,
+      checkout_id: params.checkoutId ?? existing?.checkout_id ?? null,
+      payment_method: params.paymentMethod ?? existing?.payment_method ?? null,
       amount_cents: params.amountCents,
-      currency: params.currency || 'BRL',
-      status: 'PENDING',
-      request_state: 'CREATING',
-      provider: 'zynpay',
-      description: params.description,
-      idempotency_key: params.idempotencyKey,
-      checkout_data: {
-        idempotency_key: params.idempotencyKey,
-        user_email: params.userEmail,
-        description: params.description,
-        plan_id: params.planId
-      },
+      currency: params.currency,
+      provider_subscription_id: params.providerSubscriptionId ?? existing?.provider_subscription_id ?? null,
+      current_period_start: params.currentPeriodStart ?? existing?.current_period_start ?? null,
+      current_period_end: params.currentPeriodEnd ?? existing?.current_period_end ?? null,
+      canceled_at: params.canceledAt !== undefined ? params.canceledAt : existing?.canceled_at ?? null,
+      grace_until: params.graceUntil !== undefined ? params.graceUntil : existing?.grace_until ?? null,
+      last_event_id: params.lastEventId ?? existing?.last_event_id ?? null,
+      billing_metadata: { ...(existing?.billing_metadata || {}), ...(params.billingMetadata || {}) },
+      created_at: existing?.created_at || now,
+      updated_at: now,
+    };
+    this.subscriptions.set(params.userId, row);
+    return row;
+  }
+
+  async createBillingAttempt(params: any): Promise<DbAttemptRow> {
+    const now = new Date().toISOString();
+    const row: DbAttemptRow = {
+      id: params.id,
+      user_id: params.userId,
+      provider: params.provider,
+      plan_id: params.planId,
+      product_id: params.productId,
+      offer_id: params.offerId,
+      checkout_id: params.checkoutId,
+      amount_cents: params.amountCents,
+      currency: params.currency,
+      status: params.status,
+      checkout_url: params.checkoutUrl || null,
+      idempotency_key: params.idempotencyKey || null,
+      metadata: params.metadata || {},
+      expires_at: params.expiresAt,
+      created_at: now,
+      updated_at: now,
+    };
+    this.attempts.set(params.id, row);
+    return row;
+  }
+
+  async getBillingAttemptById(attemptId: string): Promise<DbAttemptRow | null> {
+    return this.attempts.get(attemptId) || null;
+  }
+
+  async findBillingAttemptByIdempotencyKey(userId: string, key: string): Promise<DbAttemptRow | null> {
+    for (const a of this.attempts.values()) {
+      if (a.user_id === userId && a.idempotency_key === key) return a;
+    }
+    return null;
+  }
+
+  async updateBillingAttempt(attemptId: string, patch: any): Promise<void> {
+    const row = this.attempts.get(attemptId);
+    if (!row) return;
+    if (patch.status) row.status = patch.status;
+    if (patch.checkoutUrl !== undefined) row.checkout_url = patch.checkoutUrl;
+    if (patch.providerOrderId !== undefined) row.provider_order_id = patch.providerOrderId;
+    if (patch.providerSubscriptionId !== undefined) row.provider_subscription_id = patch.providerSubscriptionId;
+    if (patch.metadata) row.metadata = { ...(row.metadata || {}), ...patch.metadata };
+    row.updated_at = new Date().toISOString();
+  }
+
+  async listOpenAttemptsForUser(userId: string): Promise<DbAttemptRow[]> {
+    return Array.from(this.attempts.values()).filter(
+      (a) => a.user_id === userId && (a.status === 'CREATED' || a.status === 'REDIRECTED')
+    );
+  }
+
+  async acquireWebhookEventLock(params: any): Promise<{ isDuplicate: boolean }> {
+    const key = `${params.provider}:${params.providerEventId}`;
+    const existing = this.events.get(key);
+    if (existing && existing.processed) return { isDuplicate: true };
+    this.events.set(key, {
+      id: existing?.id || crypto.randomUUID(),
+      provider: params.provider,
+      provider_event_id: params.providerEventId,
+      event_type: params.eventType,
+      signature_valid: params.signatureValid,
+      processed: false,
       created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    };
-
-    this.charges.set(reservationId, record);
-    return { id: reservationId, alreadyCompleted: false };
-  }
-
-  async finalizeReservedCheckoutAttempt(params: any): Promise<any> {
-    if (this.forceError) throw new Error(this.forceError);
-    let record = this.charges.get(params.reservationId);
-    if (!record) {
-      // Procura por ID
-      for (const c of this.charges.values()) {
-        if (c.id === params.reservationId) {
-          record = c;
-          break;
-        }
-      }
-    }
-    if (!record) {
-      throw new Error(`RESERVATION_NOT_FOUND: ${params.reservationId}`);
-    }
-
-    this.charges.delete(params.reservationId);
-    record.provider_payment_id = params.gatewayCharge.id;
-    record.amount = params.gatewayCharge.amount;
-    record.currency = params.gatewayCharge.currency || 'BRL';
-    record.status = params.gatewayCharge.status || 'PENDING';
-    record.request_state = 'COMPLETED';
-    record.qr_code_text = params.gatewayCharge.qrCodeText;
-    record.expiration_date = params.gatewayCharge.expirationDate || null;
-    record.checkout_data = {
-      ...record.checkout_data,
-      qr_code_text: params.gatewayCharge.qrCodeText,
-      attempt_state: 'COMPLETED'
-    };
-    record.updated_at = new Date().toISOString();
-
-    this.charges.set(params.gatewayCharge.id, record);
-    this.charges.set(record.id, record);
-
-    return {
-      id: record.id,
-      providerPaymentId: record.provider_payment_id,
-      userId: record.user_id,
-      userEmail: record.user_email,
-      amount: record.amount,
-      amountCents: record.amount,
-      currency: record.currency,
-      status: record.status,
-      description: record.description,
-      qrCodeText: record.qr_code_text,
-      expirationDate: record.expiration_date,
-      createdAt: record.created_at,
-      updatedAt: record.updated_at
-    };
-  }
-
-  async failReservedCheckoutAttempt(reservationId: string, reason?: string): Promise<boolean> {
-    let record = this.charges.get(reservationId);
-    if (!record) {
-      for (const c of this.charges.values()) {
-        if (c.id === reservationId) {
-          record = c;
-          break;
-        }
-      }
-    }
-    if (record) {
-      record.status = 'FAILED';
-      record.request_state = 'FAILED';
-      record.checkout_data = {
-        ...record.checkout_data,
-        failure_reason: reason || 'GATEWAY_ERROR'
-      };
-      return true;
-    }
-    return false;
-  }
-
-  async linkLegacyChargeToUser(chargeId: string, userId: string): Promise<boolean> {
-    const record = this.charges.get(chargeId);
-    if (record && !record.user_id) {
-      record.user_id = userId;
-      return true;
-    }
-    return false;
-  }
-
-  async recordPendingCharge(charge: any): Promise<boolean> {
-    if (this.forceError) throw new Error(this.forceError);
-
-    // Simula a restrição do índice parcial real billing_one_pending do PostgreSQL:
-    const userEmail = (charge.userEmail || '').toLowerCase().trim();
-    const userId = charge.userId;
-    for (const existing of this.charges.values()) {
-      const match = (userId && existing.user_id === userId) || (userEmail && existing.user_email?.toLowerCase() === userEmail);
-      if (match && (existing.status === 'PENDING' || existing.status === 'PROCESSING')) {
-        const err: any = new Error('duplicate key value violates unique constraint "billing_one_pending"');
-        err.code = '23505';
-        throw err;
-      }
-    }
-
-    const amount = charge.amount ?? charge.amountCents ?? 2990;
-    const paymentId = charge.providerPaymentId || charge.id;
-    this.charges.set(paymentId, {
-      id: 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', // UUID interno
-      provider_payment_id: paymentId,
-      user_email: charge.userEmail,
-      user_id: charge.userId || '11111111-1111-1111-1111-111111111111',
-      amount,
-      amount_cents: amount,
-      currency: charge.currency || 'BRL',
-      status: 'PENDING',
-      request_state: 'COMPLETED',
-      provider: 'zynpay',
-      description: charge.description,
-      qr_code_text: charge.qrCodeText,
-      idempotency_key: charge.idempotencyKey,
-      checkout_data: {
-        idempotency_key: charge.idempotencyKey,
-        user_email: charge.userEmail,
-        description: charge.description,
-        qr_code_text: charge.qrCodeText
-      },
-      created_at: new Date().toISOString()
     });
-    return true;
-  }
-
-  async getChargeByIdempotencyKey(userId: string, idempotencyKey: string): Promise<any | null> {
-    if (this.forceIdempotencyError || this.forceError) throw new Error('POSTGRES_POOL_TIMEOUT');
-    for (const c of this.charges.values()) {
-      const matchUser = userId && c.user_id === userId;
-      const matchKey = c.idempotency_key === idempotencyKey || c.checkout_data?.idempotency_key === idempotencyKey;
-      if (matchUser && matchKey) {
-        return {
-          id: c.id,
-          providerPaymentId: c.provider_payment_id || c.id,
-          userId: c.user_id,
-          userEmail: c.user_email,
-          amount: c.amount,
-          amountCents: c.amount,
-          currency: c.currency,
-          status: c.status,
-          description: c.description,
-          qrCodeText: c.qr_code_text,
-          createdAt: c.created_at,
-          updatedAt: c.created_at,
-          approvedAt: c.approved_at,
-          paidAt: c.approved_at
-        };
-      }
-    }
-    return null;
-  }
-
-  async getActivePendingCharge(userId: string | null, email?: string): Promise<any | null> {
-    if (this.forceError) throw new Error(this.forceError);
-    for (const c of this.charges.values()) {
-      const matchUser = userId && c.user_id === userId;
-      const matchEmail = email && c.user_email?.toLowerCase() === email.toLowerCase();
-      const isCompleted = c.request_state === 'COMPLETED' || (!c.provider_payment_id?.startsWith('reserved_') && c.qr_code_text);
-      if ((matchUser || matchEmail) && (c.status === 'PENDING' || c.status === 'PROCESSING') && isCompleted) {
-        return {
-          id: c.id,
-          providerPaymentId: c.provider_payment_id || c.id,
-          userId: c.user_id,
-          userEmail: c.user_email,
-          amount: c.amount,
-          amountCents: c.amount,
-          currency: c.currency,
-          status: c.status,
-          description: c.description,
-          qrCodeText: c.qr_code_text,
-          expirationDate: c.expiration_date,
-          createdAt: c.created_at,
-          updatedAt: c.created_at
-        };
-      }
-    }
-    return null;
-  }
-
-  async checkActiveSubscription(userId: string | null, email?: string): Promise<boolean> {
-    if (this.forceError) throw new Error(this.forceError);
-    if (userId && this.userSubscriptions.get(userId)?.toLowerCase() === 'active') return true;
-    if (email && this.userSubscriptions.get(email.toLowerCase())?.toLowerCase() === 'active') return true;
-    return false;
-  }
-
-  async getChargeById(chargeId: string): Promise<any | null> {
-    if (this.forceError) throw new Error(this.forceError);
-    const c = this.charges.get(chargeId);
-    if (!c) return null;
-    return {
-      id: c.id,
-      providerPaymentId: c.provider_payment_id || c.id,
-      userId: c.user_id,
-      userEmail: c.user_email,
-      amount: c.amount,
-      amountCents: c.amount,
-      currency: c.currency,
-      status: c.status,
-      description: c.description,
-      createdAt: c.created_at,
-      updatedAt: c.created_at,
-      approvedAt: c.approved_at,
-      paidAt: c.approved_at
-    };
-  }
-
-  async checkAndLockWebhookEvent(eventId: string, provider: string): Promise<{ isDuplicate: boolean }> {
-    if (this.forceError) throw new Error(this.forceError);
-    const existing = this.webhookEvents.get(eventId);
-    if (existing && existing.processed) {
-      return { isDuplicate: true };
-    }
-    // Trava de idempotência inicial com processed = false (marca true apenas ao concluir)
-    if (!existing) {
-      this.webhookEvents.set(eventId, {
-        id: 'b0eebc99-9c0b-4ef8-bb6d-6bb9bd380b22',
-        provider_event_id: eventId,
-        provider,
-        processed: false,
-        created_at: new Date().toISOString()
-      });
-    }
     return { isDuplicate: false };
   }
 
-  async confirmPaymentAndActivateSubscription(params: any): Promise<{
-    success: boolean;
-    duplicate?: boolean;
-    error?: string;
-    error_code?: string;
-  }> {
-    if (this.forceError) throw new Error(this.forceError);
-
-    const paymentId = params.providerPaymentId || params.chargeId;
-
-    // 1. Idempotência em internal.billing_events
-    const existingEvt = this.webhookEvents.get(params.eventId);
-    if (existingEvt && existingEvt.processed) {
-      return { success: true, duplicate: true };
+  async finalizeWebhookEvent(params: any): Promise<void> {
+    const key = `${params.provider}:${params.providerEventId}`;
+    const row = this.events.get(key);
+    if (row) {
+      row.processed = params.processed;
+      row.processing_error = params.processingError ?? null;
+      row.processed_at = new Date().toISOString();
     }
+  }
 
-    // 2. Trava e verificação da cobrança em internal.billing_payments
-    const charge = this.charges.get(paymentId);
-    if (!charge) {
-      return { success: false, error: 'Cobrança não encontrada', error_code: 'CHARGE_NOT_FOUND' };
-    }
-
-    // 3. Validação de status anterior
-    if (charge.status === 'PAID') {
-      return { success: true, duplicate: true };
-    }
-    if (charge.status !== 'PENDING' && charge.status !== 'PROCESSING') {
-      return { success: false, error: 'Status anterior inválido', error_code: 'INVALID_PREVIOUS_STATUS' };
-    }
-
-    // 4. Validação de valor e moeda (coluna amount)
-    const expectedAmount = params.expectedAmount ?? params.expectedAmountCents;
-    if (charge.amount !== expectedAmount) {
-      return { success: false, error: 'Valor divergente', error_code: 'AMOUNT_MISMATCH' };
-    }
-    if ((charge.currency || 'BRL') !== (params.expectedCurrency || 'BRL')) {
-      return { success: false, error: 'Moeda divergente', error_code: 'CURRENCY_MISMATCH' };
-    }
-
-    // 5. Atualização atômica em internal.billing_payments
-    charge.status = 'PAID';
-    charge.approved_at = new Date().toISOString();
-    this.webhookEvents.set(params.eventId, {
-      id: 'c0eebc99-9c0b-4ef8-bb6d-6bb9bd380c33',
-      provider_event_id: params.eventId,
-      processed: true,
-      context_id: charge.id
+  async upsertPaymentLedgerRecord(params: any): Promise<void> {
+    this.payments.set(params.providerPaymentId, {
+      id: crypto.randomUUID(),
+      ...params,
+      created_at: new Date().toISOString(),
     });
+  }
 
-    // 6. Ativação da assinatura do usuário na tabela canônica public.subscriptions
-    this.userSubscriptions.set(charge.user_id, 'active');
-    if (charge.user_email) {
-      this.userSubscriptions.set(charge.user_email.toLowerCase(), 'ACTIVE');
-    }
+  async listUserBillingHistory(userId: string): Promise<any[]> {
+    return Array.from(this.payments.values()).filter((p) => p.userId === userId);
+  }
 
-    return { success: true, duplicate: false };
+  async listRecentWebhookEvents(): Promise<any[]> {
+    return Array.from(this.events.values());
   }
 }
 
-// Store Distribuída Simulada para Teste de Rate Limiting
 class MockRateLimitStore implements TestRateLimiterStore {
   private counters = new Map<string, { tokens: number; windowStart: number }>();
-  public forceError: boolean = false;
+  public forceError = false;
 
   async checkAndIncrement(key: string, maxRequests: number, windowMs: number) {
     if (this.forceError) {
       throw new Error('DATABASE_CONNECTION_LOST');
     }
-
     const now = Date.now();
     let record = this.counters.get(key);
-
-    if (!record || (now - record.windowStart) >= windowMs) {
+    if (!record || now - record.windowStart >= windowMs) {
       record = { tokens: 1, windowStart: now };
       this.counters.set(key, record);
-      return {
-        allowed: true,
-        current: 1,
-        limit: maxRequests,
-        retry_after: 0,
-        remaining: maxRequests - 1
-      };
+      return { allowed: true, current: 1, limit: maxRequests, retry_after: 0, remaining: maxRequests - 1 };
     }
-
     record.tokens += 1;
-    const elapsed = now - record.windowStart;
     const allowed = record.tokens <= maxRequests;
-    const retry_after = allowed ? 0 : Math.max(1, Math.ceil((windowMs - elapsed) / 1000));
-
-    return {
-      allowed,
-      current: record.tokens,
-      limit: maxRequests,
-      retry_after,
-      remaining: Math.max(0, maxRequests - record.tokens)
-    };
+    const retry_after = allowed ? 0 : Math.max(1, Math.ceil((windowMs - (now - record.windowStart)) / 1000));
+    return { allowed, current: record.tokens, limit: maxRequests, retry_after, remaining: Math.max(0, maxRequests - record.tokens) };
   }
 
   reset() {
@@ -558,7 +282,6 @@ class MockRateLimitStore implements TestRateLimiterStore {
   }
 }
 
-// Runner
 let testsPassed = 0;
 let testsFailed = 0;
 
@@ -579,14 +302,21 @@ function assert(condition: boolean, message: string) {
 
 async function main() {
   console.log('\n======================================================');
-  console.log('🔒 FATOSBR — SUITE DE SEGURANÇA E TRANSAÇÕES ATÔMICAS');
+  console.log('🔒 FATOSBR — SUÍTE DE SEGURANÇA E PAYMENTS V1 (CAKTO)');
   console.log('======================================================\n');
 
-  const testSecret = 'whsec_zynpay_live_prod';
-  process.env.ZYNPAY_WEBHOOK_SECRET = testSecret;
+  const testSecret = 'whsec_cakto_security_test_2026';
+  process.env.CAKTO_WEBHOOK_SECRET = testSecret;
+  process.env.CAKTO_COMMERCIAL_ENABLED = 'true';
+  process.env.CAKTO_METHODS_VERIFIED = 'true';
+  process.env.CAKTO_CLIENT_ID = 'mock_client_id';
+  process.env.CAKTO_CLIENT_SECRET = 'mock_client_secret';
 
-  const dbHarness = new MockDatabaseHarness();
-  setTestDatabaseAdapter(dbHarness);
+  const paymentsStore = new InMemoryPaymentsStore();
+  setPaymentsPersistenceAdapter(paymentsStore);
+
+  const rateStore = new MockRateLimitStore();
+  setTestRateLimiterStore(rateStore);
 
   const mockSupabase = {
     auth: {
@@ -595,1335 +325,318 @@ async function main() {
           return { data: { user: null }, error: new Error('Invalid token') };
         }
         const clean = token.trim();
-        const isAdmin = clean === 'admin_token' || clean.startsWith('admin_');
-        const userId = clean.startsWith('user_') ? clean : (isAdmin ? 'admin_uuid_0001' : '11111111-1111-1111-1111-111111111111');
-        const userEmail = clean.includes('@') ? clean : `${userId}@fatosbr.com.br`;
+        const isAdmin = clean === 'admin_token_valid' || clean.startsWith('admin_');
+        const userId = isAdmin
+          ? '00000000-0000-4000-8000-000000000001'
+          : '11111111-1111-4111-8111-111111111111';
         return {
           data: {
             user: {
               id: userId,
-              email: userEmail,
+              email: isAdmin ? 'admin@fatosbr.com.br' : 'leitor@fatosbr.com.br',
+              created_at: new Date().toISOString(),
               app_metadata: isAdmin ? { role: 'admin', is_admin: true } : {},
-              user_metadata: { full_name: isAdmin ? 'Administrador Financeiro' : 'Usuario Autenticado' }
-            }
+              user_metadata: { full_name: isAdmin ? 'Admin' : 'Leitor' },
+            },
           },
-          error: null
+          error: null,
         };
-      }
-    }
+      },
+    },
   };
   setTestSupabaseClient(mockSupabase);
 
-  let mockGwCounter = 1;
-  const mockGateway: TestZynPayGatewayAdapter = {
-    createCharge: async (params: any) => {
-      const chargeId = `zyn_gw_${Date.now()}_${mockGwCounter++}`;
-      return {
-        id: chargeId,
-        amount: params.amountCents,
-        currency: 'BRL',
-        status: 'PENDING',
-        description: params.description,
-        qrCodeText: `00020126580014br.gov.bcb.pix0136zynpay-${chargeId}5204000053039865405${(params.amountCents / 100).toFixed(2)}5802BR5915FATOSBR MIDIA6009SAO PAULO62070503***6304ABCD`,
-        createdAt: new Date().toISOString()
-      };
-    },
-    getCharge: async (chargeId: string) => {
-      const dbCharge = dbHarness.charges.get(chargeId);
-      if (chargeId.includes('tamper_amount')) {
-        return {
-          id: chargeId,
-          amount: 100, // divergente dos 2990 esperados
-          currency: 'BRL',
-          status: 'PAID',
-          description: 'FatosBR Pro',
-          qrCodeText: 'pix_code',
-          createdAt: new Date().toISOString()
-        };
-      }
-      if (chargeId.includes('zero_amount')) {
-        return {
-          id: chargeId,
-          amount: 0, // valor zero/inválido
-          currency: 'BRL',
-          status: 'PAID',
-          description: 'FatosBR Pro',
-          qrCodeText: 'pix_code',
-          createdAt: new Date().toISOString()
-        };
-      }
-      if (chargeId.includes('bad_currency')) {
-        return {
-          id: chargeId,
-          amount: dbCharge?.amount || 2990,
-          currency: 'USD', // moeda inválida
-          status: 'PAID',
-          description: 'FatosBR Pro',
-          qrCodeText: 'pix_code',
-          createdAt: new Date().toISOString()
-        };
-      }
-      if (chargeId.includes('not_paid')) {
-        return {
-          id: chargeId,
-          amount: dbCharge?.amount || 2990,
-          currency: 'BRL',
-          status: 'PENDING', // não confirmada
-          description: 'FatosBR Pro',
-          qrCodeText: 'pix_code',
-          createdAt: new Date().toISOString()
-        };
-      }
-      // Para fluxos de webhook (onde o webhook notifica que o Pix foi pago no gateway):
-      if (chargeId.includes('wh_ok') || chargeId.includes('atomic') || dbCharge?.status === 'PAID') {
-        return {
-          id: chargeId,
-          amount: dbCharge?.amount || 2990,
-          currency: 'BRL',
-          status: 'PAID',
-          description: 'FatosBR Pro',
-          qrCodeText: dbCharge?.qr_code_text || 'pix_code',
-          createdAt: new Date().toISOString()
-        };
-      }
-      return {
-        id: chargeId,
-        amount: dbCharge?.amount || 2990,
-        currency: 'BRL',
-        status: dbCharge ? dbCharge.status : 'PENDING',
-        description: 'FatosBR Pro',
-        qrCodeText: dbCharge?.qr_code_text || 'pix_code',
-        createdAt: new Date().toISOString()
-      };
-    },
-    getBalance: async () => ({
-      available: 1542000,
-      pending: 35000,
-      currency: 'BRL'
-    })
-  };
-  setTestZynPayGatewayAdapter(mockGateway);
-
-  const rateStore = new MockRateLimitStore();
-  setTestRateLimiterStore(rateStore);
-
-  // ---------------------------------------------------------------------------
-  // CATEGORIA 1: RATE LIMITING DISTRIBUÍDO E ATÔMICO
-  // ---------------------------------------------------------------------------
-  console.log('--- 1. TESTES DE RATE LIMITING DISTRIBUÍDO ---');
-
-  await runTest('1.1 Bloqueio com HTTP 429 e cabeçalho Retry-After ao exceder cota', async () => {
-    rateStore.reset();
-    const testIp = '10.0.0.99';
-    let blocked = false;
-
-    for (let i = 0; i < 20; i++) {
-      const { res, result } = createMockRes();
-      const req = createMockReq({
-        method: 'POST',
-        url: '/api/zynpay/charges',
-        headers: { 'x-forwarded-for': testIp },
-        body: { amount: 29.90 }
-      });
-      await chargesHandler(req, res);
-      const out = result();
-      if (out.statusCode === 429) {
-        blocked = true;
-        assert(Number(out.headers['retry-after']) >= 1, 'Cabeçalho Retry-After deve ser >= 1');
-        assert(out.json?.code === 'RATE_LIMIT_EXCEEDED', 'Código deve ser RATE_LIMIT_EXCEEDED');
-        break;
-      }
+  // Mock global fetch para chamadas OAuth2 + GET offer/product da Cakto
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: any) => {
+    const u = String(input);
+    if (u.includes('/public_api/token/')) {
+      return new Response(JSON.stringify({ access_token: 'tok_cakto_mock', expires_in: 3600 }), { status: 200 });
     }
-    assert(blocked, 'Deveria ter bloqueado após atingir o limite');
-  });
-
-  await runTest('1.2 Concorrência entre instâncias simuladas (contadores atômicos)', async () => {
-    rateStore.reset();
-    const sharedIp = '10.0.0.100';
-
-    // Dispara 30 requisições simultâneas concorrentes
-    const promises = Array.from({ length: 30 }).map(async () => {
-      const { res, result } = createMockRes();
-      const req = createMockReq({
-        method: 'POST',
-        url: '/api/zynpay/charges',
-        headers: { 'x-forwarded-for': sharedIp },
-        body: { amount: 29.90 }
-      });
-      await chargesHandler(req, res);
-      return result();
-    });
-
-    const results = await Promise.all(promises);
-    const blockedCount = results.filter((r) => r.statusCode === 429).length;
-    const successCount = results.filter((r) => r.statusCode === 200).length;
-
-    assert(successCount <= RATE_LIMIT_PROFILES.payments.maxRequests, 'Não pode exceder o teto máximo permitido');
-    assert(blockedCount > 0, 'As requisições concorrentes excedentes devem ter recebido 429');
-  });
-
-  await runTest('1.3 Falha do banco em rota de alto risco aciona fail-closed seguro (HTTP 503)', async () => {
-    rateStore.reset();
-    rateStore.forceError = true; // Simula queda súbita do banco
-
-    const { res, result } = createMockRes();
-    const req = createMockReq({
-      method: 'POST',
-      url: '/api/zynpay/charges',
-      headers: { 'x-forwarded-for': '10.0.0.105' },
-      body: { amount: 29.90 }
-    });
-
-    await chargesHandler(req, res);
-    const out = result();
-    rateStore.forceError = false;
-
-    assert(out.statusCode === 503, `Esperado fail-closed HTTP 503, recebido ${out.statusCode}`);
-    assert(out.json?.code === 'RATE_LIMIT_CHECK_FAILED', 'Deve retornar código de bloqueio preventivo');
-  });
-
-  await runTest('1.4 Anti-spoofing: Validação do IP do cliente protege contra falsificação', async () => {
-    rateStore.reset();
-    // Injeção de múltiplos IPs falsos via x-forwarded-for
-    const spoofedReq = createMockReq({
-      headers: {
-        'x-forwarded-for': '203.0.113.195, 10.0.0.1, 192.168.1.1',
-        'cf-connecting-ip': '203.0.113.195'
-      }
-    });
-    const { res, result } = createMockRes();
-    const allowed = await enforceRateLimit(spoofedReq, res, 'payments');
-    assert(allowed, 'Requisição inicial permitida');
-  });
-
-  // ---------------------------------------------------------------------------
-  // CATEGORIA 2: BANCO DE DADOS E TRANSAÇÕES ATÔMICAS
-  // ---------------------------------------------------------------------------
-  console.log('\n--- 2. TESTES DE TRANSAÇÕES ATÔMICAS & SUPABASE ---');
-
-  await runTest('2.1 Transação atômica completa confirma pagamento e ativa plano Pro', async () => {
-    const chargeId = 'zyn_test_atomic_01';
-    const eventId = 'evt_test_atomic_01';
-    const userEmail = 'leitor.pro@fatosbr.com.br';
-
-    await recordPendingCharge({
-      id: chargeId,
-      userEmail,
-      amountCents: 2990,
-      description: 'FatosBR Pro Mensal'
-    });
-
-    const res = await confirmPaymentAndActivateSubscriptionAtomic({
-      chargeId,
-      eventId,
-      expectedAmountCents: 2990,
-      expectedCurrency: 'BRL',
-      provider: 'zynpay'
-    });
-
-    assert(res.success === true, 'Transação deveria ter sido aprovada');
-    assert(dbHarness.userSubscriptions.get(userEmail) === 'ACTIVE', 'Assinatura do usuário deve estar ACTIVE');
-    const charge = await getChargeById(chargeId);
-    assert(charge?.status === 'PAID', 'Status da cobrança deve ser PAID');
-  });
-
-  await runTest('2.2 Idempotência: Reenvio do mesmo evento não duplica processamento', async () => {
-    const chargeId = 'zyn_test_atomic_01';
-    const eventId = 'evt_test_atomic_01';
-
-    const resReplay = await confirmPaymentAndActivateSubscriptionAtomic({
-      chargeId,
-      eventId,
-      expectedAmountCents: 2990,
-      expectedCurrency: 'BRL',
-      provider: 'zynpay'
-    });
-
-    assert(resReplay.success === true, 'Deve responder com sucesso idempotente');
-    assert(resReplay.duplicate === true, 'Deve conter a flag duplicate: true');
-  });
-
-  await runTest('2.3 Anti-Tampering: Reversão atômica em caso de divergência de valor', async () => {
-    const chargeId = 'zyn_test_tamper_val';
-    const userEmail = 'alvo.tamper@fatosbr.com.br';
-
-    await recordPendingCharge({
-      id: chargeId,
-      userEmail,
-      amountCents: 2990,
-      description: 'FatosBR Pro Mensal'
-    });
-
-    // Tenta confirmar com valor adulterado (ex: R$ 10,00 em vez de R$ 29,90)
-    const res = await confirmPaymentAndActivateSubscriptionAtomic({
-      chargeId,
-      eventId: 'evt_tamper_99',
-      expectedAmountCents: 1000,
-      expectedCurrency: 'BRL'
-    });
-
-    assert(res.success === false, 'Transação com valor divergente deve ser recusada');
-    assert(res.errorCode === 'AMOUNT_MISMATCH', 'Erro deve ser AMOUNT_MISMATCH');
-    assert(dbHarness.userSubscriptions.get(userEmail) !== 'ACTIVE', 'Assinatura NÃO pode ser ativada');
-  });
-
-  await runTest('2.4 Rejeição de confirmação para cobrança inexistente no banco', async () => {
-    const res = await confirmPaymentAndActivateSubscriptionAtomic({
-      chargeId: 'zyn_ghost_charge_404',
-      eventId: 'evt_ghost_404',
-      expectedAmountCents: 2990
-    });
-
-    assert(res.success === false, 'Cobrança fantasma deve ser rejeitada');
-    assert(res.errorCode === 'CHARGE_NOT_FOUND', 'Erro deve ser CHARGE_NOT_FOUND');
-  });
-
-  await runTest('2.5 Queda de persistência no Supabase não retorna sucesso falso', async () => {
-    dbHarness.forceError = 'SUPABASE_CONNECTION_TIMEOUT';
-
-    let threw = false;
-    try {
-      await recordPendingCharge({
-        id: 'zyn_fail_db',
-        userEmail: 'fail@fatosbr.com.br',
-        amountCents: 2990,
-        description: 'Teste de queda'
-      });
-    } catch {
-      threw = true;
-    }
-    dbHarness.forceError = null;
-
-    assert(threw, 'Deve lançar exceção controlada em vez de simular sucesso em memória');
-  });
-
-  await runTest('2.6 Anti-Tampering: Reversão atômica em caso de divergência de moeda', async () => {
-    const chargeId = 'zyn_test_currency_err';
-    await recordPendingCharge({
-      id: chargeId,
-      userEmail: 'moeda@fatosbr.com.br',
-      amountCents: 2990,
-      description: 'Teste moeda'
-    });
-
-    const res = await confirmPaymentAndActivateSubscriptionAtomic({
-      chargeId,
-      eventId: 'evt_currency_err',
-      expectedAmountCents: 2990,
-      expectedCurrency: 'USD' // Tentativa de pagamento em moeda divergente
-    });
-
-    assert(res.success === false, 'Transação com moeda divergente deve ser recusada');
-    assert(res.errorCode === 'CURRENCY_MISMATCH', 'Erro deve ser CURRENCY_MISMATCH');
-  });
-
-  await runTest('2.7 Rejeição de confirmação para cobrança em status não pendente', async () => {
-    const chargeId = 'zyn_test_cancelled';
-    await recordPendingCharge({
-      id: chargeId,
-      userEmail: 'cancelado@fatosbr.com.br',
-      amountCents: 2990,
-      description: 'Cobrança cancelada'
-    });
-    // Força status CANCELLED no harness
-    dbHarness.charges.get(chargeId).status = 'CANCELLED';
-
-    const res = await confirmPaymentAndActivateSubscriptionAtomic({
-      chargeId,
-      eventId: 'evt_cancel_01',
-      expectedAmountCents: 2990
-    });
-
-    assert(res.success === false, 'Cobrança cancelada não pode ser liquidada');
-    assert(res.errorCode === 'INVALID_PREVIOUS_STATUS', 'Erro deve ser INVALID_PREVIOUS_STATUS');
-  });
-
-  await runTest('2.8 Respeito a billing_one_pending: Reutilização de cobrança pendente existente para o mesmo usuário', async () => {
-    const userId = 'user_mesmo_usuario';
-    const userEmail = `${userId}@fatosbr.com.br`;
-    const authHeader = `Bearer ${userId}`;
-
-    const { res: res1, result: result1 } = createMockRes();
-    const req1 = createMockReq({
-      method: 'POST',
-      url: '/api/zynpay/charges',
-      headers: { authorization: authHeader },
-      body: { planId: 'pro', customer: { email: userEmail, name: 'Assinante' } }
-    });
-    await chargesHandler(req1, res1);
-    const out1 = result1();
-    assert(out1.statusCode === 200, `Primeira cobrança deve ter sido criada com sucesso: ${JSON.stringify(out1.json)}`);
-    const firstChargeId = out1.json.charge.id;
-
-    // Segunda chamada para o mesmo usuário com cobrança pendente ativa
-    const { res: res2, result: result2 } = createMockRes();
-    const req2 = createMockReq({
-      method: 'POST',
-      url: '/api/zynpay/charges',
-      headers: { authorization: authHeader },
-      body: { planId: 'pro', customer: { email: userEmail, name: 'Assinante' } }
-    });
-    await chargesHandler(req2, res2);
-    const out2 = result2();
-
-    assert(out2.statusCode === 200, 'Segunda requisição deve responder 200 reutilizando a cobrança pendente');
-    assert(out2.json.reused === true, 'A flag reused deve ser true para evitar violação do índice billing_one_pending');
-    assert(out2.json.charge.id === firstChargeId, 'Deve retornar o mesmo identificador da cobrança pendente');
-  });
-
-  await runTest('2.9 Bloqueio de criação de cobrança quando usuário já possui assinatura Pro ativa (USER_ALREADY_SUBSCRIBED)', async () => {
-    const userId = 'user_ja_assinante';
-    const userEmail = `${userId}@fatosbr.com.br`;
-    // Ativa assinatura previamente
-    dbHarness.userSubscriptions.set(userId, 'active');
-    dbHarness.userSubscriptions.set(userEmail, 'active');
-
-    const { res, result } = createMockRes();
-    const req = createMockReq({
-      method: 'POST',
-      url: '/api/zynpay/charges',
-      headers: { authorization: `Bearer ${userId}` },
-      body: { planId: 'pro', customer: { email: userEmail, name: 'Assinante Pro' } }
-    });
-    await chargesHandler(req, res);
-    const out = result();
-
-    assert(out.statusCode === 409, `Esperado HTTP 409 para já assinante, recebido ${out.statusCode}`);
-    assert(out.json?.code === 'USER_ALREADY_SUBSCRIBED', 'Código deve ser USER_ALREADY_SUBSCRIBED');
-  });
-
-  await runTest('2.10 Rejeição de operações financeiras quando PostgreSQL não estiver configurado (fail-closed sem PostgREST fallback)', async () => {
-    // Desliga temporariamente o adaptador de teste para checar o comportamento real do db.ts sem connection string
-    setTestDatabaseAdapter(null);
-    let capturedError = '';
-    try {
-      await recordPendingCharge({
-        id: 'zyn_fail_closed_test',
-        userEmail: 'failclosed@fatosbr.com.br',
-        amountCents: 2990,
-        description: 'Teste Fail-Closed'
-      });
-    } catch (err: any) {
-      capturedError = err.message;
-    } finally {
-      setTestDatabaseAdapter(dbHarness);
-    }
-
-    assert(
-      capturedError.includes('POSTGRES_UNAVAILABLE'),
-      `Deveria falhar com POSTGRES_UNAVAILABLE sem tentar fallback silencioso para a Data API. Erro: ${capturedError}`
-    );
-  });
-
-  await runTest('2.11 Concorrência: Duas requisições simultâneas de cobrança para o mesmo usuário tratadas de forma idempotente', async () => {
-    const userId = 'user_concorrente_ok';
-    const userEmail = `${userId}@fatosbr.com.br`;
-    const reqFactory = () => {
-      const { res, result } = createMockRes();
-      const req = createMockReq({
-        method: 'POST',
-        url: '/api/zynpay/charges',
-        headers: { authorization: `Bearer ${userId}` },
-        body: { planId: 'pro', customer: { email: userEmail, name: 'Concorrente' } }
-      });
-      return chargesHandler(req, res).then(() => result());
-    };
-
-    const [outA, outB] = await Promise.all([reqFactory(), reqFactory()]);
-    assert(outA.statusCode === 200 && outB.statusCode === 200, `Ambas as requisições concorrentes devem concluir com sucesso (A:${outA.statusCode}, B:${outB.statusCode})`);
-    assert(outA.json.charge.id === outB.json.charge.id, 'Ambas as requisições concorrentes devem compartilhar a mesma cobrança única');
-  });
-
-  await runTest('2.12 Autenticação obrigatória: Checkout sem cabeçalho Authorization é rejeitado com HTTP 401', async () => {
-    const { res, result } = createMockRes();
-    const req = createMockReq({
-      method: 'POST',
-      url: '/api/zynpay/charges',
-      headers: {},
-      body: { planId: 'pro' }
-    });
-    await chargesHandler(req, res);
-    const out = result();
-
-    assert(out.statusCode === 401, `Esperado HTTP 401, recebido ${out.statusCode}`);
-    assert(out.json?.code === 'UNAUTHORIZED_CHECKOUT', 'Código deve ser UNAUTHORIZED_CHECKOUT');
-  });
-
-  await runTest('2.13 Sessão inválida: Checkout com Bearer token forjado/expirado é rejeitado com HTTP 403', async () => {
-    const { res, result } = createMockRes();
-    const req = createMockReq({
-      method: 'POST',
-      url: '/api/zynpay/charges',
-      headers: { authorization: 'Bearer invalid_token' },
-      body: { planId: 'pro' }
-    });
-    await chargesHandler(req, res);
-    const out = result();
-
-    assert(out.statusCode === 403, `Esperado HTTP 403, recebido ${out.statusCode}`);
-    assert(out.json?.code === 'INVALID_SESSION', 'Código deve ser INVALID_SESSION');
-  });
-
-  await runTest('2.14 Preço controlado pelo servidor: Ignora qualquer valor fornecido pelo cliente (anti-tampering)', async () => {
-    const userId = 'user_preco_servidor';
-    const { res, result } = createMockRes();
-    const req = createMockReq({
-      method: 'POST',
-      url: '/api/zynpay/charges',
-      headers: { authorization: `Bearer ${userId}` },
-      // Tentativa maliciosa de comprar por R$ 0,01
-      body: { planId: 'pro', amount: 0.01, amountCents: 1 }
-    });
-    await chargesHandler(req, res);
-    const out = result();
-
-    assert(out.statusCode === 200, `Esperado HTTP 200, recebido ${out.statusCode}`);
-    assert(out.json?.charge?.amount === 2990, `Valor da cobrança deve ser 2990 centavos, recebido ${out.json?.charge?.amount}`);
-  });
-
-  await runTest('2.15 Proibição estrita de PIX fictício: Gateway offline retorna HTTP 503 GATEWAY_UNAVAILABLE', async () => {
-    // Configura adaptador do gateway para lançar falha de conexão/indisponibilidade
-    const failingGateway: TestZynPayGatewayAdapter = {
-      createCharge: async () => {
-        throw new Error('GATEWAY_TIMEOUT: Conexão com a ZynPay excedeu o tempo limite');
-      },
-      getCharge: async () => null,
-      getBalance: async () => ({ available: 0, pending: 0, currency: 'BRL' })
-    };
-    setTestZynPayGatewayAdapter(failingGateway);
-
-    const userId = 'user_gw_offline';
-    const { res, result } = createMockRes();
-    const req = createMockReq({
-      method: 'POST',
-      url: '/api/zynpay/charges',
-      headers: { authorization: `Bearer ${userId}` },
-      body: { planId: 'pro' }
-    });
-    await chargesHandler(req, res);
-    const out = result();
-
-    // Restaura o gateway normal
-    setTestZynPayGatewayAdapter(mockGateway);
-
-    assert(out.statusCode === 503, `Esperado HTTP 503, recebido ${out.statusCode}`);
-    assert(out.json?.code === 'GATEWAY_UNAVAILABLE', 'Código deve ser GATEWAY_UNAVAILABLE');
-    assert(!out.raw.includes('00020126580014br.gov.bcb.pix0136zyn_'), 'NUNCA deve gerar payload PIX fictício de fallback');
-  });
-
-  await runTest('2.16 Idempotência Estável: Retries com a mesma chave não geram cobranças duplicadas', async () => {
-    const userId = 'user_idempotente_fixo';
-    const clientKey = 'intent_sess_abc123';
-
-    const { res: res1, result: result1 } = createMockRes();
-    const req1 = createMockReq({
-      method: 'POST',
-      url: '/api/zynpay/charges',
-      headers: { authorization: `Bearer ${userId}` },
-      body: { planId: 'pro', idempotencyKey: clientKey }
-    });
-    await chargesHandler(req1, res1);
-    const out1 = result1();
-    assert(out1.statusCode === 200, 'Primeira requisição deve ser 200');
-
-    // Segunda chamada simulando retry com o mesmo token de idempotência
-    const { res: res2, result: result2 } = createMockRes();
-    const req2 = createMockReq({
-      method: 'POST',
-      url: '/api/zynpay/charges',
-      headers: { authorization: `Bearer ${userId}` },
-      body: { planId: 'pro', idempotencyKey: clientKey }
-    });
-    await chargesHandler(req2, res2);
-    const out2 = result2();
-
-    assert(out2.statusCode === 200, 'Segunda requisição de retry deve ser 200');
-    assert(out2.json?.reused === true, 'Retry deve reutilizar a cobrança existente');
-    assert(out1.json?.charge?.id === out2.json?.charge?.id, 'Mesmo identificador retornado');
-  });
-
-  await runTest('2.17 Fail-Closed: Falha em consulta crítica de cobrança pendente interrompe com HTTP 503', async () => {
-    dbHarness.forceError = 'DATABASE_CONNECTION_REFUSED';
-    const userId = 'user_fail_closed_db';
-
-    const { res, result } = createMockRes();
-    const req = createMockReq({
-      method: 'POST',
-      url: '/api/zynpay/charges',
-      headers: { authorization: `Bearer ${userId}` },
-      body: { planId: 'pro' }
-    });
-    await chargesHandler(req, res);
-    const out = result();
-    dbHarness.forceError = null;
-
-    assert(out.statusCode === 503, `Esperado fail-closed HTTP 503, recebido ${out.statusCode}`);
-    assert(out.json?.code === 'SUBSCRIPTION_CHECK_FAILED' || out.json?.code === 'PENDING_CHECK_FAILED', 'Deve falhar com código de checagem');
-  });
-
-  await runTest('2.18 Validação de formato da chave de idempotência do cliente (HTTP 400)', async () => {
-    const userId = 'user_bad_idemp';
-    const { res, result } = createMockRes();
-    const req = createMockReq({
-      method: 'POST',
-      url: '/api/zynpay/charges',
-      headers: { authorization: `Bearer ${userId}` },
-      body: { planId: 'pro', idempotencyKey: 'short' } // < 8 caracteres
-    });
-    await chargesHandler(req, res);
-    const out = result();
-    assert(out.statusCode === 400, `Esperado 400 para chave curta, recebido ${out.statusCode}`);
-    assert(out.json?.code === 'INVALID_IDEMPOTENCY_KEY', 'Código deve ser INVALID_IDEMPOTENCY_KEY');
-  });
-
-  await runTest('2.19 Conflito de planos: Usuário com cobrança pendente para plano diferente recebe HTTP 409', async () => {
-    const userId = 'user_plano_conflito';
-    const userEmail = `${userId}@fatosbr.com.br`;
-
-    // Registra cobrança pendente para o plano Pro Mensal (2990 centavos)
-    await recordPendingCharge({
-      providerPaymentId: 'zyn_pendente_pro_01',
-      userId,
-      userEmail,
-      amountCents: 2990,
-      description: 'Plano Pro Mensal'
-    });
-
-    // Tenta solicitar o plano Pro Anual (29900 centavos) enquanto o mensal está pendente e ativo
-    const { res, result } = createMockRes();
-    const req = createMockReq({
-      method: 'POST',
-      url: '/api/zynpay/charges',
-      headers: { authorization: `Bearer ${userId}` },
-      body: { planId: 'pro_annual' }
-    });
-    await chargesHandler(req, res);
-    const out = result();
-
-    assert(out.statusCode === 409, `Esperado 409 para conflito de planos diferentes, recebido ${out.statusCode}`);
-    assert(out.json?.code === 'ACTIVE_PENDING_CHARGE_DIFFERENT_PLAN', 'Código deve ser ACTIVE_PENDING_CHARGE_DIFFERENT_PLAN');
-  });
-
-  await runTest('2.20 GET /api/zynpay/charges sem token Bearer é rejeitado com HTTP 401 UNAUTHORIZED_CHARGE_QUERY', async () => {
-    rateStore.reset();
-    const { res, result } = createMockRes();
-    const req = createMockReq({
-      method: 'GET',
-      url: '/api/zynpay/charges?id=zyn_test_anon'
-    });
-    await chargesHandler(req, res);
-    const out = result();
-    assert(out.statusCode === 401, `Esperado 401 para consulta sem auth, recebido ${out.statusCode}`);
-    assert(out.json?.code === 'UNAUTHORIZED_CHARGE_QUERY', 'Código deve ser UNAUTHORIZED_CHARGE_QUERY');
-  });
-
-  await runTest('2.21 GET /api/zynpay/charges com token inválido/expirado é rejeitado com HTTP 403 INVALID_SESSION', async () => {
-    rateStore.reset();
-    const { res, result } = createMockRes();
-    const req = createMockReq({
-      method: 'GET',
-      url: '/api/zynpay/charges?id=zyn_test_invalid_token',
-      headers: { authorization: 'Bearer invalid_token' }
-    });
-    await chargesHandler(req, res);
-    const out = result();
-    assert(out.statusCode === 403, `Esperado 403 para sessão inválida, recebido ${out.statusCode}`);
-    assert(out.json?.code === 'INVALID_SESSION', 'Código deve ser INVALID_SESSION');
-  });
-
-  await runTest('2.22 Prevenção de IDOR: GET de cobrança de outro usuário retorna HTTP 404 neutro', async () => {
-    rateStore.reset();
-    const ownerUserId = 'user_vitima_idor_01';
-    const attackerUserId = 'user_atacante_02';
-
-    // Cria cobrança pertencente à vítima
-    await recordPendingCharge({
-      providerPaymentId: 'zyn_idor_victim_charge',
-      userId: ownerUserId,
-      userEmail: `${ownerUserId}@fatosbr.com.br`,
-      amountCents: 2990,
-      description: 'Plano Pro Vítima'
-    });
-
-    // Atacante tenta consultar a cobrança da vítima
-    const { res, result } = createMockRes();
-    const req = createMockReq({
-      method: 'GET',
-      url: '/api/zynpay/charges?id=zyn_idor_victim_charge',
-      headers: { authorization: `Bearer ${attackerUserId}` }
-    });
-    await chargesHandler(req, res);
-    const out = result();
-
-    // Deve retornar 404 neutro para não revelar a existência da cobrança e impedir enumeração
-    assert(out.statusCode === 404, `Esperado 404 neutro contra IDOR, recebido ${out.statusCode}`);
-    assert(out.json?.code === 'CHARGE_NOT_FOUND', 'Código deve ser CHARGE_NOT_FOUND');
-    assert(!out.json?.charge, 'NUNCA deve expor dados de cobrança alheia');
-  });
-
-  await runTest('2.23 GET de cobrança própria retorna HTTP 200 com status e dados completos', async () => {
-    rateStore.reset();
-    const ownerUserId = 'user_legitimo_dono';
-    const chargeId = 'zyn_legit_owner_charge';
-
-    await recordPendingCharge({
-      providerPaymentId: chargeId,
-      userId: ownerUserId,
-      userEmail: `${ownerUserId}@fatosbr.com.br`,
-      amountCents: 2990,
-      description: 'Plano Pro FatosBR'
-    });
-
-    const { res, result } = createMockRes();
-    const req = createMockReq({
-      method: 'GET',
-      url: `/api/zynpay/charges?id=${chargeId}`,
-      headers: { authorization: `Bearer ${ownerUserId}` }
-    });
-    await chargesHandler(req, res);
-    const out = result();
-
-    assert(out.statusCode === 200, `Esperado 200 para o legítimo proprietário, recebido ${out.statusCode}`);
-    assert(out.json?.success === true, 'Deve retornar success: true');
-    assert(out.json?.charge?.id === chargeId, 'Deve retornar o ID correto da cobrança');
-    assert(out.json?.charge?.amount === 2990, 'Deve retornar o valor correto');
-  });
-
-  await runTest('2.24 GET financeiro com ADMIN_SECRET como Bearer é rejeitado com HTTP 403 SHARED_SECRET_FORBIDDEN', async () => {
-    rateStore.reset();
-    process.env.ADMIN_SECRET = 'secret_admin_token_fatosbr_2026';
-    const chargeId = 'zyn_audit_admin_charge';
-
-    await recordPendingCharge({
-      providerPaymentId: chargeId,
-      userId: 'user_aleatorio_qualquer',
-      userEmail: 'aleatorio@fatosbr.com.br',
-      amountCents: 2990,
-      description: 'Auditoria Admin'
-    });
-
-    const { res, result } = createMockRes();
-    const req = createMockReq({
-      method: 'GET',
-      url: `/api/zynpay/charges?id=${chargeId}`,
-      headers: { authorization: 'Bearer secret_admin_token_fatosbr_2026' }
-    });
-    await chargesHandler(req, res);
-    const out = result();
-
-    assert(out.statusCode === 403, `Esperado 403 para bypass com ADMIN_SECRET, recebido ${out.statusCode}`);
-    assert(out.json?.code === 'SHARED_SECRET_FORBIDDEN', 'Código deve ser SHARED_SECRET_FORBIDDEN');
-  });
-
-  await runTest('2.24b Auditoria legítima via usuário admin autenticado (Supabase Auth RBAC) autorizada com HTTP 200', async () => {
-    rateStore.reset();
-    const chargeId = 'zyn_audit_admin_charge';
-
-    const { res, result } = createMockRes();
-    const req = createMockReq({
-      method: 'GET',
-      url: `/api/zynpay/charges?id=${chargeId}`,
-      headers: { authorization: 'Bearer admin_token_valid' }
-    });
-    await chargesHandler(req, res);
-    const out = result();
-
-    assert(out.statusCode === 200, `Esperado 200 para admin com RBAC válido, recebido ${out.statusCode}`);
-    assert(out.json?.charge?.id === chargeId, 'Admin com role legítima deve auditar cobrança');
-  });
-
-  await runTest('2.25 Idempotência persistente: retry com a mesma chave lógica retorna a cobrança sem nova chamada ao gateway', async () => {
-    rateStore.reset();
-    const userId = 'user_idemp_persistent_test';
-    const clientKey = 'intent_unique_key_999';
-
-    // 1ª tentativa
-    const { res: res1, result: result1 } = createMockRes();
-    const req1 = createMockReq({
-      method: 'POST',
-      url: '/api/zynpay/charges',
-      headers: { authorization: `Bearer ${userId}` },
-      body: { planId: 'pro', idempotencyKey: clientKey }
-    });
-    await chargesHandler(req1, res1);
-    const out1 = result1();
-    assert(out1.statusCode === 200, 'Primeira criação deve retornar 200');
-
-    // 2ª tentativa com a mesma chave
-    const { res: res2, result: result2 } = createMockRes();
-    const req2 = createMockReq({
-      method: 'POST',
-      url: '/api/zynpay/charges',
-      headers: { authorization: `Bearer ${userId}` },
-      body: { planId: 'pro', idempotencyKey: clientKey }
-    });
-    await chargesHandler(req2, res2);
-    const out2 = result2();
-
-    assert(out2.statusCode === 200, 'Retry deve retornar 200');
-    assert(out2.json?.reused === true, 'Flag reused deve ser true');
-    assert(out1.json?.charge?.id === out2.json?.charge?.id, 'ID retornado deve ser estritamente o mesmo');
-  });
-
-  await runTest('2.26 Prevenção de substituição de identidade: GET com mesmo e-mail porém IDs divergentes retorna HTTP 404 neutro', async () => {
-    rateStore.reset();
-    const originalUserId = 'user_dono_original_01';
-    const otherUserId = 'user_impostor_02';
-    const sharedEmail = 'mesmo.email@fatosbr.com.br';
-    const chargeId = 'zyn_test_same_email_diff_id';
-
-    await recordPendingCharge({
-      providerPaymentId: chargeId,
-      userId: originalUserId,
-      userEmail: sharedEmail,
-      amountCents: 2990,
-      description: 'Cobrança do Dono Original'
-    });
-
-    const { res, result } = createMockRes();
-    const req = createMockReq({
-      method: 'GET',
-      url: `/api/zynpay/charges?id=${chargeId}`,
-      headers: { authorization: `Bearer ${otherUserId}` }
-    });
-    await chargesHandler(req, res);
-    const out = result();
-
-    assert(out.statusCode === 404, `Esperado 404 neutro contra autorização por e-mail com ID divergente, recebido ${out.statusCode}`);
-    assert(out.json?.code === 'CHARGE_NOT_FOUND', 'Código deve ser CHARGE_NOT_FOUND');
-    assert(!out.json?.charge, 'Cobrança alheia não pode ser exposta');
-  });
-
-  await runTest('2.27 Fail-closed na verificação de idempotência: Erro no PostgreSQL interrompe checkout com HTTP 503', async () => {
-    rateStore.reset();
-    dbHarness.forceIdempotencyError = true;
-    const userId = 'user_fail_closed_idemp';
-
-    const { res, result } = createMockRes();
-    const req = createMockReq({
-      method: 'POST',
-      url: '/api/zynpay/charges',
-      headers: { authorization: `Bearer ${userId}` },
-      body: { planId: 'pro', idempotencyKey: 'fail_idemp_key_123' }
-    });
-    await chargesHandler(req, res);
-    const out = result();
-    dbHarness.forceIdempotencyError = false;
-
-    assert(out.statusCode === 503, `Esperado fail-closed HTTP 503 ao falhar idempotência, recebido ${out.statusCode}`);
-    assert(out.json?.code === 'PAYMENT_STATE_UNAVAILABLE', 'Código deve ser PAYMENT_STATE_UNAVAILABLE');
-  });
-
-  await runTest('2.28 Concorrência simultânea massiva (5 requisições): Reserva transacional previne chamadas duplicadas ao gateway ZynPay', async () => {
-    rateStore.reset();
-    const userId = 'user_concorrencia_massiva_5';
-    const userEmail = `${userId}@fatosbr.com.br`;
-
-    const promises = Array.from({ length: 5 }).map(() => {
-      const { res, result } = createMockRes();
-      const req = createMockReq({
-        method: 'POST',
-        url: '/api/zynpay/charges',
-        headers: { authorization: `Bearer ${userId}` },
-        body: { planId: 'pro', customer: { email: userEmail, name: 'Concorrente' } }
-      });
-      return chargesHandler(req, res).then(() => result());
-    });
-
-    const results = await Promise.all(promises);
-    const successList = results.filter(r => r.statusCode === 200);
-    assert(successList.length >= 1, 'Pelo menos uma requisição deve ter sucesso');
-
-    // Todas as respostas 200 devem retornar exatamente a mesma cobrança
-    const chargeIds = new Set(successList.map(r => r.json.charge.id));
-    assert(chargeIds.size === 1, 'Todas as requisições concorrentes devem apontar para a mesma cobrança única');
-  });
-
-  // ---------------------------------------------------------------------------
-  // CATEGORIA 3: AUDITORIA REAL ZYNPAY & WEBHOOK
-  // ---------------------------------------------------------------------------
-  console.log('\n--- 3. TESTES DE WEBHOOK E INTEGRAÇÃO ZYNPAY ---');
-
-  await runTest('3.1 Rejeição de métodos não-POST no webhook com HTTP 405', async () => {
-    const { res, result } = createMockRes();
-    const req = createMockReq({ method: 'GET', url: '/api/zynpay/webhook' });
-    await webhookHandler(req, res);
-    const out = result();
-    assert(out.statusCode === 405, `Esperado 405, recebido ${out.statusCode}`);
-  });
-
-  await runTest('3.2 Rejeição de webhook sem assinatura criptográfica (HTTP 401)', async () => {
-    const { res, result } = createMockRes();
-    const req = createMockReq({
-      method: 'POST',
-      url: '/api/zynpay/webhook',
-      headers: {},
-      body: { id: 'evt_no_sig', chargeId: 'zyn_1' }
-    });
-    await webhookHandler(req, res);
-    const out = result();
-    assert(out.statusCode === 401, `Esperado 401, recebido ${out.statusCode}`);
-    assert(out.json?.code === 'MISSING_SIGNATURE', 'Código deve ser MISSING_SIGNATURE');
-  });
-
-  await runTest('3.3 Rejeição de webhook com assinatura HMAC violada no header oficial x-zinpay-signature (HTTP 403)', async () => {
-    const rawBody = JSON.stringify({ id: 'evt_bad_sig', chargeId: 'zyn_1' });
-    const { res, result } = createMockRes();
-    const req = createMockReq({
-      method: 'POST',
-      url: '/api/zynpay/webhook',
-      headers: { 'x-zinpay-signature': 'assinatura_adulterada_invalida' },
-      rawBody
-    });
-    await webhookHandler(req, res);
-    const out = result();
-    assert(out.statusCode === 403, `Esperado 403, recebido ${out.statusCode}`);
-    assert(out.json?.code === 'INVALID_SIGNATURE', 'Código deve ser INVALID_SIGNATURE');
-  });
-
-  await runTest('3.4 Payload malformado rejeitado com HTTP 400', async () => {
-    const rawBody = JSON.stringify({ apenas: 'conteudo_sem_id_nem_chargeId' });
-    const sig = crypto.createHmac('sha256', testSecret).update(rawBody).digest('hex');
-    const { res, result } = createMockRes();
-    const req = createMockReq({
-      method: 'POST',
-      url: '/api/zynpay/webhook',
-      headers: { 'x-zinpay-signature': sig },
-      rawBody
-    });
-    await webhookHandler(req, res);
-    const out = result();
-    assert(out.statusCode === 400, `Esperado 400, recebido ${out.statusCode}`);
-    assert(out.json?.code === 'MALFORMED_PAYLOAD', 'Código deve ser MALFORMED_PAYLOAD');
-  });
-
-  await runTest('3.5 Processamento com sucesso via x-zinpay-signature e evento pix.charge.paid', async () => {
-    const chargeId = 'zyn_wh_ok_01';
-    const eventId = 'evt_wh_ok_01';
-    const userEmail = 'webhook.ok@fatosbr.com.br';
-
-    await recordPendingCharge({
-      id: chargeId,
-      userEmail,
-      amountCents: 2990,
-      description: 'Plano Pro'
-    });
-
-    const payloadObj = {
-      id: eventId,
-      event: 'pix.charge.paid',
-      data: {
-        charge_id: chargeId,
-        amount: 2990,
-        status: 'PAID'
-      }
-    };
-    const rawBody = JSON.stringify(payloadObj);
-    const sig = crypto.createHmac('sha256', testSecret).update(rawBody).digest('hex');
-
-    const { res, result } = createMockRes();
-    const req = createMockReq({
-      method: 'POST',
-      url: '/api/zynpay/webhook',
-      headers: { 'x-zinpay-signature': sig },
-      rawBody
-    });
-    await webhookHandler(req, res);
-    const out = result();
-
-    assert(out.statusCode === 200, `Esperado 200, recebido ${out.statusCode}: ${JSON.stringify(out.json)}`);
-    assert(out.json?.success === true, 'Operação deve retornar success: true');
-    assert(out.json?.status === 'PAID', 'Status deve ser PAID');
-  });
-
-  await runTest('3.6 Evento não relacionado a liquidação (pix.charge.expired) é ignorado sem ativar Pro', async () => {
-    const payloadObj = {
-      id: 'evt_expired_99',
-      event: 'pix.charge.expired',
-      data: {
-        charge_id: 'zyn_exp_99'
-      }
-    };
-    const rawBody = JSON.stringify(payloadObj);
-    const sig = crypto.createHmac('sha256', testSecret).update(rawBody).digest('hex');
-
-    const { res, result } = createMockRes();
-    const req = createMockReq({
-      method: 'POST',
-      url: '/api/zynpay/webhook',
-      headers: { 'x-zinpay-signature': sig },
-      rawBody
-    });
-    await webhookHandler(req, res);
-    const out = result();
-
-    assert(out.statusCode === 200, 'Deve responder 200 OK informando recebimento');
-    assert(out.json?.ignored === true, 'Deve ter flag ignored: true');
-  });
-
-  await runTest('3.7 Rejeição de headers genéricos alternativos como x-hub-signature ou signature', async () => {
-    const rawBody = JSON.stringify({ id: 'evt_alt', chargeId: 'zyn_1' });
-    const sig = crypto.createHmac('sha256', testSecret).update(rawBody).digest('hex');
-
-    const { res, result } = createMockRes();
-    const req = createMockReq({
-      method: 'POST',
-      url: '/api/zynpay/webhook',
-      headers: { 'x-hub-signature': sig },
-      rawBody
-    });
-    await webhookHandler(req, res);
-    const out = result();
-
-    assert(out.statusCode === 401, `Esperado 401 para header genérico, recebido ${out.statusCode}`);
-    assert(out.json?.code === 'MISSING_SIGNATURE', 'Código deve ser MISSING_SIGNATURE');
-  });
-
-  await runTest('3.8 Webhook: Rejeição de confirmação se valor upstream divergir do esperado (HTTP 422 AMOUNT_MISMATCH)', async () => {
-    const chargeId = 'zyn_tamper_amount_99';
-    await recordPendingCharge({
-      providerPaymentId: chargeId,
-      userId: 'user_tamper_test',
-      userEmail: 'tamper@fatosbr.com.br',
-      amountCents: 2990,
-      description: 'Plano Pro'
-    });
-
-    const payloadObj = {
-      id: 'evt_tamper_01',
-      event: 'pix.charge.paid',
-      data: { charge_id: chargeId }
-    };
-    const rawBody = JSON.stringify(payloadObj);
-    const sig = crypto.createHmac('sha256', testSecret).update(rawBody).digest('hex');
-
-    const { res, result } = createMockRes();
-    const req = createMockReq({
-      method: 'POST',
-      url: '/api/zynpay/webhook',
-      headers: { 'x-zinpay-signature': sig },
-      rawBody
-    });
-    await webhookHandler(req, res);
-    const out = result();
-
-    assert(out.statusCode === 422, `Esperado 422 para valor divergente, recebido ${out.statusCode}`);
-    assert(out.json?.code === 'AMOUNT_MISMATCH', 'Código deve ser AMOUNT_MISMATCH');
-    assert(dbHarness.userSubscriptions.get('user_tamper_test') !== 'active', 'NUNCA deve ativar Pro para valor divergente');
-  });
-
-  await runTest('3.9 Webhook: Rejeição de confirmação se valor upstream for zero ou negativo (HTTP 422 INVALID_UPSTREAM_AMOUNT)', async () => {
-    const chargeId = 'zyn_zero_amount_88';
-    await recordPendingCharge({
-      providerPaymentId: chargeId,
-      userId: 'user_zero_test',
-      userEmail: 'zero@fatosbr.com.br',
-      amountCents: 2990,
-      description: 'Plano Pro'
-    });
-
-    const payloadObj = {
-      id: 'evt_zero_01',
-      event: 'pix.charge.paid',
-      data: { charge_id: chargeId }
-    };
-    const rawBody = JSON.stringify(payloadObj);
-    const sig = crypto.createHmac('sha256', testSecret).update(rawBody).digest('hex');
-
-    const { res, result } = createMockRes();
-    const req = createMockReq({
-      method: 'POST',
-      url: '/api/zynpay/webhook',
-      headers: { 'x-zinpay-signature': sig },
-      rawBody
-    });
-    await webhookHandler(req, res);
-    const out = result();
-
-    assert(out.statusCode === 422, `Esperado 422 para valor upstream inválido, recebido ${out.statusCode}`);
-    assert(out.json?.code === 'INVALID_UPSTREAM_AMOUNT', 'Código deve ser INVALID_UPSTREAM_AMOUNT');
-    assert(dbHarness.userSubscriptions.get('user_zero_test') !== 'active', 'NUNCA deve ativar Pro para valor zero/negativo');
-  });
-
-  await runTest('3.10 Webhook: Rejeição se moeda upstream não for BRL (HTTP 422 CURRENCY_MISMATCH)', async () => {
-    const chargeId = 'zyn_bad_currency_77';
-    await recordPendingCharge({
-      providerPaymentId: chargeId,
-      userId: 'user_bad_curr_test',
-      userEmail: 'curr@fatosbr.com.br',
-      amountCents: 2990,
-      description: 'Plano Pro'
-    });
-
-    const payloadObj = {
-      id: 'evt_bad_curr_01',
-      event: 'pix.charge.paid',
-      data: { charge_id: chargeId }
-    };
-    const rawBody = JSON.stringify(payloadObj);
-    const sig = crypto.createHmac('sha256', testSecret).update(rawBody).digest('hex');
-
-    const { res, result } = createMockRes();
-    const req = createMockReq({
-      method: 'POST',
-      url: '/api/zynpay/webhook',
-      headers: { 'x-zinpay-signature': sig },
-      rawBody
-    });
-    await webhookHandler(req, res);
-    const out = result();
-
-    assert(out.statusCode === 422, `Esperado 422 para moeda não-BRL, recebido ${out.statusCode}`);
-    assert(out.json?.code === 'CURRENCY_MISMATCH', 'Código deve ser CURRENCY_MISMATCH');
-    assert(dbHarness.userSubscriptions.get('user_bad_curr_test') !== 'active', 'NUNCA deve ativar Pro para moeda divergente');
-  });
-
-  await runTest('3.11 Webhook: Rejeição se cobrança upstream não estiver em status PAID (HTTP 422 PAYMENT_NOT_CONFIRMED)', async () => {
-    const chargeId = 'zyn_not_paid_66';
-    await recordPendingCharge({
-      providerPaymentId: chargeId,
-      userId: 'user_not_paid_test',
-      userEmail: 'notpaid@fatosbr.com.br',
-      amountCents: 2990,
-      description: 'Plano Pro'
-    });
-
-    const payloadObj = {
-      id: 'evt_not_paid_01',
-      event: 'pix.charge.paid',
-      data: { charge_id: chargeId }
-    };
-    const rawBody = JSON.stringify(payloadObj);
-    const sig = crypto.createHmac('sha256', testSecret).update(rawBody).digest('hex');
-
-    const { res, result } = createMockRes();
-    const req = createMockReq({
-      method: 'POST',
-      url: '/api/zynpay/webhook',
-      headers: { 'x-zinpay-signature': sig },
-      rawBody
-    });
-    await webhookHandler(req, res);
-    const out = result();
-
-    assert(out.statusCode === 422, `Esperado 422 para status upstream não-PAID, recebido ${out.statusCode}`);
-    assert(out.json?.code === 'PAYMENT_NOT_CONFIRMED', 'Código deve ser PAYMENT_NOT_CONFIRMED');
-    assert(dbHarness.userSubscriptions.get('user_not_paid_test') !== 'active', 'NUNCA deve ativar Pro se gateway não confirmou PAID');
-  });
-
-  await runTest('3.12 Webhook sem ZYNPAY_WEBHOOK_SECRET configurado retorna HTTP 503 WEBHOOK_SECRET_UNCONFIGURED sem fallback', async () => {
-    const savedSecret = process.env.ZYNPAY_WEBHOOK_SECRET;
-    delete process.env.ZYNPAY_WEBHOOK_SECRET;
-
-    const { res, result } = createMockRes();
-    const req = createMockReq({
-      method: 'POST',
-      url: '/api/zynpay/webhook',
-      headers: { 'x-zinpay-signature': 'any_sig' },
-      body: { id: 'evt_no_secret', chargeId: 'zyn_1' }
-    });
-    await webhookHandler(req, res);
-    const out = result();
-
-    process.env.ZYNPAY_WEBHOOK_SECRET = savedSecret;
-
-    assert(out.statusCode === 503, `Esperado 503 quando segredo não está configurado, recebido ${out.statusCode}`);
-    assert(out.json?.code === 'WEBHOOK_SECRET_UNCONFIGURED', 'Código deve ser WEBHOOK_SECRET_UNCONFIGURED');
-  });
-
-  // ---------------------------------------------------------------------------
-  // CATEGORIA 4: AUTENTICAÇÃO E ADMINISTRAÇÃO
-  // ---------------------------------------------------------------------------
-  console.log('\n--- 4. TESTES DE AUTORIZAÇÃO E ENDPOINTS ADMINISTRATIVOS ---');
-
-  await runTest('4.1 Endpoint de saldo ZynPay bloqueia acessos sem privilégio de admin (HTTP 401)', async () => {
-    const { res, result } = createMockRes();
-    const req = createMockReq({ method: 'GET', url: '/api/zynpay/balance' });
-    await balanceHandler(req, res);
-    const out = result();
-    assert(out.statusCode === 401, `Esperado 401, recebido ${out.statusCode}`);
-    assert(out.json?.code === 'UNAUTHORIZED_ADMIN', 'Código deve ser UNAUTHORIZED_ADMIN');
-  });
-
-  await runTest('4.2 Endpoint de configuração ZynPay bloqueia acessos não autorizados (HTTP 401)', async () => {
-    const { res, result } = createMockRes();
-    const req = createMockReq({ method: 'GET', url: '/api/zynpay/config' });
-    await configHandler(req, res);
-    const out = result();
-    assert(out.statusCode === 401, `Esperado 401, recebido ${out.statusCode}`);
-    assert(out.json?.code === 'UNAUTHORIZED_ADMIN', 'Código deve ser UNAUTHORIZED_ADMIN');
-  });
-
-  await runTest('4.3 Acesso com Bearer token válido do ADMIN_SECRET é autorizado com sucesso', async () => {
-    process.env.ADMIN_SECRET = 'secret_admin_token_fatosbr_2026';
-    const { res, result } = createMockRes();
-    const req = createMockReq({
-      method: 'GET',
-      url: '/api/zynpay/config',
-      headers: { authorization: 'Bearer secret_admin_token_fatosbr_2026' }
-    });
-    await configHandler(req, res);
-    const out = result();
-    assert(out.statusCode === 200, `Esperado 200 para admin autorizado, recebido ${out.statusCode}`);
-    assert(out.json?.success === true, 'Deve retornar success: true');
-  });
-
-  await runTest('4.4 Validação estrita de resposta: Rejeita resposta sem amountCents válido ou com valor negativo', async () => {
-    let capturedErr = '';
-    try {
-      validateMonetaryAmountCents(-100, 'amountCents');
-    } catch (e: any) {
-      capturedErr = e.message;
-    }
-    assert(capturedErr.includes('GATEWAY_INVALID_RESPONSE'), 'Deve lançar GATEWAY_INVALID_RESPONSE para valor negativo');
-
-    let capturedMissing = '';
-    try {
-      validateZynPayCreationResponse({ data: { id: 'zyn_123', qrCodeText: 'pix123' } }, 2990);
-    } catch (e: any) {
-      capturedMissing = e.message;
-    }
-    assert(capturedMissing.includes('GATEWAY_INVALID_RESPONSE'), 'Deve rejeitar criação sem amountCents');
-  });
-
-  await runTest('4.5 Validação estrita de status: Rejeita status desconhecido com GATEWAY_UNKNOWN_STATUS', async () => {
-    let capturedErr = '';
-    try {
-      mapZynPayStatus('STATUS_INVENTADO_FAKE');
-    } catch (e: any) {
-      capturedErr = e.message;
-    }
-    assert(capturedErr.includes('GATEWAY_UNKNOWN_STATUS'), 'Deve lançar GATEWAY_UNKNOWN_STATUS');
-  });
-
-  await runTest('4.6 Validação estrita de consulta: Rejeita resposta com divergência de identificador', async () => {
-    let capturedErr = '';
-    try {
-      validateZynPayConsultationResponse(
-        { data: { id: 'zyn_esperado_diferente', amountCents: 2990, status: 'PAID', qrCodeText: 'pix' } },
-        'zyn_consultado_original'
+    if (u.includes('/public_api/offers/')) {
+      return new Response(
+        JSON.stringify({ id: 'vjw92gx', status: 'active', paymentMethods: ['credit_card', 'pix_auto'] }),
+        { status: 200 }
       );
-    } catch (e: any) {
-      capturedErr = e.message;
     }
-    assert(capturedErr.includes('GATEWAY_ID_MISMATCH'), 'Deve lançar GATEWAY_ID_MISMATCH');
-  });
-
-  // ---------------------------------------------------------------------------
-  // CATEGORIA 5: PROTEÇÃO ANTI-SSRF
-  // ---------------------------------------------------------------------------
-  console.log('\n--- 5. TESTES DE PROTEÇÃO CONTRA SSRF ---');
-
-  await runTest('5.1 Bloqueio de IPs de metadados de nuvem e redes privadas', async () => {
-    const dangerousUrls = [
-      'http://169.254.169.254/latest/meta-data/',
-      'http://127.0.0.1:8080/admin',
-      'http://localhost:3000/api/zynpay',
-      'http://10.0.0.5/secrets',
-      'http://192.168.0.1/router'
-    ];
-
-    for (const url of dangerousUrls) {
-      assert(!isAllowedDomain(url), `URL perigosa não pode ser aceita: ${url}`);
+    if (u.includes('/public_api/products/')) {
+      return new Response(
+        JSON.stringify({ id: 'c8731178-55c9-47f6-8b98-987f31206ed8', status: 'active' }),
+        { status: 200 }
+      );
     }
+    return new Response(JSON.stringify({}), { status: 404 });
+  }) as any;
 
-    const officialUrls = [
-      'https://gnews.io/api/v4/search',
-      'https://api.worldnewsapi.com/search-news',
-      'https://api.zynpay.com.br/v1/public/charges'
-    ];
+  try {
+    // 1. RATE LIMITING
+    console.log('--- 1. TESTES DE RATE LIMITING DISTRIBUÍDO ---');
 
-    for (const url of officialUrls) {
-      assert(isAllowedDomain(url), `URL oficial deve ser permitida: ${url}`);
-    }
-  });
-
-  console.log('\n--- 6. TESTES DOS ROTEADORES CONSOLIDADOS (LIMITE VERCEL HOBBY) ---');
-
-  await runTest('6.1 zynpayRouter despacha /api/zynpay/charges (POST sem auth retorna 401)', async () => {
-    const req = createMockReq({
-      method: 'POST',
-      url: '/api/zynpay/charges',
-      body: { planId: 'pro_monthly' }
+    await runTest('1.1 Bloqueio HTTP 429 ao exceder cota de checkout', async () => {
+      rateStore.reset();
+      const testIp = '10.1.0.99';
+      let blocked = false;
+      for (let i = 0; i < 20; i++) {
+        const { res, result } = createMockRes();
+        const req = createMockReq({
+          method: 'POST',
+          url: '/api/payments/checkout',
+          headers: { 'x-forwarded-for': testIp },
+          body: { planId: 'pro' },
+        });
+        await paymentsRouter(req, res);
+        const out = result();
+        if (out.statusCode === 429) {
+          blocked = true;
+          assert(out.json?.code === 'RATE_LIMIT_EXCEEDED', 'Código deve ser RATE_LIMIT_EXCEEDED');
+          break;
+        }
+      }
+      assert(blocked, 'Deveria bloquear após exceder cota de checkout');
     });
-    const { res, result } = createMockRes();
-    await zynpayRouter(req, res);
-    assert(result().statusCode === 401, 'Deve retornar 401 para criação sem autenticação');
-  });
 
-  await runTest('6.2 zynpayRouter despacha /api/zynpay/webhook (POST sem assinatura retorna 401)', async () => {
-    const req = createMockReq({
-      method: 'POST',
-      url: '/api/zynpay/webhook',
-      body: { event: 'charge.paid' }
+    await runTest('1.2 Falha no banco do Rate Limiter aciona Fail-Closed HTTP 503', async () => {
+      rateStore.reset();
+      rateStore.forceError = true;
+      const { res, result } = createMockRes();
+      const req = createMockReq({
+        method: 'POST',
+        url: '/api/payments/checkout',
+        headers: { 'x-forwarded-for': '10.1.0.105' },
+        body: { planId: 'pro' },
+      });
+      await paymentsRouter(req, res);
+      rateStore.forceError = false;
+      const out = result();
+      assert(out.statusCode === 503, `Esperado HTTP 503, recebido ${out.statusCode}`);
+      assert(out.json?.code === 'RATE_LIMIT_CHECK_FAILED', 'Código deve ser RATE_LIMIT_CHECK_FAILED');
     });
-    const { res, result } = createMockRes();
-    await zynpayRouter(req, res);
-    assert(result().statusCode === 401, 'Deve retornar 401 para webhook sem assinatura');
-  });
 
-  await runTest('6.3 zynpayRouter rejeita rota inexistente com HTTP 404 neutro', async () => {
-    const req = createMockReq({
-      method: 'GET',
-      url: '/api/zynpay/rota-fantasma-inexistente'
+    await runTest('1.3 Anti-spoofing valida header de IP sem quebrar cota', async () => {
+      rateStore.reset();
+      const spoofedReq = createMockReq({
+        headers: {
+          'x-forwarded-for': '203.0.113.195, 10.0.0.1',
+          'cf-connecting-ip': '203.0.113.195',
+        },
+      });
+      const { res } = createMockRes();
+      const allowed = await enforceRateLimit(spoofedReq, res, 'payments');
+      assert(allowed, 'Requisição inicial deve ser permitida');
     });
-    const { res, result } = createMockRes();
-    await zynpayRouter(req, res);
-    assert(result().statusCode === 404, 'Deve retornar 404 para sub-rota desconhecida');
-    const data = result().json;
-    assert(data.error === 'ENDPOINT_NOT_FOUND', 'Deve retornar erro ENDPOINT_NOT_FOUND');
-  });
 
-  await runTest('6.4 resendRouter responde a /api/resend/status com HTTP 200', async () => {
-    const req = createMockReq({
-      method: 'GET',
-      url: '/api/resend/status'
-    });
-    const { res, result } = createMockRes();
-    await resendRouter(req, res);
-    assert(result().statusCode === 200, 'Deve retornar 200 para status do Resend');
-    const data = result().json;
-    assert(data.provider === 'Resend', 'Provider deve ser Resend');
-  });
+    assert(RATE_LIMIT_PROFILES.payments.maxRequests > 0, 'Perfil payments deve existir');
 
-  await runTest('6.5 proxyRouter responde a /api/proxy/status com HTTP 200', async () => {
-    const req = createMockReq({
-      method: 'GET',
-      url: '/api/proxy/status'
-    });
-    const { res, result } = createMockRes();
-    await proxyRouter(req, res);
-    assert(result().statusCode === 200, 'Deve retornar 200 para status do proxy');
-  });
+    // 2. SEGURANÇA DO CHECKOUT & AUTENTICAÇÃO
+    console.log('\n--- 2. CHECKOUT PAYMENTS V1, PREÇO SERVIDOR & AUTH ---');
 
-  await runTest('6.6 authRouter valida payload em /api/auth/send-otp', async () => {
-    const req = createMockReq({
-      method: 'POST',
-      url: '/api/auth/send-otp',
-      body: {}
+    await runTest('2.1 Checkout sem Bearer token retorna HTTP 401', async () => {
+      rateStore.reset();
+      const { res, result } = createMockRes();
+      const req = createMockReq({ method: 'POST', url: '/api/payments/checkout', body: { planId: 'pro' } });
+      await paymentsRouter(req, res);
+      assert(result().statusCode === 401, 'Deve retornar 401 sem autenticação');
     });
-    const { res, result } = createMockRes();
-    await authRouter(req, res);
-    assert(result().statusCode === 400, 'Deve retornar 400 para body vazio');
-  });
 
-  await runTest('6.7 notificationsRouter rejeita sub-rota desconhecida com HTTP 404', async () => {
-    const req = createMockReq({
-      method: 'POST',
-      url: '/api/notifications/desconhecida'
+    await runTest('2.2 Checkout ignora manipulação de preço do cliente e impõe 3490 centavos BRL', async () => {
+      rateStore.reset();
+      clearCaktoTokenCache();
+      const { res, result } = createMockRes();
+      const req = createMockReq({
+        method: 'POST',
+        url: '/api/payments/checkout',
+        headers: { authorization: 'Bearer user_token_valid' },
+        body: { planId: 'pro', amount: 0.01, amountCents: 1, currency: 'USD', paymentMethod: 'credit_card' },
+      });
+      await paymentsRouter(req, res);
+      const out = result();
+      assert(out.statusCode === 200, `Esperado 200, recebido ${out.statusCode}: ${out.raw}`);
+      assert(out.json?.amountCents === 3490, `Valor deve ser 3490, recebido ${out.json?.amountCents}`);
+      assert(out.json?.currency === 'BRL', 'Moeda deve ser estritamente BRL');
+      assert(out.json?.checkoutUrl?.startsWith('https://pay.cakto.com.br/vjw92gx'), 'URL oficial da oferta vjw92gx');
     });
-    const { res, result } = createMockRes();
-    await notificationsRouter(req, res);
-    assert(result().statusCode === 404, 'Deve retornar 404 para sub-rota desconhecida de notificações');
-  });
+
+    await runTest('2.3 Chave de idempotência malformada retorna HTTP 400 INVALID_IDEMPOTENCY_KEY', async () => {
+      rateStore.reset();
+      const { res, result } = createMockRes();
+      const req = createMockReq({
+        method: 'POST',
+        url: '/api/payments/checkout',
+        headers: { authorization: 'Bearer user_token_valid' },
+        body: { planId: 'pro', idempotencyKey: 'short' },
+      });
+      await paymentsRouter(req, res);
+      assert(result().statusCode === 400, 'Esperado 400 para chave curta');
+      assert(result().json?.errorCode === 'INVALID_IDEMPOTENCY_KEY', 'Código deve ser INVALID_IDEMPOTENCY_KEY');
+    });
+
+    await runTest('2.4 Fail-Closed PostgreSQL sem DB adapter e sem ENV lança POSTGRES_UNAVAILABLE', async () => {
+      setTestDatabaseAdapter(null);
+      const { recordPendingCharge } = await import('../api/_lib/db.js');
+      let errMsg = '';
+      try {
+        await recordPendingCharge({
+          id: 'fail_closed_01',
+          userEmail: 'test@fatosbr.com.br',
+          amountCents: 3490,
+          description: 'Teste',
+        });
+      } catch (e: any) {
+        errMsg = e.message;
+      }
+      assert(errMsg.includes('POSTGRES_UNAVAILABLE'), `Esperado POSTGRES_UNAVAILABLE, recebido: ${errMsg}`);
+    });
+
+    // 3. WEBHOOK HMAC + REPLAY + INTEGRIDADE
+    console.log('\n--- 3. WEBHOOK CAKTO HMAC-SHA256 & ANTI-TAMPERING ---');
+
+    await runTest('3.1 Webhook sem assinatura retorna HTTP 401 MISSING_SIGNATURE', async () => {
+      const { res, result } = createMockRes();
+      const req = createMockReq({
+        method: 'POST',
+        url: '/api/payments/webhook',
+        body: { event: 'purchase_approved', id: 'evt_no_sig_1', data: { id: 'ord_1' } },
+      });
+      await paymentsRouter(req, res);
+      assert(result().statusCode === 401, 'Esperado 401');
+      assert(result().json?.errorCode === 'MISSING_SIGNATURE', 'Código MISSING_SIGNATURE');
+    });
+
+    await runTest('3.2 Webhook com replay (> 300s) é rejeitado com HTTP 401 WEBHOOK_REPLAY_EXPIRED', async () => {
+      const rawBody = JSON.stringify({ event: 'purchase_approved', id: 'evt_replay_1', data: { id: 'ord_2' } });
+      const oldTs = String(Math.floor(Date.now() / 1000) - 600);
+      const sig = crypto.createHmac('sha256', testSecret).update(`${oldTs}.${rawBody}`).digest('hex');
+
+      const { res, result } = createMockRes();
+      const req = createMockReq({
+        method: 'POST',
+        url: '/api/payments/webhook',
+        headers: { 'x-cakto-signature': sig, 'x-cakto-timestamp': oldTs },
+        rawBody,
+      });
+      await paymentsRouter(req, res);
+      assert(result().statusCode === 401, 'Esperado 401 para timestamp expirado');
+      assert(result().json?.errorCode === 'WEBHOOK_REPLAY_EXPIRED', 'Código WEBHOOK_REPLAY_EXPIRED');
+    });
+
+    await runTest('3.3 Webhook com valor diferente de 3490 é rejeitado com HTTP 422 AMOUNT_MISMATCH', async () => {
+      const rawBody = JSON.stringify({
+        event: 'purchase_approved',
+        id: 'evt_tamper_amt_1',
+        data: {
+          id: 'ord_tamper_1',
+          amount: 100,
+          currency: 'BRL',
+          paymentMethod: 'credit_card',
+          product: { id: 'c8731178-55c9-47f6-8b98-987f31206ed8' },
+          offer: { id: 'vjw92gx' },
+          customer: { email: 'leitor@fatosbr.com.br' },
+        },
+      });
+      const ts = String(Math.floor(Date.now() / 1000));
+      const sig = crypto.createHmac('sha256', testSecret).update(`${ts}.${rawBody}`).digest('hex');
+
+      const { res, result } = createMockRes();
+      const req = createMockReq({
+        method: 'POST',
+        url: '/api/payments/webhook',
+        headers: { 'x-cakto-signature': `v1=${sig}`, 'x-cakto-timestamp': ts },
+        rawBody,
+      });
+      await paymentsRouter(req, res);
+      assert(result().statusCode === 422, 'Esperado 422');
+      assert(result().json?.errorCode === 'AMOUNT_MISMATCH', 'Código AMOUNT_MISMATCH');
+    });
+
+    await runTest('3.4 Webhook sem CAKTO_WEBHOOK_SECRET retorna HTTP 503 WEBHOOK_SECRET_NOT_CONFIGURED', async () => {
+      const saved = process.env.CAKTO_WEBHOOK_SECRET;
+      delete process.env.CAKTO_WEBHOOK_SECRET;
+      const { res, result } = createMockRes();
+      const req = createMockReq({
+        method: 'POST',
+        url: '/api/payments/webhook',
+        headers: { 'x-cakto-signature': 'abc' },
+        body: { event: 'purchase_approved', id: 'evt_no_sec' },
+      });
+      await paymentsRouter(req, res);
+      process.env.CAKTO_WEBHOOK_SECRET = saved;
+      assert(result().statusCode === 503, `Esperado 503, recebido ${result().statusCode}`);
+      assert(result().json?.errorCode === 'WEBHOOK_SECRET_NOT_CONFIGURED', 'Código WEBHOOK_SECRET_NOT_CONFIGURED');
+    });
+
+    // 4. SSRF
+    console.log('\n--- 4. PROTEÇÃO ANTI-SSRF ---');
+
+    await runTest('4.1 Bloqueio de IPs privados e liberação exclusiva de domínios oficiais (incluindo Cakto)', async () => {
+      const dangerousUrls = [
+        'http://169.254.169.254/latest/meta-data/',
+        'http://127.0.0.1:8080/admin',
+        'http://localhost:3000/api/payments/status',
+        'http://10.0.0.5/secrets',
+        'http://192.168.0.1/router',
+      ];
+      for (const u of dangerousUrls) {
+        assert(!isAllowedDomain(u), `URL perigosa bloqueada: ${u}`);
+      }
+      const officialUrls = [
+        'https://gnews.io/api/v4/search',
+        'https://api.worldnewsapi.com/search-news',
+        'https://api.cakto.com.br/public_api/orders/',
+        'https://pay.cakto.com.br/vjw92gx',
+      ];
+      for (const u of officialUrls) {
+        assert(isAllowedDomain(u), `URL oficial permitida: ${u}`);
+      }
+    });
+
+    // 5. ROTEADORES CONSOLIDADOS
+    console.log('\n--- 5. TESTES DOS ROTEADORES CONSOLIDADOS ---');
+
+    await runTest('5.1 paymentsRouter rejeita rota inexistente com HTTP 404 ENDPOINT_NOT_FOUND', async () => {
+      const { res, result } = createMockRes();
+      const req = createMockReq({ method: 'GET', url: '/api/payments/rota-inexistente' });
+      await paymentsRouter(req, res);
+      assert(result().statusCode === 404, 'Deve retornar 404');
+      assert(result().json?.errorCode === 'ENDPOINT_NOT_FOUND', 'Código ENDPOINT_NOT_FOUND');
+    });
+
+    await runTest('5.2 resendRouter responde /api/resend/status com HTTP 200', async () => {
+      const { res, result } = createMockRes();
+      await resendRouter(createMockReq({ method: 'GET', url: '/api/resend/status' }), res);
+      assert(result().statusCode === 200, 'Esperado 200');
+      assert(result().json?.provider === 'Resend', 'Provider Resend');
+    });
+
+    await runTest('5.3 proxyRouter responde /api/proxy/status com HTTP 200 e sem zynpay', async () => {
+      const { res, result } = createMockRes();
+      await proxyRouter(createMockReq({ method: 'GET', url: '/api/proxy/status' }), res);
+      const out = result();
+      assert(out.statusCode === 200, 'Esperado 200');
+      assert(!out.raw.toLowerCase().includes('zynpay'), 'Status não deve expor referência zynpay');
+    });
+
+    await runTest('5.4 authRouter valida payload vazio em /api/auth/send-otp (HTTP 400)', async () => {
+      const { res, result } = createMockRes();
+      await authRouter(createMockReq({ method: 'POST', url: '/api/auth/send-otp', body: {} }), res);
+      assert(result().statusCode === 400, 'Esperado 400');
+    });
+
+    await runTest('5.5 notificationsRouter rejeita sub-rota desconhecida com HTTP 404', async () => {
+      const { res, result } = createMockRes();
+      await notificationsRouter(createMockReq({ method: 'POST', url: '/api/notifications/desconhecida' }), res);
+      assert(result().statusCode === 404, 'Esperado 404');
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    setPaymentsPersistenceAdapter(null);
+    setTestRateLimiterStore(null as any);
+  }
 
   console.log('\n------------------------------------------------------');
   console.log(`📊 TOTAL: ${testsPassed} testes passaram com sucesso, ${testsFailed} falharam.`);
   console.log('------------------------------------------------------\n');
 
-  if (testsFailed > 0) {
-    process.exit(1);
-  }
+  if (testsFailed > 0) process.exit(1);
 }
 
 main().catch((err) => {

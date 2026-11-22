@@ -556,7 +556,7 @@ export const PaywallState: React.FC<{
           }
         : undefined
     }
-    hintCode="Assinatura via PIX Instantâneo • Cancele quando quiser"
+    hintCode="FatosBR PRO · R$ 34,90/mês (Cartão de Crédito ou Pix Automático)"
   />
 );
 

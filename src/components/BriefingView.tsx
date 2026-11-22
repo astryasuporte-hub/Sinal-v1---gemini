@@ -856,7 +856,9 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
                 </div>
               ) : selectedBriefing.rawEvents && selectedBriefing.rawEvents.length > 0 ? (
                 <div className="divide-y divide-zinc-800/70">
-                  {selectedBriefing.rawEvents.map((ev) => (
+                  {selectedBriefing.rawEvents.map((ev) => {
+                    const sectionMeta = selectedBriefing.itemSections?.[ev.id];
+                    return (
                     <div
                       key={ev.id}
                       onClick={() => {
@@ -866,6 +868,14 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
                       className="py-4 first:pt-2 hover:bg-zinc-900/50 px-3 -mx-3 rounded-xl transition cursor-pointer group"
                     >
                       <div className="flex items-center gap-2 text-[11px] text-zinc-400 font-mono mb-1.5 flex-wrap">
+                        {sectionMeta?.label && (
+                          <>
+                            <span className="uppercase tracking-wider text-white font-semibold">
+                              {sectionMeta.label}
+                            </span>
+                            <span>·</span>
+                          </>
+                        )}
                         <span className="uppercase tracking-wider text-zinc-300">{ev.category}</span>
                         {ev.sources && ev.sources.length > 0 && (
                           <>
@@ -887,7 +897,8 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
                         {ev.summary}
                       </p>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               ) : (
                 <div className="rounded-xl border border-zinc-800/80 bg-zinc-900/30 p-5 text-center text-xs text-zinc-400">

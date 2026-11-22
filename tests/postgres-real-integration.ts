@@ -193,16 +193,16 @@ async function runRealPostgresIntegrationSuite() {
     await executeTest('INT-06: Rollback atômico em caso de divergência de moeda/valor', async (c) => {
       await c.query('BEGIN');
       try {
-        const testPaymentId = 'test_zyn_rollback_' + Date.now();
+        const testPaymentId = 'test_cakto_rollback_' + Date.now();
         await c.query(`
           INSERT INTO internal.billing_payments (provider, provider_payment_id, amount, currency, status, checkout_data)
-          VALUES ('zynpay', $1, 2990, 'BRL', 'PENDING', '{"user_email":"test@fatosbr.com.br"}'::jsonb)
+          VALUES ('cakto', $1, 3490, 'BRL', 'PENDING', '{"user_email":"test@fatosbr.com.br"}'::jsonb)
         `, [testPaymentId]);
 
         // Executa RPC com moeda divergente USD
         const rpcRes = await c.query(`
           SELECT public.confirm_payment_and_activate_subscription_atomic(
-            $1, 'evt_int_err', 2990, 'USD', 'zynpay', '{}'::jsonb
+            $1, 'evt_int_err', 3490, 'USD', 'cakto', '{}'::jsonb
           ) as outcome
         `, [testPaymentId]);
 

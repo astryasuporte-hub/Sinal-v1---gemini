@@ -11,7 +11,7 @@ import {
   YAxis,
   Tooltip,
   ResponsiveContainer,
-  Cell
+  Cell,
 } from 'recharts';
 import {
   CreditCard,
@@ -21,7 +21,7 @@ import {
   Sparkles,
   Info,
   CheckCircle2,
-  ExternalLink
+  ExternalLink,
 } from 'lucide-react';
 import { UserSubscription } from '../types/sinal';
 
@@ -43,102 +43,42 @@ interface MonthlyExpense {
 export const FinancialDashboard: React.FC<FinancialDashboardProps> = ({
   subscription,
   isAdmin = false,
-  userEmail = 'astryasuporte@gmail.com',
-  onOpenBilling
+  userEmail = '',
+  onOpenBilling,
 }) => {
   const [selectedMonth, setSelectedMonth] = useState<string | null>(null);
 
-  // Regras de negócio estritas:
-  // 1. Se for admin (astryasuporte@gmail.com ou isAdmin=true) -> Não conta assinatura, valor R$ 0,00 (Isento Cortesia)
-  // 2. Se a pessoa tiver assinatura em trial -> Não cobra no mês, exibe "- Trial" e R$ 0,00
-  // 3. Usuário pagante padrão -> R$ 119,00 / mês (Sinal Executive)
   const isSuperAdmin =
-    isAdmin || userEmail.toLowerCase() === 'astryasuporte@gmail.com';
+    isAdmin || Boolean(subscription.isAdminExempt) || userEmail.toLowerCase() === 'astryasuporte@gmail.com';
 
   const isTrial =
     !isSuperAdmin &&
-    (subscription.planName === 'TRIAL_7D' ||
-      subscription.planName === 'TRIAL' ||
-      subscription.status === 'TRIAL_ACTIVE' ||
+    (subscription.status === 'TRIAL_ACTIVE' ||
+      subscription.planId === 'trial' ||
       subscription.trialDaysLeft > 0);
 
-  const baseAmount = subscription.amount || 119.0;
+  const baseAmount = 34.9;
   const baseLabel = `R$ ${baseAmount.toFixed(2).replace('.', ',')}`;
+  const isPaidActive = !isSuperAdmin && !isTrial && subscription.status === 'ACTIVE';
 
-  // Histórico dos últimos 6 meses com base nas regras de negócio
   const monthlyData: MonthlyExpense[] = [
     {
-      month: 'Nov/25',
-      amount: isSuperAdmin || isTrial ? 0 : baseAmount,
-      label: isSuperAdmin ? 'Isento' : isTrial ? '- Trial' : baseLabel,
-      status: isSuperAdmin ? 'exempt' : isTrial ? 'trial' : 'paid',
+      month: 'Ciclo 1',
+      amount: isSuperAdmin || isTrial || !isPaidActive ? 0 : baseAmount,
+      label: isSuperAdmin ? 'Isento' : isTrial ? '- Trial 7D' : isPaidActive ? baseLabel : 'R$ 0,00',
+      status: isSuperAdmin ? 'exempt' : isTrial ? 'trial' : isPaidActive ? 'paid' : 'projected',
       annotation: isSuperAdmin
-        ? 'Super Admin (Sem cobrança)'
+        ? 'Super Admin (Isento)'
         : isTrial
-        ? 'Período Teste Gratuito'
-        : 'Mensalidade Sinal Executive'
+        ? 'Período Teste Gratuito (7 dias)'
+        : isPaidActive
+        ? 'FatosBR PRO (R$ 34,90/mês)'
+        : 'Sem cobrança ativa',
     },
-    {
-      month: 'Dez/25',
-      amount: isSuperAdmin || isTrial ? 0 : baseAmount,
-      label: isSuperAdmin ? 'Isento' : isTrial ? '- Trial' : baseLabel,
-      status: isSuperAdmin ? 'exempt' : isTrial ? 'trial' : 'paid',
-      annotation: isSuperAdmin
-        ? 'Super Admin (Sem cobrança)'
-        : isTrial
-        ? 'Período Teste Gratuito'
-        : 'Mensalidade Sinal Executive'
-    },
-    {
-      month: 'Jan/26',
-      amount: isSuperAdmin || isTrial ? 0 : baseAmount,
-      label: isSuperAdmin ? 'Isento' : isTrial ? '- Trial' : baseLabel,
-      status: isSuperAdmin ? 'exempt' : isTrial ? 'trial' : 'paid',
-      annotation: isSuperAdmin
-        ? 'Super Admin (Sem cobrança)'
-        : isTrial
-        ? 'Período Teste Gratuito'
-        : 'Mensalidade Sinal Executive'
-    },
-    {
-      month: 'Fev/26',
-      amount: isSuperAdmin || isTrial ? 0 : baseAmount,
-      label: isSuperAdmin ? 'Isento' : isTrial ? '- Trial' : baseLabel,
-      status: isSuperAdmin ? 'exempt' : isTrial ? 'trial' : 'paid',
-      annotation: isSuperAdmin
-        ? 'Super Admin (Sem cobrança)'
-        : isTrial
-        ? 'Período Teste Gratuito'
-        : 'Mensalidade Sinal Executive'
-    },
-    {
-      month: 'Mar/26',
-      amount: isSuperAdmin || isTrial ? 0 : baseAmount,
-      label: isSuperAdmin ? 'Isento' : isTrial ? '- Trial' : baseLabel,
-      status: isSuperAdmin ? 'exempt' : isTrial ? 'trial' : 'paid',
-      annotation: isSuperAdmin
-        ? 'Super Admin (Sem cobrança)'
-        : isTrial
-        ? 'Período Teste Gratuito'
-        : 'Mensalidade Sinal Executive'
-    },
-    {
-      month: 'Abr/26 (Atual)',
-      amount: isSuperAdmin || isTrial ? 0 : baseAmount,
-      label: isSuperAdmin ? 'Isento' : isTrial ? '- Trial' : baseLabel,
-      status: isSuperAdmin ? 'exempt' : isTrial ? 'trial' : 'paid',
-      annotation: isSuperAdmin
-        ? 'Super Admin (Sem cobrança)'
-        : isTrial
-        ? 'Período Teste Gratuito'
-        : 'Mensalidade Sinal Executive'
-    }
   ];
 
-  // Cálculo total de gastos acumulados
   const totalSpent = monthlyData.reduce((acc, curr) => acc + curr.amount, 0);
 
-  // Custom tooltip para o Recharts
   const CustomTooltip = ({ active, payload }: any) => {
     if (active && payload && payload.length) {
       const data = payload[0].payload as MonthlyExpense;
@@ -146,20 +86,8 @@ export const FinancialDashboard: React.FC<FinancialDashboardProps> = ({
         <div className="p-2.5 rounded-xl bg-[#0b0e14] border border-[#232d42] shadow-xl text-xs font-mono space-y-1">
           <div className="font-bold text-white flex items-center justify-between gap-3">
             <span>{data.month}</span>
-            <span
-              className={`px-1.5 py-0.5 rounded text-[10px] ${
-                data.status === 'exempt'
-                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-                  : data.status === 'trial'
-                  ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                  : 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
-              }`}
-            >
-              {data.status === 'exempt'
-                ? 'Admin'
-                : data.status === 'trial'
-                ? '- 7D'
-                : 'Faturado'}
+            <span className="px-1.5 py-0.5 rounded text-[10px] bg-zinc-800 text-zinc-200 border border-zinc-700">
+              {data.status === 'exempt' ? 'Admin' : data.status === 'trial' ? '- 7D' : data.status === 'paid' ? 'Faturado' : 'Inativo'}
             </span>
           </div>
           <div className="text-zinc-300 text-sm font-extrabold">{data.label}</div>
@@ -172,21 +100,20 @@ export const FinancialDashboard: React.FC<FinancialDashboardProps> = ({
 
   return (
     <div className="p-4 sm:p-5 rounded-2xl border border-[#1e2026] bg-[#111216] space-y-4">
-      {/* Cabeçalho do Dashboard */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-zinc-800/80">
         <div className="flex items-center gap-2.5">
-          <div className="p-2 rounded-xl bg-purple-500/10 border border-purple-500/20 text-purple-400">
+          <div className="p-2 rounded-xl bg-zinc-900 border border-zinc-800 text-white">
             <TrendingUp className="w-4 h-4" />
           </div>
           <div>
             <h3 className="text-sm font-bold text-white flex items-center gap-2">
-              <span>Dashboard Financeiro</span>
+              <span>Resumo da Assinatura</span>
               <span className="text-[10px] px-2 py-0.5 rounded font-mono font-bold bg-zinc-800 text-zinc-300 border border-zinc-700">
-                PIX Instantâneo
+                Cakto · Cartão / Pix Automático
               </span>
             </h3>
             <p className="text-[11px] text-zinc-400">
-              Histórico de gastos mensais e status da sua assinatura FatosBR.
+              Situação cadastral da sua assinatura FatosBR PRO.
             </p>
           </div>
         </div>
@@ -202,9 +129,7 @@ export const FinancialDashboard: React.FC<FinancialDashboardProps> = ({
         )}
       </div>
 
-      {/* Grid de Métricas Financeiras */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-        {/* Card 1: Assinatura Atual */}
         <div className="p-3.5 rounded-xl bg-[#16181f] border border-zinc-800/80 space-y-1.5">
           <div className="flex items-center justify-between text-zinc-400 text-[10px] font-mono uppercase">
             <span>Assinatura Atual</span>
@@ -222,7 +147,7 @@ export const FinancialDashboard: React.FC<FinancialDashboardProps> = ({
               </span>
             ) : (
               <span className="text-base sm:text-lg font-bold text-white font-mono">
-                Plano Pro
+                FatosBR PRO
               </span>
             )}
           </div>
@@ -230,16 +155,17 @@ export const FinancialDashboard: React.FC<FinancialDashboardProps> = ({
             {isSuperAdmin
               ? 'Conta administrativa isenta de cobrança'
               : isTrial
-              ? 'Período gratuito de 7 dias ativo'
-              : 'Cobrança mensal de R$ 29,90'}
+              ? `Período gratuito de 7 dias (${subscription.trialDaysLeft}d restantes)`
+              : isPaidActive
+              ? 'Cobrança mensal de R$ 34,90'
+              : 'Assinatura inativa / aguardando contratação'}
           </div>
         </div>
 
-        {/* Card 2: Valor Mensal Faturável */}
         <div className="p-3.5 rounded-xl bg-[#16181f] border border-zinc-800/80 space-y-1.5">
           <div className="flex items-center justify-between text-zinc-400 text-[10px] font-mono uppercase">
             <span>Mensalidade Efetiva</span>
-            <CreditCard className="w-3 h-3 text-purple-400" />
+            <CreditCard className="w-3 h-3 text-zinc-300" />
           </div>
           <div className="flex items-baseline gap-2 font-mono">
             {isSuperAdmin ? (
@@ -248,11 +174,11 @@ export const FinancialDashboard: React.FC<FinancialDashboardProps> = ({
               </span>
             ) : isTrial ? (
               <span className="text-base sm:text-lg font-bold text-emerald-400">
-                - 7D <span className="text-xs font-normal text-zinc-500">(Sem os 29,90)</span>
+                - 7D <span className="text-xs font-normal text-zinc-500">(Trial gratuito)</span>
               </span>
             ) : (
               <span className="text-base sm:text-lg font-bold text-white">
-                R$ 29,90 <span className="text-xs font-normal text-zinc-400">/ mês</span>
+                R$ 34,90 <span className="text-xs font-normal text-zinc-400">/ mês</span>
               </span>
             )}
           </div>
@@ -260,15 +186,14 @@ export const FinancialDashboard: React.FC<FinancialDashboardProps> = ({
             {isSuperAdmin
               ? 'Admin não entra no faturamento'
               : isTrial
-              ? 'Não conta os 29,90 do mês durante o teste'
-              : 'Renovação automática via PIX'}
+              ? 'Sem cobrança automática durante os 7 dias'
+              : 'Cartão de Crédito ou Pix Automático (Cakto)'}
           </div>
         </div>
 
-        {/* Card 3: Total Acumulado */}
         <div className="p-3.5 rounded-xl bg-[#16181f] border border-zinc-800/80 space-y-1.5">
           <div className="flex items-center justify-between text-zinc-400 text-[10px] font-mono uppercase">
-            <span>Gasto Acumulado (6 Meses)</span>
+            <span>Ciclo Vigente</span>
             <Calendar className="w-3 h-3 text-blue-400" />
           </div>
           <div className="text-base sm:text-lg font-bold text-white font-mono">
@@ -276,32 +201,25 @@ export const FinancialDashboard: React.FC<FinancialDashboardProps> = ({
           </div>
           <div className="text-[11px] text-zinc-400 flex items-center gap-1.5">
             <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-            <span>FatosBR Pay (PIX) sincronizado</span>
+            <span>Sincronizado com Payments V1</span>
           </div>
         </div>
       </div>
 
-      {/* Gráfico de Barras com Recharts */}
       <div className="p-3.5 sm:p-4 rounded-xl bg-[#0c0e14] border border-[#1a202c] space-y-2.5">
         <div className="flex items-center justify-between">
           <div className="text-xs font-bold text-white flex items-center gap-2">
-            <span>Evolução Mensal de Custos</span>
-            <span className="text-[10px] text-zinc-500 font-mono font-normal">
-              (Novembro/25 - Abril/26)
-            </span>
+            <span>Visão Financeira do Ciclo</span>
           </div>
-          <div className="flex items-center gap-3 text-[10px] font-mono">
-            <div className="flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-sm bg-emerald-400"></span>
-              <span className="text-zinc-400">
-                {isSuperAdmin ? 'Admin (Isento)' : isTrial ? 'Teste - 7D' : 'Pago R$ 29,90'}
-              </span>
-            </div>
+          <div className="flex items-center gap-1.5 text-[10px] font-mono">
+            <span className="w-2.5 h-2.5 rounded-sm bg-emerald-400"></span>
+            <span className="text-zinc-400">
+              {isSuperAdmin ? 'Admin (Isento)' : isTrial ? 'Teste - 7D' : isPaidActive ? 'FatosBR PRO R$ 34,90' : 'Sem cobrança'}
+            </span>
           </div>
         </div>
 
-        {/* Contêiner Responsivo do Gráfico */}
-        <div className="w-full h-48 sm:h-56 pt-2">
+        <div className="w-full h-36 pt-2">
           <ResponsiveContainer width="100%" height="100%">
             <BarChart
               data={monthlyData}
@@ -312,61 +230,43 @@ export const FinancialDashboard: React.FC<FinancialDashboardProps> = ({
                 }
               }}
             >
-              <XAxis
-                dataKey="month"
-                stroke="#52525b"
-                fontSize={10}
-                tickLine={false}
-                axisLine={{ stroke: '#27272a' }}
-              />
+              <XAxis dataKey="month" stroke="#52525b" fontSize={10} tickLine={false} axisLine={{ stroke: '#27272a' }} />
               <YAxis
                 stroke="#52525b"
                 fontSize={10}
                 tickLine={false}
                 axisLine={{ stroke: '#27272a' }}
-                domain={[0, 35]}
-                ticks={[0, 10, 20, 30]}
+                domain={[0, 40]}
+                ticks={[0, 15, 35]}
                 tickFormatter={(value) => `R$ ${value}`}
               />
               <Tooltip content={<CustomTooltip />} />
-              <Bar
-                dataKey="amount"
-                radius={[6, 6, 0, 0]}
-                maxBarSize={44}
-              >
+              <Bar dataKey="amount" radius={[6, 6, 0, 0]} maxBarSize={56}>
                 {monthlyData.map((entry, index) => {
-                  let fillColor = '#10b981'; // emerald-500
-                  if (entry.status === 'exempt') fillColor = '#f59e0b'; // amber-500
-                  if (entry.status === 'trial') fillColor = '#10b981'; // emerald-500
-                  if (selectedMonth === entry.month) fillColor = '#60a5fa'; // highlight
-                  return (
-                    <Cell
-                      key={`cell-${index}`}
-                      fill={fillColor}
-                      opacity={entry.amount === 0 ? 0.35 : 0.9}
-                    />
-                  );
+                  let fillColor = '#10b981';
+                  if (entry.status === 'exempt') fillColor = '#f59e0b';
+                  if (selectedMonth === entry.month) fillColor = '#60a5fa';
+                  return <Cell key={`cell-${index}`} fill={fillColor} opacity={entry.amount === 0 ? 0.35 : 0.9} />;
                 })}
               </Bar>
             </BarChart>
           </ResponsiveContainer>
         </div>
 
-        {/* Nota explicativa de regra de negócio */}
         <div className="p-2.5 rounded-lg bg-[#141824] border border-[#1e2538] text-[11px] text-zinc-400 flex items-start gap-2">
           <Info className="w-3.5 h-3.5 text-blue-400 shrink-0 mt-0.5" />
           <div className="leading-relaxed">
             {isSuperAdmin ? (
               <span>
-                <strong className="text-zinc-200">Regra de Isenção:</strong> A conta de Super Administrador não é tarifada e não computa cobranças mensais. O valor faturável é mantido como isento.
+                <strong className="text-zinc-200">Regra de Isenção:</strong> Contas administrativas são isentas de cobrança.
               </span>
             ) : isTrial ? (
               <span>
-                <strong className="text-zinc-200">Regra de Período de Teste:</strong> Enquanto sua assinatura de 7 dias estiver ativa, o valor de R$ 29,90 não é cobrado nem contabilizado no faturamento mensal, exibindo <strong className="text-emerald-400">- 7D</strong>.
+                <strong className="text-zinc-200">Período de Teste (7 dias):</strong> Durante a degustação gratuita sem cartão, não há cobrança de R$ 34,90.
               </span>
             ) : (
               <span>
-                <strong className="text-zinc-200">Cobrança Pro Ativa:</strong> Assinatura mensal de R$ 29,90 faturada pontualmente via PIX dinâmico com compensação instantânea.
+                <strong className="text-zinc-200">FatosBR PRO:</strong> Assinatura mensal de R$ 34,90 via Cartão de Crédito ou Pix Automático na Cakto.
               </span>
             )}
           </div>

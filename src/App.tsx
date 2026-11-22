@@ -37,6 +37,7 @@ import { eventService } from './services/eventService';
 import { newsIngestionService } from './services/newsIngestionService';
 import { notificationService } from './services/notificationService';
 import { briefingService } from './services/briefingService';
+import { paymentsService } from './services/paymentsService';
 import { isSupabaseConfigured } from './lib/supabase';
 import { User as SupabaseUser } from '@supabase/supabase-js';
 import {
@@ -845,6 +846,12 @@ export default function App() {
               isSaved: savedIds.includes(e.id),
             }))
           );
+        }
+      });
+
+      paymentsService.getStatus().then((payStatus) => {
+        if (payStatus.success && payStatus.subscription) {
+          setSubscription(payStatus.subscription);
         }
       });
     } else {
@@ -2298,6 +2305,7 @@ export default function App() {
                     <PaywallState
                       onUpgrade={() => {
                         setActiveStateSimulation(null);
+                        setIsBillingModalOpen(true);
                       }}
                       onBack={() => setActiveStateSimulation(null)}
                     />
@@ -2975,6 +2983,22 @@ export default function App() {
         )}
       </AnimatePresence>
 
+      <BillingModal
+        isOpen={isBillingModalOpen}
+        onClose={() => setIsBillingModalOpen(false)}
+        subscription={subscription}
+        onUpgradeApproved={(updatedSub) => {
+          if (updatedSub) {
+            setSubscription(updatedSub);
+          } else {
+            void paymentsService.getStatus().then((res) => {
+              if (res.success && res.subscription) {
+                setSubscription(res.subscription);
+              }
+            });
+          }
+        }}
+      />
     </div>
   );
 }

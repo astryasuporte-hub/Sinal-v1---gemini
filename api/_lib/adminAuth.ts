@@ -127,7 +127,7 @@ export async function verifySupabaseAdminSession(req: any): Promise<VerifiedAdmi
 }
 
 /**
- * Compatível com rotas internas/cron existentes (ZynPay/Ingest) + internal.user_roles.
+ * Compatível com rotas internas/cron existentes (Payments/Ingest) + internal.user_roles.
  */
 export async function verifyAdminRequest(req: any): Promise<boolean> {
   const authHeader = String(req?.headers?.authorization || '');

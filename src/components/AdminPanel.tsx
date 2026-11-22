@@ -72,10 +72,9 @@ import { AdminCompanyManager } from './AdminCompanyManager';
 import { AdminBriefingCustomizer } from './AdminBriefingCustomizer';
 import { AdminMobileView } from './AdminMobileView';
 import { AdminFinancialDashboard } from './AdminFinancialDashboard';
-import { AdminFinancialZynPayPanel } from './AdminFinancialZynPayPanel';
 import { ResendWebhookLiveMonitor } from './ResendWebhookLiveMonitor';
 import { notificationService } from '../services/notificationService';
-import { zynpayService } from '../services/zynpayService';
+import { paymentsService } from '../services/paymentsService';
 import { whatsappService } from '../services/whatsappService';
 
 export type StatusColor = 'connected' | 'error' | 'disconnected';
@@ -97,7 +96,7 @@ interface VaultSecret {
   category: 'ai' | 'news' | 'billing' | 'email' | 'system';
   maskedValue: string;
   rawKey?: string;
-  providerPingKey?: 'gnews' | 'newsapi' | 'worldnews' | 'nvidia' | 'resend' | 'zynpay';
+  providerPingKey?: 'gnews' | 'newsapi' | 'worldnews' | 'nvidia' | 'resend' | 'cakto';
   status: StatusColor;
   source: 'Vault (Supabase)' | 'Env Var (.env)' | 'NÃO CONFIGURADO';
   latencyMs?: number;
@@ -166,17 +165,17 @@ const INITIAL_SECRETS: VaultSecret[] = [
     latencyMs: 1148
   },
   {
-    id: 'zynpay-api-key',
-    name: 'ZynPay Pix Gateway API Key',
-    keyLabel: 'ZYNPAY_API_KEY',
-    description: 'Gateway oficial Pix: Cobranças instantâneas, QR Code, Copia e Cola, Webhooks e Saldo',
+    id: 'cakto-client-secret',
+    name: 'Cakto Assinaturas Client Secret',
+    keyLabel: 'CAKTO_CLIENT_SECRET',
+    description: 'Provedor oficial de assinaturas recorrentes (Cartão de Crédito e Pix Automático) e webhooks HMAC-SHA256',
     category: 'billing',
-    maskedValue: 'zpk_live_••••••••••••8qm8',
-    rawKey: 'zynpay-protected-on-server',
-    providerPingKey: 'zynpay',
+    maskedValue: 'ck_live_••••••••••••auth',
+    rawKey: 'cakto-protected-on-server',
+    providerPingKey: 'cakto',
     status: 'connected',
     source: 'Env Var (.env)',
-    latencyMs: 142
+    latencyMs: 140
   },
   {
     id: 'whatsapp-meta-token',
@@ -305,7 +304,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       ms: '--',
       statusText: isSupabaseConfigured ? 'Conectado' : 'Não conectado'
     },
-    { id: 'billing-gw', name: 'FatosBR Pay Gateway (PIX)', category: 'billing', status: 'disconnected', ms: '--', statusText: 'Aguardando Credencial' },
+    { id: 'billing-gw', name: 'Cakto Assinaturas (Cartão & Pix Automático)', category: 'billing', status: 'disconnected', ms: '--', statusText: 'Bloqueio Comercial Ativo' },
     { id: 'resend', name: 'Resend (E-mails & Briefings)', category: 'email', status: 'connected', ms: '1.1 s', statusText: 'Conectado' },
     { id: 'whatsapp-meta', name: 'WhatsApp Business Cloud API (Meta)', category: 'messaging', status: 'connected', ms: '145 ms', statusText: 'Conectado / Meta v21.0' }
   ]);
@@ -738,10 +737,10 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
       return;
     }
 
-    if (secret.providerPingKey === 'zynpay') {
-      const zynRes = await zynpayService.getBalance();
+    if (secret.providerPingKey === 'cakto') {
+      const payRes = await paymentsService.getStatus();
       setTestingId(null);
-      const isConnected = zynRes.success;
+      const isConnected = payRes.success;
       setSecrets((prev) =>
         prev.map((s) =>
           s.id === secret.id
@@ -753,10 +752,10 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
         id: secret.id,
         success: isConnected,
         msg: isConnected
-          ? `Conexão ativa com ZynPay API. Status da conta: ${zynRes.balance?.accountStatus || 'Ativa'}`
-          : 'Falha na conexão com ZynPay.'
+          ? `Provedor Cakto configurado via /api/payments/status (Plano PRO ${payRes.plan?.amountFormatted || 'R$ 34,90'}).`
+          : 'Endpoint /api/payments/status indisponível ou bloqueado.'
       });
-      addLog(isConnected ? 'SUCCESS' : 'WARN', 'VAULT', `${secret.name}: ${isConnected ? 'Conectado' : 'Falha'}`);
+      addLog(isConnected ? 'SUCCESS' : 'WARN', 'VAULT', `${secret.name}: ${isConnected ? 'Verificado' : 'Falha'}`);
       setTimeout(() => setTestResult(null), 5000);
       return;
     }
@@ -958,7 +957,7 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
     { id: 'providers', label: 'Provedores & 24/7', shortLabel: 'Provedores', icon: Radio, badge: '4 APIs' },
     { id: 'ai', label: 'IA / Provedores', shortLabel: 'IA / NIM', icon: Cpu },
     { id: 'vault', label: 'Vault / Segredos', shortLabel: 'Vault', icon: Lock, badge: 'Vault' },
-    { id: 'billing', label: 'Assinaturas & PIX', shortLabel: 'Assinaturas', icon: CreditCard },
+    { id: 'billing', label: 'Assinaturas & Cakto', shortLabel: 'Assinaturas', icon: CreditCard },
     { id: 'users', label: 'Usuários & Sessões', shortLabel: 'Usuários', icon: Users, badge: usersList.length || 1 },
     { id: 'sources', label: 'Fontes & Veículos', shortLabel: 'Fontes', icon: Layers, badge: sources.length },
     { id: 'briefings', label: 'Briefings & E-mails', shortLabel: 'Briefings', icon: Mail },
@@ -1395,11 +1394,11 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
               </div>
               {/* Verde se houver pagantes reais, Cinza se 0 pagantes (apenas admin ou trials) */}
               {metrics.proSubscriptions > 0
-                ? renderStatusBadge('connected', 'PIX Ativo')
+                ? renderStatusBadge('connected', 'PRO Ativo')
                 : renderStatusBadge('disconnected', 'R$ 0,00')}
             </div>
             <div>
-              <div className="text-[10px] sm:text-[11px] text-zinc-400 font-medium">Assinaturas Pro (PIX)</div>
+              <div className="text-[10px] sm:text-[11px] text-zinc-400 font-medium">Assinaturas PRO (Cakto)</div>
               <div className="text-xl sm:text-2xl font-bold text-white tracking-tight mt-0.5">
                 {metrics.proSubscriptions}
               </div>
@@ -2178,12 +2177,9 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
           </div>
         )}
 
-        {/* ================= TAB 5: ASSINATURAS & PIX (DASHBOARD FINANCEIRO FATURADO / NÃO FATURADO) ================= */}
+        {/* ================= TAB 5: ASSINATURAS & CAKTO (DASHBOARD FINANCEIRO FATURADO / NÃO FATURADO) ================= */}
         {activeAdminTab === 'billing' && (
           <div className="space-y-6">
-            {/* Painel Financeiro Oficial ZynPay: Saldo em centavos, Volume e Últimos 20 Webhooks */}
-            <AdminFinancialZynPayPanel onShowToast={showToast} />
-
             {/* Dashboard Financeiro Completo: MRR, Faturado vs Não Faturado, Gráfico e Exportação CSV */}
             <AdminFinancialDashboard users={usersList} onShowToast={showToast} />
 
@@ -2192,27 +2188,27 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
                 <div>
                   <h2 className="text-sm sm:text-base font-bold text-white flex items-center gap-2">
                     <CreditCard className="w-5 h-5 text-purple-400 shrink-0" />
-                    <span>FatosBR Pay Gateway (PIX Instantâneo)</span>
+                    <span>FatosBR PRO · Cakto Assinaturas (Cartão & Pix Automático)</span>
                   </h2>
                   <p className="text-xs text-zinc-400 mt-0.5">
-                    Processador de pagamentos com webhook de confirmação. Admin é isento; novos cadastros mostram - 7D.
+                    Processador recorrente via /api/payments/*. Admin é isento; novos cadastros têm trial 7D no SaaS.
                   </p>
                 </div>
-                {renderStatusBadge('disconnected', 'Aguardando Credencial')}
+                {renderStatusBadge('connected', 'Cakto Payments V1')}
               </div>
 
               {/* CARDS DE FATURAMENTO: ADMIN NÃO CONTA ASSINATURA, MOSTRA R$ 0,00 */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs font-mono">
                 <div className="p-3.5 rounded-xl bg-[#090d16] border border-[#182136] space-y-1">
                   <div className="text-zinc-500 text-[10px]">VALOR DO PLANO PRO</div>
-                  <div className="text-base sm:text-lg font-bold text-white">R$ 29,90 / mês</div>
-                  <div className="text-[9px] text-zinc-400">Renovação recorrente via PIX</div>
+                  <div className="text-base sm:text-lg font-bold text-white">R$ 34,90 / mês</div>
+                  <div className="text-[9px] text-zinc-400">Cartão de Crédito ou Pix Automático</div>
                 </div>
 
                 <div className="p-3.5 rounded-xl bg-[#090d16] border border-[#182136] space-y-1">
                   <div className="text-zinc-500 text-[10px]">FATURAMENTO MENSAL ATUAL</div>
                   <div className="text-base sm:text-lg font-bold text-zinc-300">
-                    R$ {(metrics.proSubscriptions * 29.9).toFixed(2).replace('.', ',')}
+                    R$ {(metrics.proSubscriptions * 34.9).toFixed(2).replace('.', ',')}
                   </div>
                   <div className="text-[9px] text-zinc-500">
                     {metrics.proSubscriptions === 0
@@ -2222,12 +2218,12 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
                 </div>
 
                 <div className="p-3.5 rounded-xl bg-[#090d16] border border-[#182136] space-y-1">
-                  <div className="text-zinc-500 text-[10px]">STATUS DO WEBHOOK PIX</div>
+                  <div className="text-zinc-500 text-[10px]">STATUS DO WEBHOOK CAKTO</div>
                   <div className="text-xs font-bold text-emerald-400 flex items-center gap-1.5">
                     <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-                    <span>Ouvinte Ativo (200 OK)</span>
+                    <span>Ouvinte Ativo (/api/payments/webhook)</span>
                   </div>
-                  <div className="text-[9px] text-zinc-400">Idempotência & HMAC validado</div>
+                  <div className="text-[9px] text-zinc-400">Idempotência & HMAC-SHA256 validado</div>
                 </div>
               </div>
 
@@ -2262,7 +2258,6 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
                         <div className="text-[11px] text-zinc-400 font-mono">{u.email}</div>
 
                         <div className="flex items-center justify-between pt-1 border-t border-[#141b2c]">
-                          {/* REGRA: NÃO MOSTRA R$ 29,90 PARA ADMIN NEM PARA QUEM TEM 7D */}
                           <div className="font-mono">
                             {isUserAdmin ? (
                               <span className="text-zinc-400 text-xs font-bold">- <span className="text-[10px] font-normal text-zinc-500">(Admin Cortesia)</span></span>
@@ -2272,7 +2267,7 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
                               </span>
                             ) : (
                               <span className="text-white font-bold text-xs">
-                                R$ 29,90 <span className="text-[10px] text-emerald-400 font-normal">PIX</span>
+                                R$ 34,90 <span className="text-[10px] text-emerald-400 font-normal">Cakto</span>
                               </span>
                             )}
                           </div>
@@ -2333,7 +2328,7 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
                                 ) : isTrial ? (
                                   <span>Período de Teste (7 Dias)</span>
                                 ) : (
-                                  <span>Plano Pro Mensal</span>
+                                  <span>FatosBR PRO Mensal</span>
                                 )}
                               </td>
                               <td className="py-3">
@@ -2344,7 +2339,6 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
                                   : renderStatusBadge('connected', 'Pago / Pro')}
                               </td>
                               <td className="py-3 font-mono">
-                                {/* EXIBIÇÃO: ADMIN É ISENTO, TRIAL MOSTRA - 7D */}
                                 {isUserAdmin ? (
                                   <span className="text-zinc-500 font-bold">-</span>
                                 ) : isTrial ? (
@@ -2352,7 +2346,7 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
                                     - 7D
                                   </span>
                                 ) : (
-                                  <span className="text-white font-bold">R$ 29,90</span>
+                                  <span className="text-white font-bold">R$ 34,90</span>
                                 )}
                               </td>
                               <td className="py-3">
@@ -2361,7 +2355,7 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
                                 ) : isTrial ? (
                                   <span className="text-[10px] text-zinc-400">Trial Gratuito</span>
                                 ) : (
-                                  <span className="text-[10px] font-bold text-emerald-400">PIX Instantâneo</span>
+                                  <span className="text-[10px] font-bold text-emerald-400">Cartão / Pix Auto</span>
                                 )}
                               </td>
                               <td className="py-3 text-right pr-2">

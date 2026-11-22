@@ -1332,14 +1332,21 @@ export const INITIAL_EVENING_BRIEFING: Briefing = {
 };
 
 export const INITIAL_SUBSCRIPTION: UserSubscription = {
-  status: 'ACTIVE',
-  planName: 'Sinal Executive (Individual)',
-  amount: 119.00,
-  trialDaysLeft: 3,
-  trialEndsAt: '27 de Outubro de 2026',
-  currentPeriodEnd: '27 de Outubro de 2026',
-  gateway: 'Sinal Gateway',
-  paymentMethod: 'PIX'
+  status: 'TRIAL_ACTIVE',
+  planId: 'trial',
+  planName: 'Trial Gratuito (7 dias)',
+  amount: 34.9,
+  amountCents: 3490,
+  currency: 'BRL',
+  trialDaysLeft: 7,
+  trialTotalDays: 7,
+  trialEndsAt: 'Em 7 dias',
+  currentPeriodEnd: 'Em 7 dias',
+  gateway: 'Cakto Assinaturas',
+  provider: 'cakto',
+  paymentMethod: 'Cartão de Crédito / Pix Automático',
+  allowedMethods: ['credit_card', 'pix_auto'],
+  hasProAccess: true,
 };
 
 export const INITIAL_NOTIFICATIONS: SinalNotification[] = [

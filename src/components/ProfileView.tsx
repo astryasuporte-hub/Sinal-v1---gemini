@@ -58,6 +58,7 @@ import { avatarProcessing } from '../services/avatarProcessing';
 import { validateImageFile } from '../utils/imageValidation';
 import { usePWAInstall } from '../hooks/usePWAInstall';
 import { userService } from '../services/userService';
+import { paymentsService, BillingHistoryItem } from '../services/paymentsService';
 import { LanguageSelector } from './LanguageSelector';
 
 interface ProfileViewProps {
@@ -250,6 +251,27 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
   const [newEmailInput, setNewEmailInput] = useState('');
   const [contactSubject, setContactSubject] = useState('');
   const [contactMessage, setContactMessage] = useState('');
+  const [billingHistory, setBillingHistory] = useState<BillingHistoryItem[]>([]);
+  const [loadingBillingHistory, setLoadingBillingHistory] = useState(false);
+
+  React.useEffect(() => {
+    if (activeModal !== 'invoices') return;
+    let active = true;
+    setLoadingBillingHistory(true);
+    paymentsService
+      .getHistory()
+      .then((res) => {
+        if (active && res.success) {
+          setBillingHistory(res.history);
+        }
+      })
+      .finally(() => {
+        if (active) setLoadingBillingHistory(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeModal]);
 
   // PWA Hook & iOS Helper Modal State
   const pwa = usePWAInstall();
@@ -1307,7 +1329,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                   <Info className="w-4 h-4 text-zinc-400" />
                   <div>
                     <div className="font-semibold text-white">Versão</div>
-                    <div className="text-[11px] text-zinc-400 font-mono">Sinal v1.2.0 (Produção)</div>
+                    <div className="text-[11px] text-zinc-400 font-mono">FatosBR v2.3.3 (Produção)</div>
                   </div>
                 </div>
                 <span className="text-[10px] bg-zinc-900 border border-zinc-800 px-2 py-0.5 rounded text-zinc-400 font-mono">
@@ -2672,7 +2694,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-sm p-4 animate-fade-in">
           <div className="relative w-full max-w-md rounded-2xl border border-[#1f2229] bg-[#0c0d10] p-6 text-zinc-100 shadow-2xl space-y-5">
             <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
-              <h3 className="text-base font-bold text-white">Método de Pagamento</h3>
+              <h3 className="text-base font-bold text-white">Métodos de Pagamento (Cakto)</h3>
               <button onClick={() => setActiveModal(null)} className="p-1 text-zinc-400 hover:text-white">
                 <X className="w-4 h-4" />
               </button>
@@ -2681,24 +2703,35 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
             <div className="space-y-3 text-xs">
               <div className="p-4 rounded-xl bg-[#111216] border border-zinc-800 flex items-center justify-between">
                 <div>
-                  <div className="font-bold text-white text-sm">PIX Instantâneo</div>
-                  <div className="text-[11px] text-zinc-400 mt-0.5">Pagamento seguro sem necessidade de cartão</div>
+                  <div className="font-bold text-white text-sm">Cartão de Crédito & Pix Automático</div>
+                  <div className="text-[11px] text-zinc-400 mt-0.5">
+                    FatosBR PRO · R$ 34,90/mês com renovação automática
+                  </div>
                 </div>
                 <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                  Ativo
+                  {subscription.status === 'ACTIVE' ? 'PRO Ativo' : 'Elegível'}
                 </span>
               </div>
               <p className="text-[11px] text-zinc-400 leading-relaxed">
-                As cobranças são geradas pontualmente com QR Code PIX oficial, sem débitos surpresa na sua conta.
+                Trial gratuito de 7 dias sem cartão no SaaS. Ao assinar o plano PRO via Cakto, apenas Cartão de Crédito e Pix Automático são aceitos.
               </p>
             </div>
 
-            <div className="pt-2 flex justify-end">
+            <div className="pt-2 flex gap-2">
+              <button
+                onClick={() => {
+                  setActiveModal(null);
+                  onOpenBilling();
+                }}
+                className="flex-1 py-2.5 rounded-xl bg-white text-black text-xs font-bold hover:bg-zinc-200 transition"
+              >
+                Gerenciar Assinatura
+              </button>
               <button
                 onClick={() => setActiveModal(null)}
-                className="w-full py-2.5 rounded-xl bg-white text-black text-xs font-bold hover:bg-zinc-200 transition"
+                className="px-4 py-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-300 text-xs font-semibold hover:text-white transition"
               >
-                Concluir
+                Fechar
               </button>
             </div>
           </div>
@@ -2716,17 +2749,34 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
               </button>
             </div>
 
-            <div className="space-y-2.5 text-xs">
-              <div className="p-3 rounded-xl bg-[#111216] border border-zinc-800 flex items-center justify-between">
-                <div>
-                  <div className="font-semibold text-white">FatosBR Pro Mensal</div>
-                  <div className="text-[11px] text-zinc-400">12 Set 2026 · PIX</div>
+            <div className="space-y-2.5 text-xs max-h-64 overflow-y-auto">
+              {loadingBillingHistory ? (
+                <div className="p-4 text-center text-zinc-400">Carregando histórico real...</div>
+              ) : billingHistory.length === 0 ? (
+                <div className="p-4 rounded-xl bg-[#111216] border border-zinc-800 text-center text-zinc-400">
+                  Nenhuma cobrança registrada até o momento para sua conta.
                 </div>
-                <div className="text-right">
-                  <div className="font-mono font-bold text-white">R$ 29,90</div>
-                  <div className="text-[10px] text-emerald-400">Pago</div>
-                </div>
-              </div>
+              ) : (
+                billingHistory.map((item) => (
+                  <div
+                    key={item.id}
+                    className="p-3 rounded-xl bg-[#111216] border border-zinc-800 flex items-center justify-between"
+                  >
+                    <div>
+                      <div className="font-semibold text-white">{item.description || 'FatosBR PRO Mensal'}</div>
+                      <div className="text-[11px] text-zinc-400">
+                        {new Date(item.date).toLocaleDateString('pt-BR')} · {item.paymentMethod}
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="font-mono font-bold text-white">
+                        {paymentsService.formatCents(item.amountCents)}
+                      </div>
+                      <div className="text-[10px] text-emerald-400">{item.status}</div>
+                    </div>
+                  </div>
+                ))
+              )}
             </div>
 
             <div className="pt-2 flex justify-end">

@@ -114,9 +114,9 @@ export const LEGAL_SECTIONS: LegalSection[] = [
   },
   {
     id: 'cdc',
-    title: 'Direitos do Consumidor & Pagamentos Pix (CDC)',
-    shortTitle: 'Consumidor & Pix',
-    subtitle: 'Direito de arrependimento em 7 dias, transparência tarifária e estorno Pix (Lei 8.078/1990)',
+    title: 'Direitos do Consumidor & Assinaturas (CDC)',
+    shortTitle: 'Consumidor & Cobrança',
+    subtitle: 'Direito de arrependimento em 7 dias, transparência tarifária e estorno integral (Lei 8.078/1990)',
     description: 'Regulamentação das assinaturas do FatosBR Pro contratadas eletronicamente, garantindo devolução integral sem burocracia.',
     articles: [
       {
@@ -127,7 +127,7 @@ export const LEGAL_SECTIONS: LegalSection[] = [
         text: 'O consumidor pode desistir do contrato, no prazo de 7 dias a contar de sua assinatura ou do ato de recebimento do produto ou serviço, sempre que a contratação de fornecimento de produtos e serviços ocorrer fora do estabelecimento comercial, especialmente por telefone ou a domicílio. Parágrafo único: Se o consumidor exercitar o direito de arrependimento, os valores eventualmente pagos serão devolvidos de imediato.',
         beneficiary: 'cliente',
         badge: 'Garantia Incondicional',
-        practicalApplication: 'Ao assinar o FatosBR Pro (R$ 29,90 via ZynPay Pix), você tem 7 dias corridos para solicitar o cancelamento com devolução de 100% do valor pago via chave Pix, sem necessidade de justificativa.'
+        practicalApplication: 'Ao assinar o FatosBR Pro (R$ 34,90/mês via Cartão de Crédito ou Pix Automático processado pela Cakto), você conta com 7 dias corridos de avaliação gratuita antes de contratar e garantia legal para cancelamento e devolução de valores nos termos do Art. 49 do CDC.'
       },
       {
         number: 'Art. 31 e 52',
@@ -137,7 +137,7 @@ export const LEGAL_SECTIONS: LegalSection[] = [
         text: 'A oferta e apresentação de produtos ou serviços devem assegurar informações corretas, claras, precisas, ostensivas e em língua portuguesa sobre suas características, qualidades, quantidade, composição, preço, garantia, prazos de validade e origem.',
         beneficiary: 'cliente',
         badge: 'Transparência Financeira',
-        practicalApplication: 'O valor do FatosBR Pro é de exatos R$ 29,90 (2.990 centavos) por mês, discriminado antes de qualquer pagamento. Não há retenção de dados de cartão de crédito e as renovações são expressamente consentidas via Pix.'
+        practicalApplication: 'O valor do FatosBR Pro é de exatos R$ 34,90 (3.490 centavos) por mês em moeda BRL, discriminado antes de qualquer contratação no checkout hospedado da Cakto, com cancelamento simples direto pela plataforma.'
       },
       {
         number: 'Art. 14, § 3º',
@@ -147,7 +147,7 @@ export const LEGAL_SECTIONS: LegalSection[] = [
         text: 'O fornecedor de serviços só não será responsabilizado quando provar: I - que, tendo prestado o serviço, o defeito inexiste; II - a culpa exclusiva do consumidor ou de terceiro.',
         beneficiary: 'plataforma',
         badge: 'Segurança Jurídica',
-        practicalApplication: 'Indisponibilidades decorrentes de falhas em operadoras de telecomunicação, ataques cibernéticos em massa ou instabilidade nas chaves de bancos emissores do Pix não configuram inadimplemento da plataforma.'
+        practicalApplication: 'Indisponibilidades decorrentes de falhas em operadoras de telecomunicação, ataques cibernéticos em massa ou instabilidade nas redes bancárias e de arranjos de pagamento não configuram inadimplemento da plataforma.'
       }
     ]
   },

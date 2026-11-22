@@ -889,7 +889,8 @@ async function run() {
     );
     assert(
       mig231.includes('ADD COLUMN IF NOT EXISTS notification_settings JSONB') &&
-        mig231.includes('idx_briefings_user_type_day_active') &&
+        mig231.includes('idx_briefing_delivery_slot') &&
+        mig231.includes('local_date') &&
         !mig231.includes("CHECK (type IN ('morning', 'evening'))"),
       'Migração V2.3.1 é estritamente incremental e não recria checks incompatíveis com MORNING/EVENING'
     );
