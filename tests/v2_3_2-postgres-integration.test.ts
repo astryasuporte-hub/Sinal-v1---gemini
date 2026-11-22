@@ -799,6 +799,75 @@ async function run() {
     'notificationService persiste read=true + read_at e RLS impede leitura cruzada entre usuários'
   );
 
+  // ---------------------------------------------------------------------------
+  // 6. HORÁRIOS PERSONALIZADOS + DEDUPLICAÇÃO DE NOTIFICAÇÃO EM POSTGRESQL
+  // ---------------------------------------------------------------------------
+  console.log('\n--- 5. Horários personalizados e deduplicação de notificações no PostgreSQL ---');
+  // Usuário A salvou morning_time='07:15' em America/Sao_Paulo:
+  // Às 07:10 BRT (10:10 UTC) no dia 2026-11-25 deve respeitar janela e aguardar; às 07:20 BRT (10:20 UTC) gera normalmente.
+  await db.query(
+    `INSERT INTO public.events (id, title, slug, summary, relevance_score, published_at) VALUES
+      ('ev-pg-sched-1', 'Copom divulga ata da reunião mensal', 'copom-ata-25', 'Comitê detalha balanço de riscos.', 95, '2026-11-25T08:00:00.000Z')`
+  );
+  const earlyCycle = await briefingEngine.runGenerationCycle({
+    type: 'MORNING',
+    respectScheduleWindow: true,
+    sendEmail: false,
+    referenceDate: new Date('2026-11-25T10:10:00.000Z'), // 07:10 BRT < 07:15
+  });
+  const dbSchedEarly = await db.query<{ cnt: number }>(
+    `SELECT COUNT(*)::int AS cnt FROM public.briefings WHERE user_id = $1 AND local_date = '2026-11-25'`,
+    [userA]
+  );
+  const onTimeCycle = await briefingEngine.runGenerationCycle({
+    type: 'MORNING',
+    respectScheduleWindow: true,
+    sendEmail: false,
+    referenceDate: new Date('2026-11-25T10:20:00.000Z'), // 07:20 BRT >= 07:15
+  });
+  const dbSchedOnTime = await db.query<{ cnt: number; status: string }>(
+    `SELECT COUNT(*)::int AS cnt, COALESCE(MAX(status), '') AS status FROM public.briefings WHERE user_id = $1 AND local_date = '2026-11-25'`,
+    [userA]
+  );
+  const userAResEarly = earlyCycle.results.find((r) => r.userId === userA);
+  const userAResOnTime = onTimeCycle.results.find((r) => r.userId === userA);
+  assert(
+    userAResEarly === undefined &&
+      earlyCycle.ready === 0 &&
+      dbSchedEarly.rows[0]?.cnt === 0 &&
+      userAResOnTime?.status === 'READY' &&
+      dbSchedOnTime.rows[0]?.cnt === 1 &&
+      dbSchedOnTime.rows[0]?.status === 'READY',
+    'Agendamento respeita morning_time=07:15 personalizado persistido no PostgreSQL (07:10 aguarda sem gravar, 07:20 gera READY)'
+  );
+
+  // Deduplicação real em public.notifications pelo índice idx_notifications_dedup_user_event_cat
+  const { notificationEngine } = await import('../api/_lib/notificationEngine.js');
+  await notificationEngine.createNotification({
+    userId: userA,
+    type: 'NEWS_HIGH_RELEVANCE',
+    title: 'Alerta Petrobras',
+    category: 'entidades',
+    eventId: 'ev-pg-sched-1',
+    entityId: 'ent-petr',
+  });
+  await notificationEngine.createNotification({
+    userId: userA,
+    type: 'NEWS_HIGH_RELEVANCE',
+    title: 'Alerta Petrobras duplicado',
+    category: 'entidades',
+    eventId: 'ev-pg-sched-1',
+    entityId: 'ent-petr',
+  });
+  const dedupNotifRes = await db.query<{ cnt: number }>(
+    `SELECT COUNT(*)::int AS cnt FROM public.notifications WHERE user_id = $1 AND event_id = 'ev-pg-sched-1' AND category = 'entidades'`,
+    [userA]
+  );
+  assert(
+    dedupNotifRes.rows[0]?.cnt === 1,
+    'Índice único idx_notifications_dedup_user_event_cat impede duplicação de notificação no PostgreSQL'
+  );
+
   setBriefingEngineTestDeps(null);
   setNotificationEngineTestDeps(null);
   setTestBriefingServiceClient(null);

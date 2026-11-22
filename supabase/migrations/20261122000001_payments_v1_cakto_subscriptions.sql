@@ -205,6 +205,9 @@ BEGIN
     IF to_regclass('internal.billing_events') IS NOT NULL THEN
       GRANT SELECT, INSERT, UPDATE, DELETE ON internal.billing_events TO service_role;
     END IF;
+    IF to_regclass('public.subscriptions') IS NOT NULL THEN
+      GRANT SELECT, INSERT, UPDATE, DELETE ON public.subscriptions TO service_role;
+    END IF;
 
     DROP POLICY IF EXISTS "service_role_full_billing_attempts" ON internal.billing_attempts;
     CREATE POLICY "service_role_full_billing_attempts"
@@ -213,6 +216,15 @@ BEGIN
       TO service_role
       USING (true)
       WITH CHECK (true);
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF to_regclass('internal.billing_payments') IS NOT NULL THEN
+    CREATE INDEX IF NOT EXISTS idx_billing_payments_attempt_id
+      ON internal.billing_payments (attempt_id)
+      WHERE attempt_id IS NOT NULL;
   END IF;
 END $$;
 

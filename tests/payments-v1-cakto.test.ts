@@ -320,20 +320,40 @@ async function run() {
   const checkoutService = new CheckoutService(() => store);
 
   const blockedCommercial = await checkoutService.initiateCheckout({ userId, userEmail, planId: 'pro', requestedMethod: 'credit_card' });
-  assert(blockedCommercial.httpStatus === 423 && blockedCommercial.result.errorCode === 'CAKTO_CHECKOUT_COMMERCIAL_BLOCKED', 'Bloqueia checkout quando CAKTO_COMMERCIAL_ENABLED=false');
+  assert(
+    blockedCommercial.httpStatus === 423 &&
+      blockedCommercial.result.errorCode === 'CAKTO_CHECKOUT_COMMERCIAL_BLOCKED' &&
+      store.attempts.size === 0,
+    'Bloqueia checkout quando CAKTO_COMMERCIAL_ENABLED=false sem gravar tentativa no banco'
+  );
 
   process.env.CAKTO_COMMERCIAL_ENABLED = 'true';
   process.env.CAKTO_METHODS_VERIFIED = 'false';
   const blockedUnverified = await checkoutService.initiateCheckout({ userId, userEmail, planId: 'pro', requestedMethod: 'pix_auto' });
-  assert(blockedUnverified.httpStatus === 423 && blockedUnverified.result.errorCode === 'CAKTO_PAYMENT_METHODS_NOT_VERIFIED', 'Bloqueia checkout quando CAKTO_METHODS_VERIFIED=false');
+  assert(
+    blockedUnverified.httpStatus === 423 &&
+      blockedUnverified.result.errorCode === 'CAKTO_PAYMENT_METHODS_NOT_VERIFIED' &&
+      store.attempts.size === 0,
+    'Bloqueia checkout quando CAKTO_METHODS_VERIFIED=false sem gravar tentativa no banco'
+  );
 
   const blockedPixAvulso = await checkoutService.initiateCheckout({ userId, userEmail, planId: 'pro', requestedMethod: 'pix' });
-  assert(blockedPixAvulso.httpStatus === 400 && blockedPixAvulso.result.errorCode === 'PAYMENT_METHOD_NOT_ALLOWED', 'Bloqueia explicitamente pix avulso');
+  assert(
+    blockedPixAvulso.httpStatus === 400 &&
+      blockedPixAvulso.result.errorCode === 'PAYMENT_METHOD_NOT_ALLOWED' &&
+      store.attempts.size === 0,
+    'Bloqueia explicitamente pix avulso sem gravar tentativa no banco'
+  );
 
   process.env.CAKTO_METHODS_VERIFIED = 'true';
   const originalFetch = globalThis.fetch;
   let mockOfferPayload: any = { id: 'vjw92gx', status: 'active', trial_days: 0, paymentMethods: ['credit_card', 'pix'] };
-  let mockProductPayload: any = { id: CAKTO_OFFICIAL_PRODUCT_ID, status: 'active' };
+  let mockProductPayload: any = {
+    id: CAKTO_OFFICIAL_PRODUCT_ID,
+    status: 'active',
+    price: 34.9,
+    paymentMethods: ['credit_card', 'pix_auto'],
+  };
   let mockCheckoutPayload: any = {
     id: '1356033',
     status: 'active',
@@ -380,26 +400,71 @@ async function run() {
     );
     assert(
       blockedDisallowedUpstream.httpStatus === 423 &&
-        blockedDisallowedUpstream.result.errorCode === 'CAKTO_DISALLOWED_PAYMENT_METHOD_ENABLED',
-      'Bloqueia automaticamente quando oferta na Cakto tem pix avulso ativo'
+        blockedDisallowedUpstream.result.errorCode === 'CAKTO_DISALLOWED_PAYMENT_METHOD_ENABLED' &&
+        store.attempts.size === 0,
+      'Bloqueia automaticamente quando oferta na Cakto tem pix avulso ativo (0 tentativas gravadas)'
     );
+
+    // Cenário real de divergência externa na Cakto: Produto active R$34,90 com [pix, pix_auto, credit_card] + Oferta active sem métodos + Checkout layout-only
+    const savedOffer = mockOfferPayload;
+    const savedCheckout = mockCheckoutPayload;
+    mockProductPayload = { id: CAKTO_OFFICIAL_PRODUCT_ID, status: 'active', price: 34.9, paymentMethods: ['pix', 'pix_auto', 'credit_card'] };
+    mockOfferPayload = { id: 'vjw92gx', status: 'active', trial_days: 0, price: 34.9 };
+    mockCheckoutPayload = {
+      id: '1356033',
+      status: 'active',
+      trial_days: 0,
+      config: { desktop: { settings: {}, rows: [{ label: 'credit_card' }, { label: 'pix_auto' }] }, mobile: { settings: {} } },
+    };
+    const blockedRealDivergence = await checkoutService.initiateCheckout({ userId, userEmail, planId: 'pro', requestedMethod: 'credit_card' });
+    assert(
+      blockedRealDivergence.httpStatus === 423 &&
+        blockedRealDivergence.result.errorCode === 'CAKTO_DISALLOWED_PAYMENT_METHOD_ENABLED' &&
+        store.attempts.size === 0,
+      'Bloqueia divergência real da Cakto quando Produto inclui pix comum mesmo sem métodos na Oferta'
+    );
+
+    // Resposta de checkout contendo apenas layout visual (sem paymentMethods financeiros verificáveis) deve bloquear e apontar missingEvidence
+    mockProductPayload = { id: CAKTO_OFFICIAL_PRODUCT_ID, status: 'active', price: 34.9, paymentMethods: ['credit_card', 'pix_auto'] };
+    mockOfferPayload = { id: 'vjw92gx', status: 'active', trial_days: 0, price: 34.9, paymentMethods: ['credit_card', 'pix_auto'] };
+    mockCheckoutPayload = {
+      id: '1356033',
+      status: 'active',
+      trial_days: 0,
+      config: { desktop: { settings: {}, rows: [{ paymentMethods: ['credit_card', 'pix_auto'] }] }, mobile: { settings: {} } },
+    };
+    const blockedLayoutOnly = await checkoutService.initiateCheckout({ userId, userEmail, planId: 'pro', requestedMethod: 'credit_card' });
+    assert(
+      blockedLayoutOnly.httpStatus === 423 &&
+        blockedLayoutOnly.result.errorCode === 'CAKTO_CHECKOUT_COMMERCIAL_BLOCKED' &&
+        Array.isArray(blockedLayoutOnly.result.missingEvidence) &&
+        blockedLayoutOnly.result.missingEvidence.some((m) => m.includes('checkout.paymentMethods')) &&
+        store.attempts.size === 0,
+      'Não aceita layout visual de checkout.config como prova financeira e registra exatamente qual evidência falta'
+    );
+    mockOfferPayload = savedOffer;
+    mockCheckoutPayload = savedCheckout;
 
     // HTTP 404 no checkout NUNCA é considerado válido
     mockOfferPayload = { id: 'vjw92gx', status: 'active', trial_days: 0, paymentMethods: ['credit_card', 'pix_auto'] };
     mockCheckoutStatus = 404;
     const blocked404Checkout = await checkoutService.initiateCheckout({ userId, userEmail, planId: 'pro', requestedMethod: 'credit_card' });
     assert(
-      blocked404Checkout.httpStatus === 423 && blocked404Checkout.result.errorCode === 'CAKTO_CHECKOUT_COMMERCIAL_BLOCKED',
-      'Bloqueia checkout quando endpoint oficial retorna HTTP 404 (sem fallback silencioso)'
+      blocked404Checkout.httpStatus === 423 &&
+        blocked404Checkout.result.errorCode === 'CAKTO_CHECKOUT_COMMERCIAL_BLOCKED' &&
+        store.attempts.size === 0,
+      'Bloqueia checkout quando endpoint oficial retorna HTTP 404 (sem fallback silencioso e 0 tentativas)'
     );
     mockCheckoutStatus = 200;
 
-    // Configuração incompleta do checkout (sem config ou sem paymentMethods no checkout) deve bloquear mesmo se oferta estiver OK
+    // Configuração incompleta do checkout (sem paymentMethods verificáveis no checkout) deve bloquear mesmo se oferta estiver OK
     mockCheckoutPayload = { id: '1356033', status: 'active', trial_days: 0, config: { desktop: { settings: {} }, mobile: { settings: {} } } };
     const blockedIncompleteConfig = await checkoutService.initiateCheckout({ userId, userEmail, planId: 'pro', requestedMethod: 'credit_card' });
     assert(
-      blockedIncompleteConfig.httpStatus === 423 && blockedIncompleteConfig.result.errorCode === 'CAKTO_CHECKOUT_COMMERCIAL_BLOCKED',
-      'Bloqueia checkout quando configuração efetiva (config/métodos) está incompleta'
+      blockedIncompleteConfig.httpStatus === 423 &&
+        blockedIncompleteConfig.result.errorCode === 'CAKTO_CHECKOUT_COMMERCIAL_BLOCKED' &&
+        store.attempts.size === 0,
+      'Bloqueia checkout quando configuração efetiva (config/métodos) está incompleta sem gravar tentativa'
     );
 
     // Pix comum habilitado dentro de checkout.config deve bloquear mesmo se paymentMethods principal parecer limpo
@@ -428,8 +493,11 @@ async function run() {
     const blockedPartialMethods = await checkoutService.initiateCheckout({ userId, userEmail, planId: 'pro', requestedMethod: 'credit_card' });
     assert(
       blockedPartialMethods.httpStatus === 423 &&
-        blockedPartialMethods.result.errorCode === 'CAKTO_DISALLOWED_PAYMENT_METHOD_ENABLED',
-      'Bloqueia quando apenas credit_card está ativo sem pix_auto'
+        blockedPartialMethods.result.errorCode === 'CAKTO_CHECKOUT_COMMERCIAL_BLOCKED' &&
+        Array.isArray(blockedPartialMethods.result.missingEvidence) &&
+        blockedPartialMethods.result.missingEvidence.some((m) => m.includes('pix_auto')) &&
+        store.attempts.size === 0,
+      'Bloqueia quando apenas credit_card está ativo sem pix_auto e registra evidência ausente'
     );
 
     // Oferta ou Checkout com trial_days > 0 deve bloquear
@@ -490,10 +558,27 @@ async function run() {
         okCheckout.result.success === true &&
         Boolean(okCheckout.result.checkoutUrl?.includes('https://pay.cakto.com.br/vjw92gx')) &&
         Boolean(okCheckout.result.attemptId),
-      'Libera checkout Cakto vjw92gx com attemptId UUID quando oferta, config e checkout são exclusivamente credit_card + pix_auto'
+      'Libera checkout Cakto vjw92gx com attemptId UUID quando oferta, produto e checkout são exclusivamente credit_card + pix_auto'
     );
 
     const attemptId = okCheckout.result.attemptId!;
+
+    // Idempotência do checkout retorna o mesmo attemptId sem criar tentativa duplicada
+    const attemptsBeforeReplay = store.attempts.size;
+    const replayCheckout = await checkoutService.initiateCheckout({
+      userId,
+      userEmail,
+      userName: 'Assinante Teste',
+      planId: 'pro',
+      requestedMethod: 'pix_auto',
+      idempotencyKey: 'chk_idemp_2026_01',
+    });
+    assert(
+      replayCheckout.httpStatus === 200 &&
+        replayCheckout.result.attemptId === attemptId &&
+        store.attempts.size === attemptsBeforeReplay,
+      'Replay de idempotencyKey no CheckoutService reutiliza a mesma tentativa sem criar duplicata'
+    );
 
     // 4. Webhooks e Máquina de Estados Completa
     const provider = new CaktoPaymentProvider(new CaktoClient());
@@ -779,6 +864,18 @@ async function run() {
       'Assinatura ACTIVE sem current_period_end NÃO concede acesso PRO indefinido nem reinventa trial'
     );
 
+    // CheckoutService usa a MESMA regra canônica: bloqueia novo checkout em assinatura sem período comprovado (impede cobrança duplicada durante reconciliação)
+    const missingPeriodCheckout = await checkoutService.initiateCheckout({
+      userId: missingPeriodUser,
+      userEmail: 'legado@fatosbr.com.br',
+      planId: 'pro',
+      requestedMethod: 'credit_card',
+    });
+    assert(
+      missingPeriodCheckout.httpStatus === 409 && missingPeriodCheckout.result.errorCode === 'RECONCILIATION_REQUIRED',
+      'CheckoutService bloqueia novo checkout em assinatura ACTIVE sem current_period_end com HTTP 409 RECONCILIATION_REQUIRED'
+    );
+
     // Cortesia administrativa expressamente autorizada preserva acesso mesmo sem ciclo pago
     const courtesyUser = '88888888-8888-4888-8888-888888888881';
     await store.upsertSubscription({
@@ -799,6 +896,16 @@ async function run() {
     assert(
       courtesySub.status === 'ACTIVE' && courtesySub.hasProAccess === true,
       'Cortesia administrativa expressamente autorizada preserva acesso PRO'
+    );
+    const courtesyCheckout = await checkoutService.initiateCheckout({
+      userId: courtesyUser,
+      userEmail: 'cortesia@fatosbr.com.br',
+      planId: 'pro',
+      requestedMethod: 'credit_card',
+    });
+    assert(
+      courtesyCheckout.httpStatus === 409 && courtesyCheckout.result.errorCode === 'SUBSCRIPTION_ALREADY_ACTIVE',
+      'CheckoutService preserva cortesia administrativa autorizada como SUBSCRIPTION_ALREADY_ACTIVE'
     );
 
     // Trial expirado (> 7 dias) retorna TRIAL_EXPIRED com hasProAccess=false
@@ -872,16 +979,27 @@ async function run() {
       'Webhook usa next_payment_date confirmado do provedor para ancorar current_period_end e next_billing_at'
     );
 
-    // Fail-closed quando banco falha (SubscriptionService lança SubscriptionVerificationUnavailableError)
+    // Fail-closed quando banco falha (SubscriptionService lança SubscriptionVerificationUnavailableError e CheckoutService retorna HTTP 503)
     store.throwOnFindSubscription = true;
     let threwUnavailable = false;
+    let checkout503: any = null;
     try {
+      checkout503 = await checkoutService.initiateCheckout({
+        userId: '99999999-1111-4111-8111-999999999999',
+        userEmail: 'dbfail@fatosbr.com.br',
+        planId: 'pro',
+        requestedMethod: 'credit_card',
+      });
       await subService.getUserSubscriptionStatus({ userId, userEmail });
     } catch (e: any) {
       threwUnavailable = e instanceof SubscriptionVerificationUnavailableError || e?.code === 'SUBSCRIPTION_VERIFICATION_UNAVAILABLE';
     } finally {
       store.throwOnFindSubscription = false;
     }
+    assert(
+      checkout503?.httpStatus === 503 && checkout503?.result?.errorCode === 'SUBSCRIPTION_VERIFICATION_UNAVAILABLE',
+      'CheckoutService falha fechado com HTTP 503 SUBSCRIPTION_VERIFICATION_UNAVAILABLE em erro de banco (sem assumir ausência de assinatura)'
+    );
     assert(threwUnavailable, 'SubscriptionService falha fechado (SUBSCRIPTION_VERIFICATION_UNAVAILABLE) em erro de banco sem conceder trial');
 
     // Garantir ausência de rotas falsas de simulação

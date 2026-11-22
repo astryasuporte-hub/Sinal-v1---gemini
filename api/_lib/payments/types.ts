@@ -29,6 +29,7 @@ export interface CheckoutSessionInput {
   planId: 'pro';
   requestedMethod?: string;
   idempotencyKey?: string;
+  verifiedReadiness?: CheckoutCommercialReadiness;
 }
 
 export interface CheckoutCommercialReadiness {
@@ -45,6 +46,11 @@ export interface CheckoutCommercialReadiness {
   allowedMethods: readonly AllowedCaktoPaymentMethod[];
   prohibitedMethods: readonly string[];
   detectedProviderMethods?: string[];
+  productMethods?: string[];
+  offerMethods?: string[];
+  checkoutMethods?: string[];
+  missingEvidence?: string[];
+  providerPriceCents?: number | null;
   offerStatus?: string;
   productStatus?: string;
   checkoutStatus?: string;
@@ -56,6 +62,7 @@ export interface CheckoutSessionResult {
   blocked?: boolean;
   errorCode?: string;
   error?: string;
+  missingEvidence?: string[];
   attemptId?: string;
   provider: PaymentProviderId;
   checkoutUrl?: string;

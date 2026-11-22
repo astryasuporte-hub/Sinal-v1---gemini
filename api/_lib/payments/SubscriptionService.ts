@@ -16,9 +16,9 @@ import { SAAS_TRIAL_DAYS, resolvePlanPrice } from '../plans.js';
 import { toDbSubscriptionPlan, toDbSubscriptionStatus } from './DbContractMapper.js';
 import { getActivePaymentProviderId, getPaymentProvider } from './PaymentProviderRegistry.js';
 import { DbSubscriptionRow, formatMethodLabel, getPaymentsPersistence, PaymentsPersistenceAdapter } from './PaymentsStore.js';
+import { evaluateSubscriptionEligibility } from './SubscriptionEligibility.js';
 import type {
   BillingHistoryEntry,
-  CanonicalSubscriptionStatus,
   UserSubscriptionView,
 } from './types.js';
 
@@ -106,183 +106,69 @@ export class SubscriptionService {
       }
     }
 
-    const nowMs = Date.now();
-    const trialStartMs = resolvedCreatedAt ? Date.parse(resolvedCreatedAt) : NaN;
-    const explicitTrialEndMs = row?.trial_ends_at ? Date.parse(row.trial_ends_at) : NaN;
-
-    const hasValidTrialOrigin = Number.isFinite(explicitTrialEndMs) || Number.isFinite(trialStartMs);
-    const trialEndsMs = Number.isFinite(explicitTrialEndMs)
-      ? explicitTrialEndMs
-      : Number.isFinite(trialStartMs)
-      ? trialStartMs + SAAS_TRIAL_DAYS * 24 * 60 * 60 * 1000
-      : 0;
-
-    const trialStartsIso = Number.isFinite(trialStartMs)
-      ? new Date(trialStartMs).toISOString()
-      : null;
-    const trialEndsIso = hasValidTrialOrigin ? new Date(trialEndsMs).toISOString() : null;
-    const remainingTrialDays = hasValidTrialOrigin
-      ? Math.max(0, Math.ceil((trialEndsMs - nowMs) / (24 * 60 * 60 * 1000)))
-      : 0;
+    const evaluation = evaluateSubscriptionEligibility({
+      row,
+      userCreatedAt: resolvedCreatedAt,
+      nowMs: Date.now(),
+    });
 
     if (row) {
-      const dbStatus = String(row.status || '').toUpperCase().trim();
-      const dbPlan = String(row.plan || '').toUpperCase().trim();
-      const meta = row.billing_metadata && typeof row.billing_metadata === 'object' ? row.billing_metadata : {};
-      const periodEndIso = row.current_period_end || trialEndsIso || null;
-      const periodEndMs = row.current_period_end ? Date.parse(row.current_period_end) : 0;
-      const graceEndMs = row.grace_until ? Date.parse(row.grace_until) : 0;
-      const hadPaidHistory = Boolean(
-        meta.had_paid_cycle === true ||
-          meta.refunded === true ||
-          meta.chargeback === true ||
-          meta.expired === true ||
-          dbPlan === 'PRO'
-      );
-
-      let canonicalStatus: CanonicalSubscriptionStatus = 'TRIAL_EXPIRED';
-      let hasProAccess = false;
-      let reconciliationRequired = false;
-      let reconciliationReason: string | null = null;
-
-      const isAuthorizedCourtesy = Boolean(
-        meta.admin_courtesy === true &&
-          (!meta.courtesy_expires_at ||
-            (Number.isFinite(Date.parse(String(meta.courtesy_expires_at))) &&
-              Date.parse(String(meta.courtesy_expires_at)) > nowMs))
-      );
-
-      if (dbStatus === 'ACTIVE') {
-        if (isAuthorizedCourtesy) {
-          canonicalStatus = 'ACTIVE';
-          hasProAccess = true;
-        } else if (row.current_period_end && Number.isFinite(periodEndMs)) {
-          if (periodEndMs > nowMs) {
-            canonicalStatus = 'ACTIVE';
-            hasProAccess = true;
-          } else {
-            canonicalStatus = 'EXPIRED';
-            hasProAccess = false;
-          }
-        } else {
-          // PRO sem current_period_end válido NUNCA recebe acesso indefinido; requer reconciliação segura
-          canonicalStatus = 'INCOMPLETE';
-          hasProAccess = false;
-          reconciliationRequired = true;
-          reconciliationReason = 'MISSING_CURRENT_PERIOD_END';
-        }
-      } else if (dbStatus === 'PAST_DUE') {
-        canonicalStatus = 'PAST_DUE';
-        hasProAccess = Boolean(graceEndMs > nowMs && !meta.refunded && !meta.chargeback);
-      } else if (dbStatus === 'CANCELED' || dbStatus === 'CANCELLED') {
-        canonicalStatus = 'CANCELED';
-        hasProAccess = Boolean(
-          !meta.refunded &&
-            !meta.chargeback &&
-            row.current_period_end &&
-            Number.isFinite(periodEndMs) &&
-            periodEndMs > nowMs
-        );
-      } else if (dbStatus === 'SUSPENDED') {
-        canonicalStatus = meta.expired ? 'EXPIRED' : 'SUSPENDED';
-        hasProAccess = false;
-      } else if (dbStatus === 'INCOMPLETE') {
-        canonicalStatus = meta.refused ? 'PAYMENT_REFUSED' : 'INCOMPLETE';
-        hasProAccess = false;
-        if (!meta.refused) {
-          reconciliationRequired = true;
-          reconciliationReason = 'INCOMPLETE_SUBSCRIPTION';
-        }
-      } else if (dbStatus === 'EXPIRED') {
-        canonicalStatus = 'EXPIRED';
-        hasProAccess = false;
-      } else if (dbStatus === 'PAYMENT_REFUSED') {
-        canonicalStatus = 'PAYMENT_REFUSED';
-        hasProAccess = false;
-      } else if (dbStatus === 'RENEWAL_PENDING' || dbStatus === 'PENDING') {
-        canonicalStatus = 'RENEWAL_PENDING';
-        hasProAccess = Boolean(
-          (row.current_period_end && Number.isFinite(periodEndMs) && periodEndMs > nowMs && meta.pro_paid !== false) ||
-            (!hadPaidHistory && remainingTrialDays > 0)
-        );
-      } else if (dbStatus === 'TRIAL_ACTIVE' || dbStatus === 'TRIALING') {
-        if (!hadPaidHistory && remainingTrialDays > 0) {
-          canonicalStatus = 'TRIAL_ACTIVE';
-          hasProAccess = true;
-        } else {
-          canonicalStatus = 'TRIAL_EXPIRED';
-          hasProAccess = false;
-        }
-      } else if (dbStatus === 'TRIAL_EXPIRED') {
-        canonicalStatus = 'TRIAL_EXPIRED';
-        hasProAccess = false;
-      }
-
-      const isPaidTier =
-        canonicalStatus === 'ACTIVE' ||
-        canonicalStatus === 'PAST_DUE' ||
-        canonicalStatus === 'CANCELED' ||
-        canonicalStatus === 'SUSPENDED' ||
-        canonicalStatus === 'EXPIRED' ||
-        canonicalStatus === 'PAYMENT_REFUSED' ||
-        canonicalStatus === 'INCOMPLETE' ||
-        (canonicalStatus === 'RENEWAL_PENDING' && hadPaidHistory);
-
       return {
-        status: canonicalStatus,
-        planId: isPaidTier ? 'pro' : 'trial',
-        planName: isPaidTier ? plan.name : `Trial Gratuito (${SAAS_TRIAL_DAYS} dias)`,
+        status: evaluation.canonicalStatus,
+        planId: evaluation.isPaidTier ? 'pro' : 'trial',
+        planName: evaluation.isPaidTier ? plan.name : `Trial Gratuito (${SAAS_TRIAL_DAYS} dias)`,
         amount: plan.amountCents / 100,
         amountCents: plan.amountCents,
         currency: 'BRL',
-        trialDaysLeft: canonicalStatus === 'TRIAL_ACTIVE' ? remainingTrialDays : 0,
+        trialDaysLeft: evaluation.canonicalStatus === 'TRIAL_ACTIVE' ? evaluation.remainingTrialDays : 0,
         trialTotalDays: SAAS_TRIAL_DAYS,
-        trialStartsAt: formatPtBrDate(trialStartsIso),
-        trialEndsAt: formatPtBrDate(trialEndsIso),
+        trialStartsAt: formatPtBrDate(evaluation.trialStartsIso),
+        trialEndsAt: formatPtBrDate(evaluation.trialEndsIso),
         currentPeriodStart: row.current_period_start ? formatPtBrDate(row.current_period_start) : null,
-        currentPeriodEnd: isAuthorizedCourtesy
+        currentPeriodEnd: evaluation.isAuthorizedCourtesy
           ? row.current_period_end
             ? formatPtBrDate(row.current_period_end)
             : 'Cortesia Autorizada'
-          : formatPtBrDate(periodEndIso),
+          : formatPtBrDate(evaluation.periodEndIso),
         nextBillingAt: row.next_billing_at ? formatPtBrDate(row.next_billing_at) : null,
         cancelAtPeriodEnd: Boolean(row.cancel_at_period_end),
         canceledAt: row.canceled_at || null,
         graceUntil: row.grace_until || null,
         gateway: 'Cakto Assinaturas',
         provider: activeProviderId,
-        paymentMethod: isAuthorizedCourtesy ? 'Cortesia Administrativa' : formatMethodLabel(row.payment_method),
+        paymentMethod: evaluation.isAuthorizedCourtesy
+          ? 'Cortesia Administrativa'
+          : formatMethodLabel(row.payment_method),
         allowedMethods: plan.allowedMethods,
         isAdminExempt: false,
-        hasProAccess,
-        reconciliationRequired,
-        reconciliationReason,
+        hasProAccess: evaluation.hasProAccess,
+        reconciliationRequired: evaluation.reconciliationRequired,
+        reconciliationReason: evaluation.reconciliationReason,
         providerSubscriptionId: row.provider_subscription_id || null,
         commercialReadiness,
       };
     }
 
     // Sem linha em public.subscriptions: usa apenas origem confiável de trial (nunca reinventa 7 dias sem created_at)
-    const trialStatus: CanonicalSubscriptionStatus = remainingTrialDays > 0 ? 'TRIAL_ACTIVE' : 'TRIAL_EXPIRED';
     return {
-      status: trialStatus,
+      status: evaluation.canonicalStatus,
       planId: 'trial',
       planName: `Trial Gratuito (${SAAS_TRIAL_DAYS} dias)`,
       amount: plan.amountCents / 100,
       amountCents: plan.amountCents,
       currency: 'BRL',
-      trialDaysLeft: remainingTrialDays,
+      trialDaysLeft: evaluation.remainingTrialDays,
       trialTotalDays: SAAS_TRIAL_DAYS,
-      trialStartsAt: formatPtBrDate(trialStartsIso),
-      trialEndsAt: formatPtBrDate(trialEndsIso),
-      currentPeriodEnd: formatPtBrDate(trialEndsIso),
+      trialStartsAt: formatPtBrDate(evaluation.trialStartsIso),
+      trialEndsAt: formatPtBrDate(evaluation.trialEndsIso),
+      currentPeriodEnd: formatPtBrDate(evaluation.trialEndsIso),
       cancelAtPeriodEnd: false,
       gateway: 'Cakto Assinaturas',
       provider: activeProviderId,
       paymentMethod: formatMethodLabel(null),
       allowedMethods: plan.allowedMethods,
       isAdminExempt: false,
-      hasProAccess: remainingTrialDays > 0,
+      hasProAccess: evaluation.hasProAccess,
       commercialReadiness,
     };
   }

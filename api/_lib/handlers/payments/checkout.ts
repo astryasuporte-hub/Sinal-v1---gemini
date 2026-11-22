@@ -53,15 +53,24 @@ export default async function handler(req: any, res: any) {
   }
   const planId = String(body?.planId || 'pro').trim();
 
-  // Nota de segurança: body.amount / body.amountCents / body.currency são rigorosamente ignorados.
-  const { httpStatus, result } = await checkoutService.initiateCheckout({
-    userId: auth.user.userId,
-    userEmail: auth.user.email || '',
-    userName: auth.user.fullName,
-    planId,
-    requestedMethod: requestedMethod ? String(requestedMethod) : undefined,
-    idempotencyKey,
-  });
+  try {
+    // Nota de segurança: body.amount / body.amountCents / body.currency são rigorosamente ignorados.
+    const { httpStatus, result } = await checkoutService.initiateCheckout({
+      userId: auth.user.userId,
+      userEmail: auth.user.email || '',
+      userName: auth.user.fullName,
+      planId,
+      requestedMethod: requestedMethod ? String(requestedMethod) : undefined,
+      idempotencyKey,
+    });
 
-  return sendJson(res, httpStatus, result);
+    return sendJson(res, httpStatus, result);
+  } catch (err: any) {
+    return sendJson(res, 503, {
+      success: false,
+      blocked: true,
+      errorCode: 'SUBSCRIPTION_VERIFICATION_UNAVAILABLE',
+      error: err?.message || 'Serviço de verificação financeira indisponível no momento.',
+    });
+  }
 }

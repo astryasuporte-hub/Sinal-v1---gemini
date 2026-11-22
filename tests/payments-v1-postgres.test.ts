@@ -294,7 +294,15 @@ async function main() {
       );
     }
     if (u.includes('/public_api/products/')) {
-      return new Response(JSON.stringify({ id: CAKTO_OFFICIAL_PRODUCT_ID, status: 'active' }), { status: 200 });
+      return new Response(
+        JSON.stringify({
+          id: CAKTO_OFFICIAL_PRODUCT_ID,
+          status: 'active',
+          price: 34.9,
+          paymentMethods: ['credit_card', 'pix_auto'],
+        }),
+        { status: 200 }
+      );
     }
     if (u.includes('/cancel/')) {
       return new Response(JSON.stringify({ status: 'canceled' }), { status: 200 });
@@ -317,6 +325,23 @@ async function main() {
 
   try {
     const checkoutService = new CheckoutService();
+
+    // Com trava comercial desabilitada, CheckoutService bloqueia ANTES de gravar qualquer tentativa em internal.billing_attempts
+    process.env.CAKTO_COMMERCIAL_ENABLED = 'false';
+    const preBlockOut = await checkoutService.initiateCheckout({
+      userId: caktoUserId,
+      userEmail: caktoUserEmail,
+      userName: 'Assinante PG',
+      planId: 'pro',
+      requestedMethod: 'credit_card',
+    });
+    const preAttemptsCount = await db.query(`SELECT COUNT(*)::int AS cnt FROM internal.billing_attempts`);
+    assert(
+      preBlockOut.httpStatus === 423 && preAttemptsCount.rows[0]?.cnt === 0,
+      'PostgreSQL: CheckoutService bloqueado comercialmente NÃO grava linha em internal.billing_attempts'
+    );
+    process.env.CAKTO_COMMERCIAL_ENABLED = 'true';
+
     const checkoutOut = await checkoutService.initiateCheckout({
       userId: caktoUserId,
       userEmail: caktoUserEmail,
@@ -498,7 +523,18 @@ async function main() {
       'PostgreSQL: linha ACTIVE sem current_period_end nega PRO indefinido e exige reconciliação (INCOMPLETE)'
     );
 
-    // Endpoint /api/payments/status retorna HTTP 503 fail-closed se banco cair
+    const missingPeriodPgCheckout = await checkoutService.initiateCheckout({
+      userId: missingPeriodPgUser,
+      userEmail: 'semperiodo@fatosbr.com.br',
+      planId: 'pro',
+      requestedMethod: 'credit_card',
+    });
+    assert(
+      missingPeriodPgCheckout.httpStatus === 409 && missingPeriodPgCheckout.result.errorCode === 'RECONCILIATION_REQUIRED',
+      'PostgreSQL: CheckoutService usa regra canônica e bloqueia cobrança duplicada em assinatura sem período comprovado'
+    );
+
+    // Endpoint /api/payments/status e CheckoutService retornam HTTP 503 fail-closed se banco cair
     setTestPostgresPool({
       connect: async () => {
         throw new Error('POSTGRES_DOWN_SIMULATED');
@@ -506,17 +542,6 @@ async function main() {
     });
     let res503Status = 200;
     let res503Body: any = null;
-    await statusHandler(
-      { method: 'GET', url: '/api/payments/status', headers: { authorization: 'Bearer valid_pg_user' } },
-      {
-        statusCode: 200,
-        setHeader() {},
-        end(raw: string) {
-          res503Body = JSON.parse(raw);
-        },
-      }
-    );
-    // statusHandler sets res.statusCode via sendJson
     const mockRes503: any = {
       statusCode: 200,
       setHeader() {},
@@ -532,6 +557,17 @@ async function main() {
     assert(
       res503Status === 503 && res503Body?.errorCode === 'SUBSCRIPTION_VERIFICATION_UNAVAILABLE',
       'GET /api/payments/status retorna HTTP 503 fail-closed quando banco falha (sem inventar trial)'
+    );
+
+    const pgCheckout503 = await checkoutService.initiateCheckout({
+      userId: caktoUserId,
+      userEmail: caktoUserEmail,
+      planId: 'pro',
+      requestedMethod: 'credit_card',
+    });
+    assert(
+      pgCheckout503.httpStatus === 503 && pgCheckout503.result.errorCode === 'SUBSCRIPTION_VERIFICATION_UNAVAILABLE',
+      'PostgreSQL: CheckoutService retorna HTTP 503 fail-closed quando banco falha (sem assumir ausência de assinatura)'
     );
   } finally {
     globalThis.fetch = origFetch;

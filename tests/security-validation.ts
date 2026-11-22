@@ -373,7 +373,12 @@ async function main() {
     }
     if (u.includes('/public_api/products/')) {
       return new Response(
-        JSON.stringify({ id: 'c8731178-55c9-47f6-8b98-987f31206ed8', status: 'active' }),
+        JSON.stringify({
+          id: 'c8731178-55c9-47f6-8b98-987f31206ed8',
+          status: 'active',
+          price: 34.9,
+          paymentMethods: ['credit_card', 'pix_auto'],
+        }),
         { status: 200 }
       );
     }

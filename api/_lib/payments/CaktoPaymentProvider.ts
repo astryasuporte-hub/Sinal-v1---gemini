@@ -55,7 +55,7 @@ export function normalizeCaktoAmountToCents(rawAmount: unknown): number | undefi
   return Math.round(num * 100);
 }
 
-const BOOLEAN_METHOD_KEYS: Array<[string, string]> = [
+const PROHIBITED_CONFIG_BOOLEAN_KEYS: Array<[string, string]> = [
   ['pix', 'pix'],
   ['accepts_pix', 'pix'],
   ['pix_common', 'pix'],
@@ -69,6 +69,10 @@ const BOOLEAN_METHOD_KEYS: Array<[string, string]> = [
   ['google_pay', 'googlepay'],
   ['nupay', 'nupay'],
   ['nu_pay', 'nupay'],
+];
+
+const ALL_FINANCIAL_BOOLEAN_KEYS: Array<[string, string]> = [
+  ...PROHIBITED_CONFIG_BOOLEAN_KEYS,
   ['credit_card', 'credit_card'],
   ['accepts_credit_card', 'credit_card'],
   ['pix_auto', 'pix_auto'],
@@ -76,22 +80,7 @@ const BOOLEAN_METHOD_KEYS: Array<[string, string]> = [
   ['pix_automatico', 'pix_auto'],
 ];
 
-function extractMethodsFromContainer(container: any): string[] {
-  if (!container || typeof container !== 'object') return [];
-  const rawList: unknown[] = [];
-
-  if (Array.isArray(container.paymentMethods)) rawList.push(...container.paymentMethods);
-  if (Array.isArray(container.payment_methods)) rawList.push(...container.payment_methods);
-  if (Array.isArray(container.allowed_methods)) rawList.push(...container.allowed_methods);
-  if (Array.isArray(container.methods)) rawList.push(...container.methods);
-  if (Array.isArray(container.enabled_methods)) rawList.push(...container.enabled_methods);
-
-  for (const [key, canonical] of BOOLEAN_METHOD_KEYS) {
-    if (container[key] === true) {
-      rawList.push(canonical);
-    }
-  }
-
+function normalizeMethodList(rawList: unknown[]): string[] {
   return Array.from(
     new Set(
       rawList
@@ -108,14 +97,41 @@ function extractMethodsFromContainer(container: any): string[] {
   );
 }
 
-function extractMethodsFromCheckoutDeep(checkoutData: any): {
-  methods: string[];
+/**
+ * Extrai EXCLUSIVAMENTE campos financeiros verificáveis no nível do recurso da API
+ * (NUNCA interpreta configurações visuais de layout como config.desktop.rows/styles).
+ */
+function extractVerifiableFinancialMethods(resource: any): string[] {
+  if (!resource || typeof resource !== 'object') return [];
+  const rawList: unknown[] = [];
+
+  if (Array.isArray(resource.paymentMethods)) rawList.push(...resource.paymentMethods);
+  if (Array.isArray(resource.payment_methods)) rawList.push(...resource.payment_methods);
+  if (Array.isArray(resource.allowed_methods)) rawList.push(...resource.allowed_methods);
+  if (Array.isArray(resource.methods)) rawList.push(...resource.methods);
+  if (Array.isArray(resource.enabled_methods)) rawList.push(...resource.enabled_methods);
+
+  for (const [key, canonical] of ALL_FINANCIAL_BOOLEAN_KEYS) {
+    if (resource[key] === true) {
+      rawList.push(canonical);
+    }
+  }
+
+  return normalizeMethodList(rawList);
+}
+
+/**
+ * Varredura defensiva de checkout.config apenas para detectar sinais explícitos de métodos PROIBIDOS.
+ * Configurações visuais em config JAMAIS são usadas como prova positiva de permissão ou restrição financeira.
+ */
+function extractProhibitedSignalsFromCheckoutConfig(checkoutData: any): {
+  prohibitedInConfig: string[];
   hasValidConfigObject: boolean;
   configIncompleteReason?: string;
 } {
   if (!checkoutData || typeof checkoutData !== 'object') {
     return {
-      methods: [],
+      prohibitedInConfig: [],
       hasValidConfigObject: false,
       configIncompleteReason: 'Resposta do checkout Cakto ausente ou inválida.',
     };
@@ -125,41 +141,44 @@ function extractMethodsFromCheckoutDeep(checkoutData: any): {
   const hasValidConfigObject = Boolean(config && typeof config === 'object' && !Array.isArray(config));
   if (!hasValidConfigObject) {
     return {
-      methods: [],
+      prohibitedInConfig: [],
       hasValidConfigObject: false,
-      configIncompleteReason: 'Objeto config ausente ou incompleto na resposta oficial do checkout Cakto.',
+      configIncompleteReason: 'Objeto config ausente ou inválido na resposta do checkout Cakto.',
     };
   }
 
-  const collected = new Set<string>();
+  const prohibited = new Set<string>();
   const visited = new Set<any>();
 
-  const scanNode = (node: any, depth: number) => {
+  const scanProhibited = (node: any, depth: number) => {
     if (!node || typeof node !== 'object' || depth > 6 || visited.has(node)) return;
     visited.add(node);
 
-    for (const m of extractMethodsFromContainer(node)) {
-      collected.add(m);
-    }
-
-    if (Array.isArray(node)) {
-      for (const item of node) {
-        scanNode(item, depth + 1);
+    if (!Array.isArray(node)) {
+      for (const [key, canonical] of PROHIBITED_CONFIG_BOOLEAN_KEYS) {
+        if (node[key] === true) prohibited.add(canonical);
       }
-      return;
+      for (const listKey of ['paymentMethods', 'payment_methods', 'allowed_methods', 'methods', 'enabled_methods']) {
+        if (Array.isArray(node[listKey])) {
+          for (const m of normalizeMethodList(node[listKey])) {
+            if (!isAllowedPaymentMethod(m)) prohibited.add(m);
+          }
+        }
+      }
     }
 
-    for (const val of Object.values(node)) {
+    const values = Array.isArray(node) ? node : Object.values(node);
+    for (const val of values) {
       if (val && typeof val === 'object') {
-        scanNode(val, depth + 1);
+        scanProhibited(val, depth + 1);
       }
     }
   };
 
-  scanNode(checkoutData, 0);
+  scanProhibited(config, 0);
 
   return {
-    methods: Array.from(collected),
+    prohibitedInConfig: Array.from(prohibited),
     hasValidConfigObject: true,
   };
 }
@@ -191,7 +210,7 @@ export class CaktoPaymentProvider implements PaymentProvider {
         ready: false,
         blockedReasonCode: 'CAKTO_CHECKOUT_COMMERCIAL_BLOCKED',
         blockedMessage:
-          'Checkout Cakto bloqueado comercialmente até liberação explícita (oferta em espera / CAKTO_COMMERCIAL_ENABLED=false).',
+          'Checkout Cakto bloqueado comercialmente até regularização na Cakto e liberação explícita (CAKTO_COMMERCIAL_ENABLED=false).',
         commercialEnabled,
         methodsVerified,
         allowedMethods: ALLOWED_CAKTO_METHODS,
@@ -204,7 +223,7 @@ export class CaktoPaymentProvider implements PaymentProvider {
         ready: false,
         blockedReasonCode: 'CAKTO_PAYMENT_METHODS_NOT_VERIFIED',
         blockedMessage:
-          'Métodos de pagamento da oferta Cakto ainda não verificados (exigido Cartão de Crédito + Pix Automático; Pix avulso proibido).',
+          'Métodos de pagamento da oferta Cakto ainda não verificados (exigido exclusivamente Cartão de Crédito + Pix Automático; Pix avulso proibido).',
         commercialEnabled,
         methodsVerified,
         allowedMethods: ALLOWED_CAKTO_METHODS,
@@ -234,7 +253,7 @@ export class CaktoPaymentProvider implements PaymentProvider {
       return {
         ready: false,
         blockedReasonCode: 'CAKTO_CHECKOUT_COMMERCIAL_BLOCKED',
-        blockedMessage: `Não foi possível validar o checkout oficial ${plan.checkoutId} do produto ${plan.productId} na Cakto (offer=${offerRes.status}, product=${productRes.status}, checkout=${checkoutRes.status}).`,
+        blockedMessage: `Não foi possível validar o produto ${plan.productId}, oferta ${plan.offerId} e checkout ${plan.checkoutId} na Cakto (offer=${offerRes.status}, product=${productRes.status}, checkout=${checkoutRes.status}).`,
         commercialEnabled,
         methodsVerified,
         allowedMethods: ALLOWED_CAKTO_METHODS,
@@ -259,7 +278,7 @@ export class CaktoPaymentProvider implements PaymentProvider {
     }
 
     const offerStatus = String(offerData.status || (offerData.active === false ? 'disabled' : 'active')).toLowerCase();
-    const productStatus = String(productData.status || 'unknown').toLowerCase();
+    const productStatus = String(productData.status || (productData.active === false ? 'disabled' : 'unknown')).toLowerCase();
     const checkoutStatus = String(
       checkoutData.status || (checkoutData.active === false ? 'disabled' : 'active')
     ).toLowerCase();
@@ -268,10 +287,19 @@ export class CaktoPaymentProvider implements PaymentProvider {
     const checkoutTrialDays = Number.isFinite(Number(checkoutData?.trial_days ?? 0)) ? Number(checkoutData?.trial_days ?? 0) : 0;
     const trialDays = offerTrialDays !== 0 ? offerTrialDays : checkoutTrialDays;
 
+    const productPriceCents = normalizeCaktoAmountToCents(
+      productData.price ?? productData.amount_cents ?? productData.amount
+    );
+    const offerPriceCents = normalizeCaktoAmountToCents(
+      offerData.price ?? offerData.amount_cents ?? offerData.amount
+    );
+    const providerPriceCents = offerPriceCents ?? productPriceCents ?? null;
+
     if (
-      offerStatus === 'disabled' ||
-      offerStatus === 'inactive' ||
+      offerStatus !== 'active' ||
       productStatus === 'waiting_config' ||
+      productStatus === 'disabled' ||
+      productStatus === 'inactive' ||
       checkoutStatus === 'disabled' ||
       checkoutStatus === 'inactive' ||
       checkoutStatus === 'waiting_config'
@@ -284,6 +312,27 @@ export class CaktoPaymentProvider implements PaymentProvider {
         methodsVerified,
         allowedMethods: ALLOWED_CAKTO_METHODS,
         prohibitedMethods: PROHIBITED_PAYMENT_METHODS,
+        providerPriceCents,
+        offerStatus,
+        productStatus,
+        checkoutStatus,
+        trialDays,
+      };
+    }
+
+    if (
+      (productPriceCents !== undefined && productPriceCents !== plan.amountCents) ||
+      (offerPriceCents !== undefined && offerPriceCents !== plan.amountCents)
+    ) {
+      return {
+        ready: false,
+        blockedReasonCode: 'CAKTO_CHECKOUT_COMMERCIAL_BLOCKED',
+        blockedMessage: `Preço divergente na Cakto (${providerPriceCents} centavos) em relação ao plano oficial (${plan.amountCents} centavos BRL).`,
+        commercialEnabled,
+        methodsVerified,
+        allowedMethods: ALLOWED_CAKTO_METHODS,
+        prohibitedMethods: PROHIBITED_PAYMENT_METHODS,
+        providerPriceCents,
         offerStatus,
         productStatus,
         checkoutStatus,
@@ -300,6 +349,7 @@ export class CaktoPaymentProvider implements PaymentProvider {
         methodsVerified,
         allowedMethods: ALLOWED_CAKTO_METHODS,
         prohibitedMethods: PROHIBITED_PAYMENT_METHODS,
+        providerPriceCents,
         offerStatus,
         productStatus,
         checkoutStatus,
@@ -307,50 +357,79 @@ export class CaktoPaymentProvider implements PaymentProvider {
       };
     }
 
-    const offerMethods = extractMethodsFromContainer(offerData);
-    const checkoutInspection = extractMethodsFromCheckoutDeep(checkoutData);
-    const checkoutMethods = checkoutInspection.methods;
-    const detectedMethods = Array.from(new Set([...offerMethods, ...checkoutMethods]));
+    // Extrai métodos financeiros APENAS de campos oficiais do provedor (jamais do layout visual de config)
+    const productMethods = extractVerifiableFinancialMethods(productData);
+    const offerMethods = extractVerifiableFinancialMethods(offerData);
+    const checkoutMethods = extractVerifiableFinancialMethods(checkoutData);
+    const configSafety = extractProhibitedSignalsFromCheckoutConfig(checkoutData);
 
-    if (!checkoutInspection.hasValidConfigObject || checkoutMethods.length === 0 || offerMethods.length === 0) {
-      return {
-        ready: false,
-        blockedReasonCode: 'CAKTO_CHECKOUT_COMMERCIAL_BLOCKED',
-        blockedMessage:
-          checkoutInspection.configIncompleteReason ||
-          `Configuração efetiva do checkout '${plan.checkoutId}' ou oferta '${plan.offerId}' está incompleta na API da Cakto (métodos não comprovados).`,
-        commercialEnabled,
-        methodsVerified,
-        allowedMethods: ALLOWED_CAKTO_METHODS,
-        prohibitedMethods: PROHIBITED_PAYMENT_METHODS,
-        detectedProviderMethods: detectedMethods,
-        offerStatus,
-        productStatus,
-        checkoutStatus,
-        trialDays,
-      };
-    }
+    const detectedMethods = Array.from(
+      new Set([...productMethods, ...offerMethods, ...checkoutMethods, ...configSafety.prohibitedInConfig])
+    );
 
-    const unexpectedOfferMethods = offerMethods.filter((m) => !isAllowedPaymentMethod(m));
-    const unexpectedCheckoutMethods = checkoutMethods.filter((m) => !isAllowedPaymentMethod(m));
-    const unexpectedMethods = Array.from(new Set([...unexpectedOfferMethods, ...unexpectedCheckoutMethods]));
-
-    const checkoutHasAllAllowed = ALLOWED_CAKTO_METHODS.every((m) => checkoutMethods.includes(m));
-    const offerHasAllAllowed = ALLOWED_CAKTO_METHODS.every((m) => offerMethods.includes(m));
-
-    if (unexpectedMethods.length > 0 || !checkoutHasAllAllowed || !offerHasAllAllowed) {
+    const unexpectedMethods = detectedMethods.filter((m) => !isAllowedPaymentMethod(m));
+    if (unexpectedMethods.length > 0) {
       return {
         ready: false,
         blockedReasonCode: 'CAKTO_DISALLOWED_PAYMENT_METHOD_ENABLED',
-        blockedMessage:
-          unexpectedMethods.length > 0
-            ? `Oferta/checkout Cakto possui método não autorizado habilitado (${unexpectedMethods.join(', ')}). Apenas credit_card e pix_auto são permitidos.`
-            : `Checkout '${plan.checkoutId}' e oferta '${plan.offerId}' precisam comprovar ambos os métodos credit_card e pix_auto ativos (checkout: ${checkoutMethods.join(', ')}; oferta: ${offerMethods.join(', ')}).`,
+        blockedMessage: `Provedor Cakto possui método não autorizado habilitado (${unexpectedMethods.join(', ')}). Apenas credit_card e pix_auto são permitidos; regularize ou desabilite na conta Cakto.`,
         commercialEnabled,
         methodsVerified,
         allowedMethods: ALLOWED_CAKTO_METHODS,
         prohibitedMethods: PROHIBITED_PAYMENT_METHODS,
         detectedProviderMethods: detectedMethods,
+        productMethods,
+        offerMethods,
+        checkoutMethods,
+        providerPriceCents,
+        offerStatus,
+        productStatus,
+        checkoutStatus,
+        trialDays,
+      };
+    }
+
+    const missingEvidence: string[] = [];
+    if (!configSafety.hasValidConfigObject) {
+      missingEvidence.push(
+        configSafety.configIncompleteReason || 'checkout.config (estrutura oficial do checkout ausente)'
+      );
+    }
+    const productHasAllAllowed = ALLOWED_CAKTO_METHODS.every((m) => productMethods.includes(m));
+    const offerHasAllAllowed = ALLOWED_CAKTO_METHODS.every((m) => offerMethods.includes(m));
+    const checkoutHasAllAllowed = ALLOWED_CAKTO_METHODS.every((m) => checkoutMethods.includes(m));
+
+    if (!productHasAllAllowed) {
+      missingEvidence.push(
+        `product.paymentMethods (produto ${plan.productId} não comprova ambos credit_card e pix_auto ativos; detectado: ${productMethods.join(', ') || 'nenhum'})`
+      );
+    }
+    if (!offerHasAllAllowed) {
+      missingEvidence.push(
+        `offer.paymentMethods (oferta ${plan.offerId} não comprova ambos credit_card e pix_auto ativos; detectado: ${offerMethods.join(', ') || 'nenhum'})`
+      );
+    }
+    if (!checkoutHasAllAllowed) {
+      missingEvidence.push(
+        `checkout.paymentMethods (endpoint de checkout ${plan.checkoutId} retornou principalmente layout visual em config e não comprova métodos financeiros processáveis; detectado: ${checkoutMethods.join(', ') || 'nenhum'})`
+      );
+    }
+
+    if (missingEvidence.length > 0) {
+      return {
+        ready: false,
+        blockedReasonCode: 'CAKTO_CHECKOUT_COMMERCIAL_BLOCKED',
+        blockedMessage: `Evidências financeiras insuficientes na API Cakto para liberar checkout com segurança. Informações ausentes: ${missingEvidence.join('; ')}.`,
+        commercialEnabled,
+        methodsVerified,
+        allowedMethods: ALLOWED_CAKTO_METHODS,
+        prohibitedMethods: PROHIBITED_PAYMENT_METHODS,
+        detectedProviderMethods: detectedMethods,
+        productMethods,
+        offerMethods,
+        checkoutMethods,
+        missingEvidence,
+        providerPriceCents,
         offerStatus,
         productStatus,
         checkoutStatus,
@@ -365,6 +444,11 @@ export class CaktoPaymentProvider implements PaymentProvider {
       allowedMethods: ALLOWED_CAKTO_METHODS,
       prohibitedMethods: PROHIBITED_PAYMENT_METHODS,
       detectedProviderMethods: detectedMethods,
+      productMethods,
+      offerMethods,
+      checkoutMethods,
+      missingEvidence: [],
+      providerPriceCents,
       offerStatus,
       productStatus,
       checkoutStatus,
@@ -392,13 +476,16 @@ export class CaktoPaymentProvider implements PaymentProvider {
       };
     }
 
-    const readiness = await this.getCommercialReadiness();
+    const readiness = input.verifiedReadiness?.ready
+      ? input.verifiedReadiness
+      : await this.getCommercialReadiness();
     if (!readiness.ready) {
       return {
         success: false,
         blocked: true,
         errorCode: readiness.blockedReasonCode || 'CAKTO_CHECKOUT_COMMERCIAL_BLOCKED',
         error: readiness.blockedMessage || 'Checkout comercialmente bloqueado até verificação na Cakto.',
+        missingEvidence: readiness.missingEvidence,
         attemptId: input.attemptId,
         provider: this.id,
         productId: plan.productId,
