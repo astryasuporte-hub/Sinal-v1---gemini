@@ -2,7 +2,7 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * FatosBR Payments V1 — Contratos e Tipos Canônicos de Pagamento e Assinatura
+ * FatosBR Payments V1.1 — Contratos e Tipos Canônicos de Pagamento e Assinatura
  */
 
 import type { AllowedCaktoPaymentMethod } from '../plans.js';
@@ -14,6 +14,8 @@ export type CanonicalSubscriptionStatus =
   | 'RENEWAL_PENDING'
   | 'PAST_DUE'
   | 'CANCELED'
+  | 'INCOMPLETE'
+  | 'SUSPENDED'
   | 'EXPIRED'
   | 'PAYMENT_REFUSED';
 
@@ -45,6 +47,8 @@ export interface CheckoutCommercialReadiness {
   detectedProviderMethods?: string[];
   offerStatus?: string;
   productStatus?: string;
+  checkoutStatus?: string;
+  trialDays?: number;
 }
 
 export interface CheckoutSessionResult {
@@ -64,20 +68,26 @@ export interface CheckoutSessionResult {
   expiresAt?: string;
 }
 
+export type CanonicalWebhookAction =
+  | 'ACTIVATE'
+  | 'RENEW'
+  | 'RECOVER'
+  | 'SUBSCRIPTION_CREATED'
+  | 'PAST_DUE'
+  | 'REFUSED'
+  | 'CANCEL'
+  | 'EXPIRE'
+  | 'REFUND_REQUESTED'
+  | 'REFUND'
+  | 'CHARGEBACK'
+  | 'PENDING_PAYMENT'
+  | 'IGNORE';
+
 export interface NormalizedPaymentWebhookEvent {
   provider: PaymentProviderId;
   providerEventId: string;
   eventType: string;
-  canonicalAction:
-    | 'ACTIVATE'
-    | 'RENEW'
-    | 'PAST_DUE'
-    | 'REFUSED'
-    | 'CANCEL'
-    | 'EXPIRE'
-    | 'REFUND'
-    | 'PENDING'
-    | 'IGNORE';
+  canonicalAction: CanonicalWebhookAction;
   providerOrderId?: string;
   providerSubscriptionId?: string;
   attemptId?: string;
@@ -90,6 +100,11 @@ export interface NormalizedPaymentWebhookEvent {
   amountCents?: number;
   currency: string;
   occurredAt: string;
+  paidAt?: string;
+  periodStart?: string;
+  periodEnd?: string;
+  nextBillingAt?: string;
+  eventHash?: string;
   rawPayload: Record<string, any>;
 }
 
@@ -110,8 +125,11 @@ export interface ProviderReconcileOrder {
   paymentMethod: string;
   amountCents: number;
   currency: string;
-  status: 'paid' | 'pending' | 'refused' | 'refunded' | 'canceled' | 'expired' | 'unknown';
+  status: 'paid' | 'pending' | 'refused' | 'refunded' | 'chargeback' | 'canceled' | 'expired' | 'past_due' | 'unknown';
   paidAt?: string;
+  periodStart?: string;
+  periodEnd?: string;
+  nextBillingAt?: string;
 }
 
 export interface UserSubscriptionView {
@@ -125,7 +143,10 @@ export interface UserSubscriptionView {
   trialTotalDays: number;
   trialStartsAt: string;
   trialEndsAt: string;
+  currentPeriodStart?: string | null;
   currentPeriodEnd: string;
+  nextBillingAt?: string | null;
+  cancelAtPeriodEnd?: boolean;
   canceledAt?: string | null;
   graceUntil?: string | null;
   gateway: string;

@@ -7,7 +7,7 @@
 
 import { sendJson, setCorsHeaders } from '../../common.js';
 import { getProPlanConfig } from '../../plans.js';
-import { subscriptionService } from '../../payments/SubscriptionService.js';
+import { subscriptionService, SubscriptionVerificationUnavailableError } from '../../payments/SubscriptionService.js';
 import { authenticatePaymentUser } from './authHelper.js';
 
 export default async function handler(req: any, res: any) {
@@ -26,33 +26,45 @@ export default async function handler(req: any, res: any) {
     return sendJson(res, auth.statusCode, { success: false, error: auth.error });
   }
 
-  const subscription = await subscriptionService.getUserSubscriptionStatus({
-    userId: auth.user.userId,
-    userEmail: auth.user.email,
-    userCreatedAt: auth.user.createdAt,
-    isAdmin: auth.user.isAdmin,
-  });
+  try {
+    const subscription = await subscriptionService.getUserSubscriptionStatus({
+      userId: auth.user.userId,
+      userEmail: auth.user.email,
+      userCreatedAt: auth.user.createdAt,
+      isAdmin: auth.user.isAdmin,
+    });
 
-  const plan = getProPlanConfig();
+    const plan = getProPlanConfig();
 
-  return sendJson(res, 200, {
-    success: true,
-    subscription,
-    plan: {
-      id: plan.id,
-      name: plan.name,
-      amountCents: plan.amountCents,
-      amountFormatted: plan.amountFormatted,
-      currency: plan.currency,
-      periodDays: plan.periodDays,
-      saasTrialDays: plan.saasTrialDays,
-      providerTrialDays: plan.providerTrialDays,
-      provider: plan.provider,
-      productId: plan.productId,
-      offerId: plan.offerId,
-      checkoutId: plan.checkoutId,
-      allowedMethods: plan.allowedMethods,
-      prohibitedMethods: plan.prohibitedMethods,
-    },
-  });
+    return sendJson(res, 200, {
+      success: true,
+      subscription,
+      plan: {
+        id: plan.id,
+        name: plan.name,
+        amountCents: plan.amountCents,
+        amountFormatted: plan.amountFormatted,
+        currency: plan.currency,
+        periodDays: plan.periodDays,
+        saasTrialDays: plan.saasTrialDays,
+        providerTrialDays: plan.providerTrialDays,
+        provider: plan.provider,
+        productId: plan.productId,
+        offerId: plan.offerId,
+        checkoutId: plan.checkoutId,
+        allowedMethods: plan.allowedMethods,
+        prohibitedMethods: plan.prohibitedMethods,
+      },
+    });
+  } catch (err: any) {
+    const isUnavailable =
+      err instanceof SubscriptionVerificationUnavailableError ||
+      err?.code === 'SUBSCRIPTION_VERIFICATION_UNAVAILABLE' ||
+      String(err?.message || '').includes('POSTGRES_UNAVAILABLE');
+    return sendJson(res, isUnavailable ? 503 : 500, {
+      success: false,
+      errorCode: isUnavailable ? 'SUBSCRIPTION_VERIFICATION_UNAVAILABLE' : 'SUBSCRIPTION_STATUS_ERROR',
+      error: err?.message || 'Não foi possível verificar o status da assinatura.',
+    });
+  }
 }

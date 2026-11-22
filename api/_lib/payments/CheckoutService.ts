@@ -57,7 +57,7 @@ export class CheckoutService {
     const currentSub = await store.findSubscriptionByUserId(params.userId).catch(() => null);
     if (
       currentSub &&
-      String(currentSub.status || '').toLowerCase() === 'active' &&
+      String(currentSub.status || '').toUpperCase() === 'ACTIVE' &&
       (!currentSub.current_period_end || Date.parse(currentSub.current_period_end) > Date.now())
     ) {
       return {

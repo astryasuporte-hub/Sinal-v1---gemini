@@ -101,6 +101,8 @@ export type SubscriptionStatus =
   | 'RENEWAL_PENDING'
   | 'PAST_DUE'
   | 'CANCELED'
+  | 'INCOMPLETE'
+  | 'SUSPENDED'
   | 'EXPIRED'
   | 'PAYMENT_REFUSED';
 
@@ -115,7 +117,10 @@ export interface UserSubscription {
   trialTotalDays?: number;
   trialStartsAt?: string;
   trialEndsAt: string;
+  currentPeriodStart?: string | null;
   currentPeriodEnd: string;
+  nextBillingAt?: string | null;
+  cancelAtPeriodEnd?: boolean;
   canceledAt?: string | null;
   graceUntil?: string | null;
   gateway: string;

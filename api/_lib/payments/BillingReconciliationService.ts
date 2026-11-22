@@ -2,14 +2,14 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * BillingReconciliationService — Reconciliação Ativa de Assinaturas e Tentativas Abertas
+ * BillingReconciliationService — Reconciliação Ativa de Assinaturas e Tentativas Abertas (Payments V1.1)
  */
 
-import { isProhibitedPaymentMethod, resolvePlanPrice } from '../plans.js';
+import { isAllowedPaymentMethod, isProhibitedPaymentMethod, resolvePlanPrice } from '../plans.js';
 import { BillingEventProcessor, billingEventProcessor } from './BillingEventProcessor.js';
 import { getActivePaymentProviderId, getPaymentProvider } from './PaymentProviderRegistry.js';
 import { getPaymentsPersistence, PaymentsPersistenceAdapter } from './PaymentsStore.js';
-import type { NormalizedPaymentWebhookEvent } from './types.js';
+import type { CanonicalWebhookAction, NormalizedPaymentWebhookEvent } from './types.js';
 
 export interface ReconciliationResult {
   success: boolean;
@@ -39,8 +39,8 @@ export class BillingReconciliationService {
     const provider = getPaymentProvider(getActivePaymentProviderId());
     const plan = resolvePlanPrice('pro');
 
-    const openAttempts = await store.listOpenAttemptsForUser(params.userId).catch(() => []);
-    const subRow = await store.findSubscriptionByUserId(params.userId).catch(() => null);
+    const openAttempts = await store.listOpenAttemptsForUser(params.userId);
+    const subRow = await store.findSubscriptionByUserId(params.userId);
 
     const searchQueries: Array<{
       attemptId?: string;
@@ -50,10 +50,17 @@ export class BillingReconciliationService {
     }> = [];
 
     if (params.providerOrderId) {
-      searchQueries.push({ providerOrderId: params.providerOrderId });
+      searchQueries.push({
+        providerOrderId: params.providerOrderId,
+        providerSubscriptionId: subRow?.provider_subscription_id || undefined,
+      });
     }
     for (const attempt of openAttempts.slice(0, 3)) {
-      searchQueries.push({ attemptId: attempt.id, providerOrderId: attempt.provider_order_id || undefined });
+      searchQueries.push({
+        attemptId: attempt.id,
+        providerOrderId: attempt.provider_order_id || undefined,
+        providerSubscriptionId: attempt.provider_subscription_id || subRow?.provider_subscription_id || undefined,
+      });
     }
     if (searchQueries.length === 0 && (subRow?.provider_subscription_id || (params.userEmail && params.userEmail.includes('@')))) {
       searchQueries.push({
@@ -61,6 +68,9 @@ export class BillingReconciliationService {
         customerEmail: params.userEmail || undefined,
       });
     }
+
+    const openAttemptIds = new Set(openAttempts.map((a) => a.id));
+    const normalizedAuthEmail = params.userEmail ? params.userEmail.trim().toLowerCase() : null;
 
     const seenOrders = new Set<string>();
     const details: ReconciliationResult['details'] = [];
@@ -73,13 +83,49 @@ export class BillingReconciliationService {
         if (!order.providerOrderId || seenOrders.has(order.providerOrderId)) continue;
         seenOrders.add(order.providerOrderId);
 
-        if (isProhibitedPaymentMethod(order.paymentMethod)) {
+        // Verifica vínculo estrito do pedido com o usuário autenticado (mesmo quando providerOrderId é informado)
+        const matchesAttempt = Boolean(order.attemptId && openAttemptIds.has(order.attemptId));
+        const matchesSub = Boolean(
+          order.providerSubscriptionId &&
+            subRow?.provider_subscription_id &&
+            order.providerSubscriptionId === subRow.provider_subscription_id
+        );
+        const matchesEmail = Boolean(
+          normalizedAuthEmail &&
+            order.customerEmail &&
+            order.customerEmail.trim().toLowerCase() === normalizedAuthEmail
+        );
+        if (!matchesAttempt && !matchesSub && !matchesEmail) {
+          continue;
+        }
+
+        if (isProhibitedPaymentMethod(order.paymentMethod) || (order.status === 'paid' && !isAllowedPaymentMethod(order.paymentMethod))) {
           rejectedProhibitedCount += 1;
           details.push({
             providerOrderId: order.providerOrderId,
             status: order.status,
             paymentMethod: order.paymentMethod,
             outcome: 'REJECTED_PROHIBITED_METHOD',
+          });
+          continue;
+        }
+
+        if (order.productId && order.productId !== plan.productId) {
+          details.push({
+            providerOrderId: order.providerOrderId,
+            status: order.status,
+            paymentMethod: order.paymentMethod,
+            outcome: 'REJECTED_PRODUCT_MISMATCH',
+          });
+          continue;
+        }
+
+        if (order.offerId && order.offerId !== plan.offerId) {
+          details.push({
+            providerOrderId: order.providerOrderId,
+            status: order.status,
+            paymentMethod: order.paymentMethod,
+            outcome: 'REJECTED_OFFER_MISMATCH',
           });
           continue;
         }
@@ -94,11 +140,15 @@ export class BillingReconciliationService {
           continue;
         }
 
-        const canonicalAction: NormalizedPaymentWebhookEvent['canonicalAction'] =
+        const canonicalAction: CanonicalWebhookAction =
           order.status === 'paid'
             ? 'ACTIVATE'
+            : order.status === 'chargeback'
+            ? 'CHARGEBACK'
             : order.status === 'refunded'
             ? 'REFUND'
+            : order.status === 'past_due'
+            ? 'PAST_DUE'
             : order.status === 'canceled'
             ? 'CANCEL'
             : order.status === 'refused'
@@ -129,14 +179,22 @@ export class BillingReconciliationService {
           customerEmail: order.customerEmail || params.userEmail || undefined,
           productId: order.productId || plan.productId,
           offerId: order.offerId || plan.offerId,
+          checkoutId: plan.checkoutId,
           paymentMethod: order.paymentMethod,
           amountCents: order.amountCents,
           currency: order.currency,
           occurredAt: order.paidAt || new Date().toISOString(),
+          paidAt: order.paidAt,
+          periodStart: order.periodStart,
+          periodEnd: order.periodEnd,
+          nextBillingAt: order.nextBillingAt,
           rawPayload: { source: 'reconciliation', order },
         };
 
-        const outcome = await this.processor.processEvent(syntheticEvent, { signatureValid: true });
+        const outcome = await this.processor.processEvent(syntheticEvent, {
+          signatureValid: true,
+          trustedUserId: params.userId,
+        });
         if (outcome.success) reconciledCount += 1;
         details.push({
           providerOrderId: order.providerOrderId,

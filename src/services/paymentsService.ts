@@ -46,6 +46,7 @@ export interface PaymentsStatusResponse {
     checkoutId: string;
     allowedMethods: AllowedPaymentMethod[];
   };
+  errorCode?: string;
   error?: string;
 }
 
@@ -109,7 +110,11 @@ export const paymentsService = {
       const res = await fetch('/api/payments/status', { method: 'GET', headers });
       const data = await res.json();
       if (!res.ok) {
-        return { success: false, error: data?.error || `HTTP ${res.status}` };
+        return {
+          success: false,
+          errorCode: data?.errorCode || `HTTP_${res.status}`,
+          error: data?.error || `HTTP ${res.status}`,
+        };
       }
       return data;
     } catch (err: any) {

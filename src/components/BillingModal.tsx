@@ -69,6 +69,14 @@ export const BillingModal: React.FC<BillingModalProps> = ({
       if (statusRes.success && statusRes.subscription) {
         setLiveSubscription(statusRes.subscription);
         onUpgradeApproved(statusRes.subscription);
+      } else if (!statusRes.success && statusRes.error) {
+        setFeedback({
+          type: 'error',
+          message:
+            statusRes.errorCode === 'SUBSCRIPTION_VERIFICATION_UNAVAILABLE'
+              ? 'Não foi possível verificar sua assinatura no servidor no momento. Tente novamente em instantes.'
+              : statusRes.error,
+        });
       }
       if (historyRes.success) {
         setHistory(historyRes.history);
@@ -103,7 +111,10 @@ export const BillingModal: React.FC<BillingModalProps> = ({
   const isTrialActive = liveSubscription.status === 'TRIAL_ACTIVE';
   const isPastDue = liveSubscription.status === 'PAST_DUE';
   const isCanceled = liveSubscription.status === 'CANCELED';
-  const isRefused = liveSubscription.status === 'PAYMENT_REFUSED';
+  const isCanceledWithAccess = isCanceled && Boolean(liveSubscription.hasProAccess);
+  const isRefused = liveSubscription.status === 'PAYMENT_REFUSED' || liveSubscription.status === 'INCOMPLETE';
+  const isSuspendedOrExpired =
+    liveSubscription.status === 'SUSPENDED' || liveSubscription.status === 'EXPIRED';
 
   const readiness = liveSubscription.commercialReadiness;
   const isCheckoutBlocked = readiness ? !readiness.ready : false;
@@ -217,8 +228,15 @@ export const BillingModal: React.FC<BillingModalProps> = ({
     }
     if (isCanceled) {
       return (
-        <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-zinc-800 text-zinc-400 border border-zinc-700">
-          CANCELADA
+        <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-zinc-800 text-zinc-300 border border-zinc-700">
+          {isCanceledWithAccess ? 'CANCELADA (ACESSO ATIVO)' : 'CANCELADA'}
+        </span>
+      );
+    }
+    if (isSuspendedOrExpired) {
+      return (
+        <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-red-500/20 text-red-400 border border-red-500/30">
+          {liveSubscription.status === 'SUSPENDED' ? 'SUSPENSA' : 'EXPIRADA'}
         </span>
       );
     }
@@ -297,7 +315,9 @@ export const BillingModal: React.FC<BillingModalProps> = ({
                 {isAdmin
                   ? 'Isenção Administrativa'
                   : isProActive
-                  ? `Renovação: ${liveSubscription.currentPeriodEnd}`
+                  ? `Renovação: ${liveSubscription.nextBillingAt || liveSubscription.currentPeriodEnd}`
+                  : isCanceledWithAccess
+                  ? `Cancelada · Acesso até ${liveSubscription.currentPeriodEnd}`
                   : isTrialActive
                   ? `Restam ${trialDaysLeft} de ${totalTrialDays} dias`
                   : liveSubscription.planName}
@@ -313,6 +333,8 @@ export const BillingModal: React.FC<BillingModalProps> = ({
                   ? 'Conta administrativa com acesso integral e sem faturamento mensal.'
                   : isProActive
                   ? 'Sua assinatura FatosBR PRO (R$ 34,90/mês) está ativa com acesso irrestrito.'
+                  : isCanceledWithAccess
+                  ? `Renovação cancelada. Seu acesso FatosBR PRO permanece ativo até ${liveSubscription.currentPeriodEnd}.`
                   : isTrialActive
                   ? '7 dias grátis sem exigir cartão de crédito · Acesso completo ao monitoramento executivo e briefings.'
                   : 'Assine o FatosBR PRO (R$ 34,90/mês) para manter acesso contínuo às análises e briefings diários.'}
@@ -325,20 +347,23 @@ export const BillingModal: React.FC<BillingModalProps> = ({
                   <div
                     className="h-full bg-white transition-all duration-500 rounded-full"
                     style={{
-                      width: isProActive
-                        ? '100%'
-                        : `${Math.min(100, Math.max(8, (usedTrialDays / totalTrialDays) * 100))}%`,
+                      width:
+                        isProActive || isCanceledWithAccess
+                          ? '100%'
+                          : `${Math.min(100, Math.max(8, (usedTrialDays / totalTrialDays) * 100))}%`,
                     }}
                   />
                 </div>
                 <div className="flex items-center justify-between text-[11px] text-zinc-400 font-mono">
                   <span>
-                    {isProActive
-                      ? 'Ciclo mensal de 30 dias em andamento'
+                    {isProActive || isCanceledWithAccess
+                      ? isCanceledWithAccess
+                        ? 'Ciclo pago em encerramento'
+                        : 'Ciclo mensal de 30 dias em andamento'
                       : `${usedTrialDays} de ${totalTrialDays} dias de teste utilizados`}
                   </span>
                   <span>
-                    {isProActive
+                    {isProActive || isCanceledWithAccess
                       ? `Válido até ${liveSubscription.currentPeriodEnd}`
                       : `Término do trial: ${liveSubscription.trialEndsAt}`}
                   </span>

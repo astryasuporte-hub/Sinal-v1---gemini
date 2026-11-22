@@ -53,13 +53,15 @@ export const FinancialDashboard: React.FC<FinancialDashboardProps> = ({
 
   const isTrial =
     !isSuperAdmin &&
-    (subscription.status === 'TRIAL_ACTIVE' ||
-      subscription.planId === 'trial' ||
-      subscription.trialDaysLeft > 0);
+    subscription.status === 'TRIAL_ACTIVE';
 
   const baseAmount = 34.9;
   const baseLabel = `R$ ${baseAmount.toFixed(2).replace('.', ',')}`;
-  const isPaidActive = !isSuperAdmin && !isTrial && subscription.status === 'ACTIVE';
+  const isPaidActive =
+    !isSuperAdmin &&
+    !isTrial &&
+    (subscription.status === 'ACTIVE' ||
+      (subscription.status === 'CANCELED' && Boolean(subscription.hasProAccess)));
 
   const monthlyData: MonthlyExpense[] = [
     {

@@ -145,7 +145,7 @@ export async function checkUserActiveSubscription(userId: string | null, userEma
       const res = await executeSql(
         `SELECT id FROM public.subscriptions 
          WHERE user_id = $1 
-           AND status = 'active'
+           AND UPPER(status) = 'ACTIVE'
            AND (current_period_end IS NULL OR current_period_end > NOW())
          LIMIT 1`,
         [userId]
@@ -158,7 +158,7 @@ export async function checkUserActiveSubscription(userId: string | null, userEma
         `SELECT s.id FROM public.subscriptions s
          JOIN auth.users u ON u.id = s.user_id
          WHERE LOWER(TRIM(u.email)) = LOWER(TRIM($1)) 
-           AND s.status = 'active'
+           AND UPPER(s.status) = 'ACTIVE'
            AND (s.current_period_end IS NULL OR s.current_period_end > NOW())
          LIMIT 1`,
         [userEmail]
@@ -199,8 +199,8 @@ export async function getActivePendingChargeForUser(userId: string | null, userE
         created_at,
         updated_at
       FROM internal.billing_payments
-      WHERE status IN ('PENDING', 'PROCESSING')
-        AND request_state = 'COMPLETED'
+      WHERE status = 'PENDING'
+        AND request_state = 'READY'
         AND provider_payment_id NOT LIKE 'reserved_%'
     `;
     const params: any[] = [];
@@ -258,9 +258,10 @@ export async function cancelOrExpirePendingCharge(chargeId: string, reason = 'EX
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(chargeId);
     let queryText = `
       UPDATE internal.billing_payments
-      SET status = $1,
+      SET status = 'CANCELLED',
           request_state = 'FAILED',
           cancelled_at = NOW(),
+          checkout_data = COALESCE(checkout_data, '{}'::jsonb) || jsonb_build_object('raw_status', $1::text),
           updated_at = NOW()
       WHERE 
     `;
@@ -269,7 +270,7 @@ export async function cancelOrExpirePendingCharge(chargeId: string, reason = 'EX
     } else {
       queryText += ` provider_payment_id = $2`;
     }
-    queryText += ` AND status IN ('PENDING', 'PROCESSING')`;
+    queryText += ` AND status = 'PENDING'`;
 
     await executeSql(queryText, [reason, chargeId]);
     return true;
@@ -339,11 +340,11 @@ export async function reserveCheckoutAttempt(params: {
       updatedAt: row.updated_at
     };
 
-    if (row.status === 'PAID') {
+    if (row.status === 'APPROVED' || row.status === 'PAID') {
       return { id: row.id, alreadyCompleted: true, charge: mapped };
     }
 
-    if (row.status === 'PENDING' && row.request_state === 'COMPLETED' && row.provider_payment_id && !row.provider_payment_id.startsWith('reserved_')) {
+    if (row.status === 'PENDING' && row.request_state === 'READY' && row.provider_payment_id && !row.provider_payment_id.startsWith('reserved_')) {
       return { id: row.id, alreadyCompleted: true, charge: mapped };
     }
 
@@ -385,7 +386,7 @@ export async function reserveCheckoutAttempt(params: {
       $4,
       $5,
       'PENDING',
-      'SUBSCRIPTION',
+      'INITIAL',
       'CREATING',
       $6::jsonb,
       NOW(),
@@ -451,7 +452,7 @@ export async function finalizeReservedCheckoutAttempt(params: {
         amount = $2,
         currency = $3,
         status = $4,
-        request_state = 'COMPLETED',
+        request_state = 'READY',
         expiration_date = $5,
         checkout_data = checkout_data || $6::jsonb,
         last_synced_at = NOW(),
@@ -460,11 +461,14 @@ export async function finalizeReservedCheckoutAttempt(params: {
     RETURNING id, provider_payment_id, user_id, amount, currency, status, checkout_data, expiration_date, created_at, updated_at
   `;
 
+  const rawPayStatus = String(params.gatewayCharge.status || 'PENDING').toUpperCase();
+  const canonicalPayStatus = rawPayStatus === 'PAID' || rawPayStatus === 'APPROVED' ? 'APPROVED' : rawPayStatus === 'FAILED' || rawPayStatus === 'CANCELED' || rawPayStatus === 'CANCELLED' ? 'CANCELLED' : rawPayStatus === 'REFUNDED' ? 'REFUNDED' : 'PENDING';
+
   const res = await executeSql(updateSql, [
     params.gatewayCharge.id,
     params.gatewayCharge.amount,
     params.gatewayCharge.currency || 'BRL',
-    params.gatewayCharge.status || 'PENDING',
+    canonicalPayStatus,
     params.gatewayCharge.expirationDate || null,
     updateData,
     params.reservationId
@@ -507,7 +511,7 @@ export async function failReservedCheckoutAttempt(reservationId: string, reason?
   try {
     const sql = `
       UPDATE internal.billing_payments
-      SET status = 'FAILED',
+      SET status = 'CANCELLED',
           request_state = 'FAILED',
           cancelled_at = NOW(),
           checkout_data = checkout_data || jsonb_build_object('failure_reason', $1::text, 'attempt_state', 'FAILED'),
@@ -735,8 +739,8 @@ export async function createOrReusePixCharge(params: {
         $3,
         'BRL',
         'PENDING',
-        'SUBSCRIPTION',
-        'PENDING',
+        'INITIAL',
+        'UNKNOWN',
         $4::jsonb,
         NOW(),
         NOW()

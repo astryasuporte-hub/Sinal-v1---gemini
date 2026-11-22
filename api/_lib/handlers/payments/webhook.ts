@@ -71,6 +71,16 @@ export default async function handler(req: any, res: any) {
   });
 
   if (!outcome.success) {
+    if (outcome.reconciliationRequired) {
+      return sendJson(res, 202, {
+        received: true,
+        processed: false,
+        reconciliationRequired: true,
+        eventId: validation.normalizedEvent.providerEventId,
+        errorCode: outcome.errorCode || 'RECONCILIATION_REQUIRED',
+        error: outcome.error,
+      });
+    }
     return sendJson(res, 422, {
       received: true,
       processed: false,

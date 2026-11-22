@@ -2,7 +2,7 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * Interface agnóstica de provedor de pagamentos do FatosBR (Payments V1).
+ * Interface agnóstica de provedor de pagamentos do FatosBR (Payments V1.1).
  */
 
 import type {
@@ -20,6 +20,7 @@ export interface WebhookVerificationOutcome {
   reason?: string;
   errorCode?: string;
   timestampIso?: string;
+  eventHash?: string;
 }
 
 export interface PaymentProvider {
@@ -28,7 +29,7 @@ export interface PaymentProvider {
 
   /**
    * Valida se o provedor está comercialmente liberado e com métodos verificados
-   * (ex: Cartão de Crédito + Pix Automático, nunca Pix avulso).
+   * (Cartão de Crédito + Pix Automático exclusivamente, nunca Pix avulso).
    */
   getCommercialReadiness(): Promise<CheckoutCommercialReadiness>;
 

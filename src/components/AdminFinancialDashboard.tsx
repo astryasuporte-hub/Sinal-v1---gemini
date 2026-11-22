@@ -168,12 +168,13 @@ export const AdminFinancialDashboard: React.FC<AdminFinancialDashboardProps> = (
   const transactions: FinancialTransaction[] = useMemo(() => {
     return users.map((u, idx) => {
       const isUserAdmin = u.isAdmin || u.email.toLowerCase().includes('astrya') || u.email.toLowerCase().includes('yleao');
-      const isTrial = !isUserAdmin && (u.planName.includes('TRIAL') || u.subscriptionStatus === 'TRIAL_ACTIVE');
-      const isPaid = !isUserAdmin && !isTrial && (u.planName.includes('PRO') || u.subscriptionStatus === 'ACTIVE');
+      const st = String(u.subscriptionStatus || '').toUpperCase();
+      const isTrial = !isUserAdmin && (st === 'TRIAL_ACTIVE' || (!st && u.planName.includes('TRIAL')));
+      const isPaid = !isUserAdmin && !isTrial && (st === 'ACTIVE' || (!st && u.planName.includes('PRO')));
 
-      let status: 'paid' | 'pending' | 'trial_free' | 'refunded' = 'trial_free';
+      let status: 'paid' | 'pending' | 'trial_free' | 'refunded' = isTrial ? 'trial_free' : 'pending';
       let amount = 0;
-      let plan = 'FatosBR Trial 7 Dias';
+      let plan = isTrial ? 'FatosBR Trial 7 Dias' : 'Sem assinatura ativa';
       let paymentMethod: FinancialTransaction['paymentMethod'] = 'Trial 7D';
 
       if (isUserAdmin) {
@@ -190,6 +191,11 @@ export const AdminFinancialDashboard: React.FC<AdminFinancialDashboardProps> = (
         status = 'paid';
         amount = PRO_TICKET_REAIS;
         plan = 'FatosBR PRO Mensal';
+        paymentMethod = 'Cartão de Crédito';
+      } else if (st === 'CANCELED' || st === 'SUSPENDED' || st === 'TRIAL_EXPIRED' || st === 'INCOMPLETE') {
+        status = st === 'SUSPENDED' ? 'refunded' : 'pending';
+        amount = 0.0;
+        plan = `FatosBR PRO (${st})`;
         paymentMethod = 'Cartão de Crédito';
       }
 

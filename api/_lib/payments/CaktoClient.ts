@@ -179,6 +179,10 @@ export class CaktoClient {
     return this.request(`/offers/${encodeURIComponent(offerId)}/`, { method: 'GET' });
   }
 
+  async getCheckout(checkoutId: string): Promise<CaktoApiResponse> {
+    return this.request(`/checkouts/${encodeURIComponent(checkoutId)}/`, { method: 'GET' });
+  }
+
   async getOrder(orderId: string): Promise<CaktoApiResponse> {
     return this.request(`/orders/${encodeURIComponent(orderId)}/`, { method: 'GET' });
   }

@@ -25,9 +25,18 @@ export default async function handler(req: any, res: any) {
     return sendJson(res, auth.statusCode, { success: false, error: auth.error });
   }
 
-  const history = await subscriptionService.getUserBillingHistory(auth.user.userId).catch(() => []);
-  return sendJson(res, 200, {
-    success: true,
-    history,
-  });
+  try {
+    const history = await subscriptionService.getUserBillingHistory(auth.user.userId);
+    return sendJson(res, 200, {
+      success: true,
+      history,
+    });
+  } catch (err: any) {
+    return sendJson(res, 503, {
+      success: false,
+      errorCode: 'BILLING_HISTORY_UNAVAILABLE',
+      history: [],
+      error: err?.message || 'Não foi possível carregar o histórico financeiro.',
+    });
+  }
 }
