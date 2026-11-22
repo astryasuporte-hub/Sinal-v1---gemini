@@ -180,6 +180,18 @@ class InMemoryPaymentsStore implements PaymentsPersistenceAdapter {
       created_at: now,
       updated_at: now,
     };
+    for (const existing of this.attempts.values()) {
+      if (
+        params.idempotencyKey &&
+        existing.user_id === params.userId &&
+        existing.provider === params.provider &&
+        existing.idempotency_key === params.idempotencyKey
+      ) {
+        const err: any = new Error('duplicate key value violates unique constraint');
+        err.code = '23505';
+        throw err;
+      }
+    }
     this.attempts.set(params.id, row);
     return row;
   }
@@ -188,9 +200,9 @@ class InMemoryPaymentsStore implements PaymentsPersistenceAdapter {
     return this.attempts.get(attemptId) || null;
   }
 
-  async findBillingAttemptByIdempotencyKey(userId: string, key: string): Promise<DbAttemptRow | null> {
+  async findBillingAttemptByIdempotencyKey(userId: string, key: string, provider = 'cakto'): Promise<DbAttemptRow | null> {
     for (const a of this.attempts.values()) {
-      if (a.user_id === userId && a.idempotency_key === key) return a;
+      if (a.user_id === userId && a.provider === provider && a.idempotency_key === key) return a;
     }
     return null;
   }

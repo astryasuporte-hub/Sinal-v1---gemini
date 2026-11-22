@@ -146,15 +146,27 @@ class MemoryPaymentsStore implements PaymentsPersistenceAdapter {
       created_at: now,
       updated_at: now,
     };
+    for (const existing of this.attempts.values()) {
+      if (
+        params.idempotencyKey &&
+        existing.user_id === params.userId &&
+        existing.provider === params.provider &&
+        existing.idempotency_key === params.idempotencyKey
+      ) {
+        const err: any = new Error('duplicate key value violates unique constraint');
+        err.code = '23505';
+        throw err;
+      }
+    }
     this.attempts.set(params.id, row);
     return row;
   }
   async getBillingAttemptById(id: string) {
     return this.attempts.get(id) || null;
   }
-  async findBillingAttemptByIdempotencyKey(userId: string, key: string) {
+  async findBillingAttemptByIdempotencyKey(userId: string, key: string, provider = 'cakto') {
     for (const a of this.attempts.values()) {
-      if (a.user_id === userId && a.idempotency_key === key) return a;
+      if (a.user_id === userId && a.provider === provider && a.idempotency_key === key) return a;
     }
     return null;
   }
@@ -578,6 +590,56 @@ async function run() {
         replayCheckout.result.attemptId === attemptId &&
         store.attempts.size === attemptsBeforeReplay,
       'Replay de idempotencyKey no CheckoutService reutiliza a mesma tentativa sem criar duplicata'
+    );
+
+    // Usuário diferente com MESMA idempotencyKey cria sua própria tentativa isolada
+    const otherUserId = '22222222-2222-4222-8222-222222222299';
+    const otherUserSameKey = await checkoutService.initiateCheckout({
+      userId: otherUserId,
+      userEmail: 'outro@fatosbr.com.br',
+      planId: 'pro',
+      requestedMethod: 'credit_card',
+      idempotencyKey: 'chk_idemp_2026_01',
+    });
+    assert(
+      otherUserSameKey.httpStatus === 200 &&
+        Boolean(otherUserSameKey.result.attemptId) &&
+        otherUserSameKey.result.attemptId !== attemptId,
+      'Usuários diferentes com a mesma idempotencyKey não colidem entre si'
+    );
+
+    // Tentativa expirada não libera checkoutUrl
+    const expiredAttId = crypto.randomUUID();
+    store.attempts.set(expiredAttId, {
+      id: expiredAttId,
+      user_id: otherUserId,
+      provider: 'cakto',
+      plan_id: 'pro',
+      product_id: CAKTO_OFFICIAL_PRODUCT_ID,
+      offer_id: CAKTO_OFFICIAL_OFFER_ID,
+      checkout_id: CAKTO_OFFICIAL_CHECKOUT_ID,
+      amount_cents: 3490,
+      currency: 'BRL',
+      status: 'REDIRECTED',
+      checkout_url: 'https://pay.cakto.com.br/vjw92gx?expired=1',
+      idempotency_key: 'chk_expired_unit_01',
+      expires_at: new Date(Date.now() - 60_000).toISOString(),
+      created_at: new Date(Date.now() - 7_200_000).toISOString(),
+      updated_at: new Date(Date.now() - 7_200_000).toISOString(),
+    });
+    const expiredAttemptOut = await checkoutService.initiateCheckout({
+      userId: otherUserId,
+      userEmail: 'outro@fatosbr.com.br',
+      planId: 'pro',
+      requestedMethod: 'credit_card',
+      idempotencyKey: 'chk_expired_unit_01',
+    });
+    assert(
+      expiredAttemptOut.httpStatus === 409 &&
+        expiredAttemptOut.result.errorCode === 'ATTEMPT_EXPIRED' &&
+        !expiredAttemptOut.result.checkoutUrl &&
+        store.attempts.get(expiredAttId)?.status === 'EXPIRED',
+      'Tentativa expirada bloqueia liberação da checkoutUrl e retorna 409 ATTEMPT_EXPIRED'
     );
 
     // 4. Webhooks e Máquina de Estados Completa

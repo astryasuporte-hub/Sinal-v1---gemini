@@ -213,17 +213,19 @@ export class SubscriptionService {
 
     const nowIso = new Date().toISOString();
     const plan = resolvePlanPrice('pro');
+    const dbPlan = toDbSubscriptionPlan(row.plan || 'PRO');
+    const dbPlanId = dbPlan === 'PRO' ? 'pro' : 'trial';
     await store.upsertSubscription({
       userId,
-      plan: toDbSubscriptionPlan(row.plan || 'PRO'),
-      planId: row.plan_id || 'pro',
+      plan: dbPlan,
+      planId: dbPlanId,
       status: toDbSubscriptionStatus('CANCELED'),
-      provider: row.provider || 'cakto',
+      provider: row.provider ?? (dbPlan === 'PRO' ? 'cakto' : null),
       productId: row.product_id || plan.productId,
       offerId: row.offer_id || plan.offerId,
       checkoutId: row.checkout_id || plan.checkoutId,
       paymentMethod: row.payment_method || null,
-      amountCents: row.amount_cents || plan.amountCents,
+      amountCents: row.amount_cents ?? (dbPlan === 'PRO' ? plan.amountCents : null),
       currency: row.currency || 'BRL',
       providerSubscriptionId: row.provider_subscription_id || null,
       currentPeriodStart: row.current_period_start || null,

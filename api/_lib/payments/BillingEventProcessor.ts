@@ -190,20 +190,23 @@ export class BillingEventProcessor {
       let resultingDbStatus = existingSub?.status || 'unchanged';
       if (transition.nextSubStatus && transition.nextSubPlan) {
         const dbPlan = toDbSubscriptionPlan(transition.nextSubPlan);
+        const dbPlanId = dbPlan === 'PRO' ? 'pro' : 'trial';
+        const resolvedAmountCents =
+          dbPlan === 'PRO' ? (event.amountCents || plan.amountCents) : (existingSub?.amount_cents ?? null);
         const dbStatus = toDbSubscriptionStatus(transition.nextSubStatus);
         resultingDbStatus = dbStatus;
 
         await store.upsertSubscription({
           userId: targetUserId,
           plan: dbPlan,
-          planId: plan.id,
+          planId: dbPlanId,
           status: dbStatus,
           provider: event.provider,
           productId: event.productId || plan.productId,
           offerId: event.offerId || plan.offerId,
           checkoutId: event.checkoutId || plan.checkoutId,
           paymentMethod: event.paymentMethod !== 'unknown' ? event.paymentMethod : existingSub?.payment_method || null,
-          amountCents: event.amountCents || plan.amountCents,
+          amountCents: resolvedAmountCents,
           currency: event.currency || plan.currency,
           providerSubscriptionId: event.providerSubscriptionId || null,
           currentPeriodStart: transition.periodStart,

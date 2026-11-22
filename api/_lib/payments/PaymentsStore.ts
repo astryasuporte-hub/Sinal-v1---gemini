@@ -111,12 +111,12 @@ export interface PaymentsPersistenceAdapter {
     plan: string;
     planId: string;
     status: string;
-    provider: string;
+    provider: string | null;
     productId?: string | null;
     offerId?: string | null;
     checkoutId?: string | null;
     paymentMethod?: string | null;
-    amountCents: number;
+    amountCents: number | null;
     currency: string;
     providerSubscriptionId?: string | null;
     trialStartsAt?: string | null;
@@ -149,7 +149,7 @@ export interface PaymentsPersistenceAdapter {
   }): Promise<DbAttemptRow>;
   getBillingAttemptById(attemptId: string): Promise<DbAttemptRow | null>;
   findBillingAttemptByProviderOrderId?(providerOrderId: string): Promise<DbAttemptRow | null>;
-  findBillingAttemptByIdempotencyKey(userId: string, key: string): Promise<DbAttemptRow | null>;
+  findBillingAttemptByIdempotencyKey(userId: string, key: string, provider?: string): Promise<DbAttemptRow | null>;
   updateBillingAttempt(
     attemptId: string,
     patch: {
@@ -520,12 +520,12 @@ class PostgresPaymentsAdapter implements PaymentsPersistenceAdapter {
     plan: string;
     planId: string;
     status: string;
-    provider: string;
+    provider: string | null;
     productId?: string | null;
     offerId?: string | null;
     checkoutId?: string | null;
     paymentMethod?: string | null;
-    amountCents: number;
+    amountCents: number | null;
     currency: string;
     providerSubscriptionId?: string | null;
     trialStartsAt?: string | null;
@@ -542,6 +542,7 @@ class PostgresPaymentsAdapter implements PaymentsPersistenceAdapter {
   }): Promise<DbSubscriptionRow> {
     this.ensurePg();
     const canonicalPlan = toDbSubscriptionPlan(params.plan);
+    const canonicalPlanId = canonicalPlan === 'PRO' ? 'pro' : 'trial';
     const canonicalStatus = toDbSubscriptionStatus(params.status);
     const metaJson = JSON.stringify(params.billingMetadata || {});
     const existing = await this.findSubscriptionByUserId(params.userId);
@@ -578,7 +579,7 @@ class PostgresPaymentsAdapter implements PaymentsPersistenceAdapter {
         [
           existing.id,
           canonicalPlan,
-          params.planId,
+          canonicalPlanId,
           canonicalStatus,
           params.provider,
           params.productId ?? null,
@@ -628,7 +629,7 @@ class PostgresPaymentsAdapter implements PaymentsPersistenceAdapter {
       [
         params.userId,
         canonicalPlan,
-        params.planId,
+        canonicalPlanId,
         canonicalStatus,
         params.provider,
         params.productId ?? null,
@@ -707,13 +708,14 @@ class PostgresPaymentsAdapter implements PaymentsPersistenceAdapter {
     return res.rows[0] || null;
   }
 
-  async findBillingAttemptByIdempotencyKey(userId: string, key: string): Promise<DbAttemptRow | null> {
+  async findBillingAttemptByIdempotencyKey(userId: string, key: string, provider = 'cakto'): Promise<DbAttemptRow | null> {
     this.ensurePg();
+    if (!isUuid(userId)) return null;
     const res = await executeSql(
       `SELECT * FROM internal.billing_attempts
-       WHERE user_id = $1::uuid AND idempotency_key = $2
+       WHERE user_id = $1::uuid AND provider = $2 AND idempotency_key = $3
        ORDER BY created_at DESC LIMIT 1`,
-      [userId, key]
+      [userId, provider, key]
     );
     return res.rows[0] || null;
   }
@@ -1370,6 +1372,9 @@ class PostgresPaymentsAdapter implements PaymentsPersistenceAdapter {
       let resultingDbStatus = existingSub?.status || 'unchanged';
       if (transition.nextSubStatus && transition.nextSubPlan) {
         const dbSubPlan = toDbSubscriptionPlan(transition.nextSubPlan);
+        const dbSubPlanId = dbSubPlan === 'PRO' ? 'pro' : 'trial';
+        const resolvedSubAmountCents =
+          dbSubPlan === 'PRO' ? (event.amountCents || plan.amountCents) : (existingSub?.amount_cents ?? null);
         const dbSubStatus = toDbSubscriptionStatus(transition.nextSubStatus);
         resultingDbStatus = dbSubStatus;
         const subMetaJson = JSON.stringify(transition.metadataPatch);
@@ -1406,14 +1411,14 @@ class PostgresPaymentsAdapter implements PaymentsPersistenceAdapter {
             [
               existingSub.id,
               dbSubPlan,
-              plan.id,
+              dbSubPlanId,
               dbSubStatus,
               dbProvider,
               event.productId || plan.productId,
               event.offerId || plan.offerId,
               event.checkoutId || plan.checkoutId,
               event.paymentMethod || 'unknown',
-              event.amountCents || plan.amountCents,
+              resolvedSubAmountCents,
               event.currency || plan.currency,
               event.providerSubscriptionId ?? null,
               transition.periodStart ?? null,
@@ -1449,14 +1454,14 @@ class PostgresPaymentsAdapter implements PaymentsPersistenceAdapter {
             [
               resolvedUserId,
               dbSubPlan,
-              plan.id,
+              dbSubPlanId,
               dbSubStatus,
               dbProvider,
               event.productId || plan.productId,
               event.offerId || plan.offerId,
               event.checkoutId || plan.checkoutId,
               event.paymentMethod || 'unknown',
-              event.amountCents || plan.amountCents,
+              resolvedSubAmountCents,
               event.currency || plan.currency,
               event.providerSubscriptionId ?? null,
               transition.periodStart ?? null,

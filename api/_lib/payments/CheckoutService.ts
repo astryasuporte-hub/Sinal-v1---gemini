@@ -126,7 +126,11 @@ export class CheckoutService {
         ? await store.listUserAttemptsForReconciliation(params.userId)
         : await store.listOpenAttemptsForUser(params.userId);
       if (params.idempotencyKey) {
-        existingAttempt = await store.findBillingAttemptByIdempotencyKey(params.userId, params.idempotencyKey);
+        existingAttempt = await store.findBillingAttemptByIdempotencyKey(
+          params.userId,
+          params.idempotencyKey,
+          activeProviderId
+        );
       }
     } catch (err: any) {
       return {
@@ -170,118 +174,193 @@ export class CheckoutService {
       };
     }
 
-    // Idempotência: reusa tentativa válida já redirecionada antes de criar nova linha
-    if (existingAttempt) {
-      if (existingAttempt.status === 'PAID') {
+    const resolveExistingAttemptOutcome = async (
+      attempt: NonNullable<typeof existingAttempt>
+    ): Promise<{ httpStatus: number; result: CheckoutSessionResult } | null> => {
+      if (attempt.status === 'PAID') {
         return {
           httpStatus: 409,
           result: buildBlockedResult({
+            attemptId: attempt.id,
             errorCode: 'RECONCILIATION_REQUIRED',
             error: 'Esta tentativa de checkout já foi paga e aguarda conclusão da reconciliação.',
           }),
         };
       }
-      if (
-        existingAttempt.status === 'REDIRECTED' &&
-        existingAttempt.checkout_url &&
-        Date.parse(existingAttempt.expires_at) > Date.now()
-      ) {
+
+      if (attempt.status === 'BLOCKED') {
+        return {
+          httpStatus: 423,
+          result: buildBlockedResult({
+            attemptId: attempt.id,
+            errorCode: attempt.metadata?.blocked_reason || 'CAKTO_CHECKOUT_COMMERCIAL_BLOCKED',
+            error:
+              attempt.metadata?.blocked_message ||
+              'Tentativa de checkout bloqueada comercialmente para esta chave de idempotência.',
+          }),
+        };
+      }
+
+      const expiresAtMs = Date.parse(attempt.expires_at);
+      const isExpired = attempt.status === 'EXPIRED' || (Number.isFinite(expiresAtMs) && expiresAtMs <= Date.now());
+      if (isExpired) {
+        if (attempt.status === 'CREATED' || attempt.status === 'REDIRECTED') {
+          await store.updateBillingAttempt(attempt.id, {
+            status: 'EXPIRED',
+            metadata: { expired_detected_at: new Date().toISOString() },
+          }).catch(() => {});
+        }
+        return {
+          httpStatus: 409,
+          result: buildBlockedResult({
+            attemptId: attempt.id,
+            errorCode: 'ATTEMPT_EXPIRED',
+            error: 'Esta tentativa de checkout expirou. Utilize uma nova chave para iniciar outro checkout.',
+          }),
+        };
+      }
+
+      if (attempt.status === 'REDIRECTED' && attempt.checkout_url) {
         return {
           httpStatus: 200,
           result: {
             success: true,
             blocked: false,
-            attemptId: existingAttempt.id,
+            attemptId: attempt.id,
             provider: activeProviderId,
-            checkoutUrl: existingAttempt.checkout_url,
+            checkoutUrl: attempt.checkout_url,
             productId: plan.productId,
             offerId: plan.offerId,
             checkoutId: plan.checkoutId,
             amountCents: plan.amountCents,
             currency: 'BRL',
             allowedMethods: plan.allowedMethods,
-            expiresAt: existingAttempt.expires_at,
+            expiresAt: attempt.expires_at,
           },
         };
       }
-    }
 
-    // 5. Somente após todas as verificações, criar a tentativa financeira em internal.billing_attempts
-    let attemptId: string = crypto.randomUUID();
-    const expiresAt = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
-
-    try {
-      await store.createBillingAttempt({
-        id: attemptId,
-        userId: params.userId,
-        provider: activeProviderId,
-        planId: plan.id,
-        productId: plan.productId,
-        offerId: plan.offerId,
-        checkoutId: plan.checkoutId,
-        amountCents: plan.amountCents,
-        currency: plan.currency,
-        status: 'CREATED',
-        idempotencyKey: params.idempotencyKey || null,
-        metadata: {
-          requested_method: params.requestedMethod || null,
-        },
-        expiresAt,
-      });
-    } catch (err: any) {
-      if (params.idempotencyKey && String(err?.code || err?.message || '').includes('23505')) {
-        const racedAttempt = await store
-          .findBillingAttemptByIdempotencyKey(params.userId, params.idempotencyKey)
-          .catch(() => null);
-        if (
-          racedAttempt &&
-          racedAttempt.status === 'REDIRECTED' &&
-          racedAttempt.checkout_url &&
-          Date.parse(racedAttempt.expires_at) > Date.now()
-        ) {
-          return {
-            httpStatus: 200,
-            result: {
-              success: true,
-              blocked: false,
-              attemptId: racedAttempt.id,
-              provider: activeProviderId,
-              checkoutUrl: racedAttempt.checkout_url,
-              productId: plan.productId,
-              offerId: plan.offerId,
-              checkoutId: plan.checkoutId,
-              amountCents: plan.amountCents,
-              currency: 'BRL',
-              allowedMethods: plan.allowedMethods,
-              expiresAt: racedAttempt.expires_at,
-            },
-          };
-        }
-        if (racedAttempt?.id) {
-          attemptId = racedAttempt.id;
-        }
-      } else {
+      if (attempt.status === 'REFUSED' || attempt.status === 'CANCELED') {
         return {
-          httpStatus: 503,
+          httpStatus: 409,
           result: buildBlockedResult({
-            errorCode: 'SUBSCRIPTION_VERIFICATION_UNAVAILABLE',
-            error: err?.message || 'Falha ao registrar tentativa financeira no banco de dados.',
+            attemptId: attempt.id,
+            errorCode: `ATTEMPT_${attempt.status}`,
+            error: `Tentativa anterior encontra-se no estado ${attempt.status}. Gere uma nova chave de idempotência.`,
           }),
         };
       }
+
+      // Status 'CREATED' ainda válido (ex.: timeout/falha após gravação inicial) deve retomar usando o mesmo attemptId
+      return null;
+    };
+
+    // Idempotência: avalia tentativa pré-existente antes de tentar INSERT
+    let attemptId: string | null = null;
+    if (existingAttempt) {
+      const resolved = await resolveExistingAttemptOutcome(existingAttempt);
+      if (resolved) return resolved;
+      if (existingAttempt.status === 'CREATED') {
+        attemptId = existingAttempt.id;
+      }
     }
 
-    // 6. Preparar o redirecionamento no provedor
-    const session = await provider.createCheckoutSession({
-      attemptId,
-      userId: params.userId,
-      userEmail: params.userEmail,
-      userName: params.userName,
-      planId: 'pro',
-      requestedMethod: params.requestedMethod,
-      idempotencyKey: params.idempotencyKey,
-      verifiedReadiness: readiness,
-    });
+    // 5. Somente após todas as verificações (e se não houver CREATED retomável), criar tentativa em internal.billing_attempts
+    const expiresAt = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
+    if (!attemptId) {
+      attemptId = crypto.randomUUID();
+      try {
+        await store.createBillingAttempt({
+          id: attemptId,
+          userId: params.userId,
+          provider: activeProviderId,
+          planId: plan.id,
+          productId: plan.productId,
+          offerId: plan.offerId,
+          checkoutId: plan.checkoutId,
+          amountCents: plan.amountCents,
+          currency: plan.currency,
+          status: 'CREATED',
+          idempotencyKey: params.idempotencyKey || null,
+          metadata: {
+            requested_method: params.requestedMethod || null,
+          },
+          expiresAt,
+        });
+      } catch (err: any) {
+        const errText = `${String(err?.code || '')} ${String(err?.message || '')}`.toLowerCase();
+        const isUniqueViolation =
+          Boolean(params.idempotencyKey) && (errText.includes('23505') || errText.includes('duplicate') || errText.includes('unique'));
+
+        if (isUniqueViolation && params.idempotencyKey) {
+          // Aguarda brevemente caso a requisição vencedora esteja finalizando a preparação do redirecionamento
+          let racedAttempt: typeof existingAttempt = null;
+          for (let i = 0; i < 8; i++) {
+            racedAttempt = await store
+              .findBillingAttemptByIdempotencyKey(params.userId, params.idempotencyKey, activeProviderId)
+              .catch(() => null);
+            if (!racedAttempt) break;
+            const racedResolved = await resolveExistingAttemptOutcome(racedAttempt);
+            if (racedResolved) return racedResolved;
+            await new Promise((r) => setTimeout(r, 15));
+          }
+          if (racedAttempt?.id) {
+            attemptId = racedAttempt.id;
+          } else {
+            return {
+              httpStatus: 503,
+              result: buildBlockedResult({
+                errorCode: 'SUBSCRIPTION_VERIFICATION_UNAVAILABLE',
+                error: err?.message || 'Conflito transitório ao registrar tentativa financeira no banco.',
+              }),
+            };
+          }
+        } else {
+          return {
+            httpStatus: 503,
+            result: buildBlockedResult({
+              errorCode: 'SUBSCRIPTION_VERIFICATION_UNAVAILABLE',
+              error: err?.message || 'Falha ao registrar tentativa financeira no banco de dados.',
+            }),
+          };
+        }
+      }
+    }
+
+    // 6. Preparar o redirecionamento no provedor (com recuperação segura em falha transitória/timeout)
+    let session: CheckoutSessionResult;
+    try {
+      session = await provider.createCheckoutSession({
+        attemptId,
+        userId: params.userId,
+        userEmail: params.userEmail,
+        userName: params.userName,
+        planId: 'pro',
+        requestedMethod: params.requestedMethod,
+        idempotencyKey: params.idempotencyKey,
+        verifiedReadiness: readiness,
+      });
+    } catch (providerErr: any) {
+      await store
+        .updateBillingAttempt(attemptId, {
+          metadata: {
+            last_checkout_error: providerErr?.message || 'PROVIDER_SESSION_ERROR',
+            last_checkout_error_at: new Date().toISOString(),
+          },
+        })
+        .catch(() => {});
+
+      return {
+        httpStatus: 503,
+        result: buildBlockedResult({
+          attemptId,
+          errorCode: 'CHECKOUT_PROVIDER_UNAVAILABLE',
+          error:
+            providerErr?.message ||
+            'Falha transitória ou timeout ao preparar o checkout no provedor. Reenvie com a mesma chave para retomar.',
+        }),
+      };
+    }
 
     if (!session.success || session.blocked || !session.checkoutUrl) {
       await store.updateBillingAttempt(attemptId, {
@@ -294,7 +373,10 @@ export class CheckoutService {
 
       return {
         httpStatus: 423,
-        result: session,
+        result: {
+          ...session,
+          attemptId,
+        },
       };
     }
 
