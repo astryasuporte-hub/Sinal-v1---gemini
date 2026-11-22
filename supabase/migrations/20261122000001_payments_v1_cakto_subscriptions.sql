@@ -187,7 +187,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_billing_events_provider_hash_uidx
   ON internal.billing_events (provider, event_hash)
   WHERE event_hash IS NOT NULL;
 
--- 5. Privilégios exclusivos de service_role (quando a role existir no PostgreSQL/Supabase)
+-- 5. Privilégios exclusivos de service_role e política explícita RLS em internal.billing_attempts
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
@@ -197,8 +197,22 @@ BEGIN
     REVOKE ALL ON internal.billing_attempts FROM authenticated;
   END IF;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
-    GRANT ALL ON SCHEMA internal TO service_role;
-    GRANT ALL ON internal.billing_attempts TO service_role;
+    GRANT USAGE ON SCHEMA internal TO service_role;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON internal.billing_attempts TO service_role;
+    IF to_regclass('internal.billing_payments') IS NOT NULL THEN
+      GRANT SELECT, INSERT, UPDATE, DELETE ON internal.billing_payments TO service_role;
+    END IF;
+    IF to_regclass('internal.billing_events') IS NOT NULL THEN
+      GRANT SELECT, INSERT, UPDATE, DELETE ON internal.billing_events TO service_role;
+    END IF;
+
+    DROP POLICY IF EXISTS "service_role_full_billing_attempts" ON internal.billing_attempts;
+    CREATE POLICY "service_role_full_billing_attempts"
+      ON internal.billing_attempts
+      FOR ALL
+      TO service_role
+      USING (true)
+      WITH CHECK (true);
   END IF;
 END $$;
 

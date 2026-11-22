@@ -143,6 +143,13 @@ async function main() {
     [sharpifyUserId]
   );
 
+  // Confirma que internal.billing_attempts ainda NÃO existe antes da migração 20261122000001
+  const preAttemptsRes = await db.query(`SELECT to_regclass('internal.billing_attempts') AS tbl`);
+  assert(
+    preAttemptsRes.rows[0]?.tbl === null,
+    'Cenário realista: internal.billing_attempts NÃO existia antes da migração 20261122000001'
+  );
+
   // Executa migração Payments V1.1 DUAS vezes para validar idempotência completa
   const migrationSql = fs.readFileSync(
     path.resolve('supabase/migrations/20261122000001_payments_v1_cakto_subscriptions.sql'),
@@ -151,6 +158,22 @@ async function main() {
   await db.exec(migrationSql);
   await db.exec(migrationSql);
   assert(true, 'Migração 20261122000001 executada duas vezes sem erros (idempotente)');
+
+  // Verifica criação de internal.billing_attempts com RLS ativo e política de service_role
+  const postAttemptsRes = await db.query(`
+    SELECT c.relrowsecurity,
+           EXISTS (
+             SELECT 1 FROM pg_policies p
+             WHERE p.schemaname = 'internal' AND p.tablename = 'billing_attempts' AND p.policyname = 'service_role_full_billing_attempts'
+           ) AS has_policy
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'internal' AND c.relname = 'billing_attempts'
+  `);
+  assert(
+    postAttemptsRes.rows[0]?.relrowsecurity === true && postAttemptsRes.rows[0]?.has_policy === true,
+    'internal.billing_attempts criada com RLS ativado e política explícita para service_role'
+  );
 
   // Verifica preservação do registro histórico Sharpify
   const sharpifyCheck = await db.query(
@@ -258,14 +281,20 @@ async function main() {
         { status: 200 }
       );
     }
-    if (u.includes('/public_api/products/')) {
-      return new Response(JSON.stringify({ id: CAKTO_OFFICIAL_PRODUCT_ID, status: 'active' }), { status: 200 });
-    }
-    if (u.includes('/public_api/checkouts/')) {
+    if (u.includes('/checkouts/')) {
       return new Response(
-        JSON.stringify({ id: '1356033', status: 'active', trial_days: 0, paymentMethods: ['credit_card', 'pix_auto'] }),
+        JSON.stringify({
+          id: '1356033',
+          status: 'active',
+          trial_days: 0,
+          paymentMethods: ['credit_card', 'pix_auto'],
+          config: { desktop: { settings: {} }, mobile: { settings: {} } },
+        }),
         { status: 200 }
       );
+    }
+    if (u.includes('/public_api/products/')) {
+      return new Response(JSON.stringify({ id: CAKTO_OFFICIAL_PRODUCT_ID, status: 'active' }), { status: 200 });
     }
     if (u.includes('/cancel/')) {
       return new Response(JSON.stringify({ status: 'canceled' }), { status: 200 });
@@ -444,6 +473,30 @@ async function main() {
     // Histórico lê internal.billing_payments mapeando APPROVED -> PAID
     const hist = await subService.getUserBillingHistory(caktoUserId);
     assert(hist.length === 1 && hist[0].amountCents === 3490 && hist[0].status === 'PAID', 'Histórico do usuário retornado de internal.billing_payments (APPROVED -> PAID)');
+
+    // Linha ACTIVE no PostgreSQL sem current_period_end (e sem cortesia autorizada) NÃO concede acesso PRO indefinido
+    const missingPeriodPgUser = '66666666-6666-4666-8666-666666666666';
+    await db.query(
+      `INSERT INTO auth.users (id, email, created_at) VALUES ($1::uuid, 'semperiodo@fatosbr.com.br', NOW() - INTERVAL '45 days')`,
+      [missingPeriodPgUser]
+    );
+    await db.query(
+      `INSERT INTO public.subscriptions (user_id, plan, status, provider, current_period_end, billing_metadata)
+       VALUES ($1::uuid, 'PRO', 'ACTIVE', 'sharpify', NULL, '{"legacy_seed": true}'::jsonb)`,
+      [missingPeriodPgUser]
+    );
+    const missingPeriodPgView = await subService.getUserSubscriptionStatus({
+      userId: missingPeriodPgUser,
+      userEmail: 'semperiodo@fatosbr.com.br',
+    });
+    assert(
+      missingPeriodPgView.hasProAccess === false &&
+        missingPeriodPgView.status === 'INCOMPLETE' &&
+        missingPeriodPgView.reconciliationRequired === true &&
+        missingPeriodPgView.reconciliationReason === 'MISSING_CURRENT_PERIOD_END' &&
+        missingPeriodPgView.trialDaysLeft === 0,
+      'PostgreSQL: linha ACTIVE sem current_period_end nega PRO indefinido e exige reconciliação (INCOMPLETE)'
+    );
 
     // Endpoint /api/payments/status retorna HTTP 503 fail-closed se banco cair
     setTestPostgresPool({

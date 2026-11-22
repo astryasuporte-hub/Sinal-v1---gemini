@@ -129,6 +129,8 @@ export interface UserSubscription {
   allowedMethods?: ('credit_card' | 'pix_auto')[];
   isAdminExempt?: boolean;
   hasProAccess?: boolean;
+  reconciliationRequired?: boolean;
+  reconciliationReason?: string | null;
   providerSubscriptionId?: string | null;
   commercialReadiness?: {
     ready: boolean;

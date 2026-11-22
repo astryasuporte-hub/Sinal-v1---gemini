@@ -148,6 +148,7 @@ export interface PaymentsPersistenceAdapter {
     expiresAt: string;
   }): Promise<DbAttemptRow>;
   getBillingAttemptById(attemptId: string): Promise<DbAttemptRow | null>;
+  findBillingAttemptByProviderOrderId?(providerOrderId: string): Promise<DbAttemptRow | null>;
   findBillingAttemptByIdempotencyKey(userId: string, key: string): Promise<DbAttemptRow | null>;
   updateBillingAttempt(
     attemptId: string,
@@ -160,6 +161,8 @@ export interface PaymentsPersistenceAdapter {
     }
   ): Promise<void>;
   listOpenAttemptsForUser(userId: string): Promise<DbAttemptRow[]>;
+  listUserAttemptsForReconciliation?(userId: string): Promise<DbAttemptRow[]>;
+  listUserPaymentOrderIds?(userId: string): Promise<string[]>;
   acquireWebhookEventLock(params: {
     provider: string;
     providerEventId: string;
@@ -747,8 +750,19 @@ class PostgresPaymentsAdapter implements PaymentsPersistenceAdapter {
     );
   }
 
+  async findBillingAttemptByProviderOrderId(providerOrderId: string): Promise<DbAttemptRow | null> {
+    this.ensurePg();
+    if (!providerOrderId) return null;
+    const res = await executeSql(
+      `SELECT * FROM internal.billing_attempts WHERE provider_order_id = $1 ORDER BY created_at DESC LIMIT 1`,
+      [providerOrderId]
+    );
+    return res.rows[0] || null;
+  }
+
   async listOpenAttemptsForUser(userId: string): Promise<DbAttemptRow[]> {
     this.ensurePg();
+    if (!isUuid(userId)) return [];
     const res = await executeSql(
       `SELECT * FROM internal.billing_attempts
        WHERE user_id = $1::uuid AND status IN ('CREATED', 'REDIRECTED')
@@ -756,6 +770,30 @@ class PostgresPaymentsAdapter implements PaymentsPersistenceAdapter {
       [userId]
     );
     return res.rows;
+  }
+
+  async listUserAttemptsForReconciliation(userId: string): Promise<DbAttemptRow[]> {
+    this.ensurePg();
+    if (!isUuid(userId)) return [];
+    const res = await executeSql(
+      `SELECT * FROM internal.billing_attempts
+       WHERE user_id = $1::uuid AND status IN ('CREATED', 'REDIRECTED', 'EXPIRED', 'PAID')
+       ORDER BY created_at DESC LIMIT 20`,
+      [userId]
+    );
+    return res.rows;
+  }
+
+  async listUserPaymentOrderIds(userId: string): Promise<string[]> {
+    this.ensurePg();
+    if (!isUuid(userId)) return [];
+    const res = await executeSql(
+      `SELECT provider_payment_id FROM internal.billing_payments
+       WHERE user_id = $1::uuid AND provider_payment_id IS NOT NULL
+       ORDER BY created_at DESC LIMIT 25`,
+      [userId]
+    );
+    return res.rows.map((r: any) => String(r.provider_payment_id)).filter(Boolean);
   }
 
   async acquireWebhookEventLock(params: {

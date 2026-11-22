@@ -359,6 +359,18 @@ async function main() {
         { status: 200 }
       );
     }
+    if (u.includes('/checkouts/')) {
+      return new Response(
+        JSON.stringify({
+          id: '1356033',
+          status: 'active',
+          trial_days: 0,
+          paymentMethods: ['credit_card', 'pix_auto'],
+          config: { desktop: { settings: {} }, mobile: { settings: {} } },
+        }),
+        { status: 200 }
+      );
+    }
     if (u.includes('/public_api/products/')) {
       return new Response(
         JSON.stringify({ id: 'c8731178-55c9-47f6-8b98-987f31206ed8', status: 'active' }),

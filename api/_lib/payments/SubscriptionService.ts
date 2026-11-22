@@ -142,14 +142,34 @@ export class SubscriptionService {
 
       let canonicalStatus: CanonicalSubscriptionStatus = 'TRIAL_EXPIRED';
       let hasProAccess = false;
+      let reconciliationRequired = false;
+      let reconciliationReason: string | null = null;
+
+      const isAuthorizedCourtesy = Boolean(
+        meta.admin_courtesy === true &&
+          (!meta.courtesy_expires_at ||
+            (Number.isFinite(Date.parse(String(meta.courtesy_expires_at))) &&
+              Date.parse(String(meta.courtesy_expires_at)) > nowMs))
+      );
 
       if (dbStatus === 'ACTIVE') {
-        if (!row.current_period_end || periodEndMs > nowMs) {
+        if (isAuthorizedCourtesy) {
           canonicalStatus = 'ACTIVE';
           hasProAccess = true;
+        } else if (row.current_period_end && Number.isFinite(periodEndMs)) {
+          if (periodEndMs > nowMs) {
+            canonicalStatus = 'ACTIVE';
+            hasProAccess = true;
+          } else {
+            canonicalStatus = 'EXPIRED';
+            hasProAccess = false;
+          }
         } else {
-          canonicalStatus = 'EXPIRED';
+          // PRO sem current_period_end válido NUNCA recebe acesso indefinido; requer reconciliação segura
+          canonicalStatus = 'INCOMPLETE';
           hasProAccess = false;
+          reconciliationRequired = true;
+          reconciliationReason = 'MISSING_CURRENT_PERIOD_END';
         }
       } else if (dbStatus === 'PAST_DUE') {
         canonicalStatus = 'PAST_DUE';
@@ -160,6 +180,7 @@ export class SubscriptionService {
           !meta.refunded &&
             !meta.chargeback &&
             row.current_period_end &&
+            Number.isFinite(periodEndMs) &&
             periodEndMs > nowMs
         );
       } else if (dbStatus === 'SUSPENDED') {
@@ -168,6 +189,10 @@ export class SubscriptionService {
       } else if (dbStatus === 'INCOMPLETE') {
         canonicalStatus = meta.refused ? 'PAYMENT_REFUSED' : 'INCOMPLETE';
         hasProAccess = false;
+        if (!meta.refused) {
+          reconciliationRequired = true;
+          reconciliationReason = 'INCOMPLETE_SUBSCRIPTION';
+        }
       } else if (dbStatus === 'EXPIRED') {
         canonicalStatus = 'EXPIRED';
         hasProAccess = false;
@@ -177,7 +202,7 @@ export class SubscriptionService {
       } else if (dbStatus === 'RENEWAL_PENDING' || dbStatus === 'PENDING') {
         canonicalStatus = 'RENEWAL_PENDING';
         hasProAccess = Boolean(
-          (row.current_period_end && periodEndMs > nowMs && meta.pro_paid !== false) ||
+          (row.current_period_end && Number.isFinite(periodEndMs) && periodEndMs > nowMs && meta.pro_paid !== false) ||
             (!hadPaidHistory && remainingTrialDays > 0)
         );
       } else if (dbStatus === 'TRIAL_ACTIVE' || dbStatus === 'TRIALING') {
@@ -215,17 +240,23 @@ export class SubscriptionService {
         trialStartsAt: formatPtBrDate(trialStartsIso),
         trialEndsAt: formatPtBrDate(trialEndsIso),
         currentPeriodStart: row.current_period_start ? formatPtBrDate(row.current_period_start) : null,
-        currentPeriodEnd: formatPtBrDate(periodEndIso),
+        currentPeriodEnd: isAuthorizedCourtesy
+          ? row.current_period_end
+            ? formatPtBrDate(row.current_period_end)
+            : 'Cortesia Autorizada'
+          : formatPtBrDate(periodEndIso),
         nextBillingAt: row.next_billing_at ? formatPtBrDate(row.next_billing_at) : null,
         cancelAtPeriodEnd: Boolean(row.cancel_at_period_end),
         canceledAt: row.canceled_at || null,
         graceUntil: row.grace_until || null,
         gateway: 'Cakto Assinaturas',
         provider: activeProviderId,
-        paymentMethod: formatMethodLabel(row.payment_method),
+        paymentMethod: isAuthorizedCourtesy ? 'Cortesia Administrativa' : formatMethodLabel(row.payment_method),
         allowedMethods: plan.allowedMethods,
         isAdminExempt: false,
         hasProAccess,
+        reconciliationRequired,
+        reconciliationReason,
         providerSubscriptionId: row.provider_subscription_id || null,
         commercialReadiness,
       };

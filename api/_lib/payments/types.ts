@@ -155,6 +155,8 @@ export interface UserSubscriptionView {
   allowedMethods: readonly AllowedCaktoPaymentMethod[];
   isAdminExempt?: boolean;
   hasProAccess: boolean;
+  reconciliationRequired?: boolean;
+  reconciliationReason?: string | null;
   providerSubscriptionId?: string | null;
   commercialReadiness: CheckoutCommercialReadiness;
 }

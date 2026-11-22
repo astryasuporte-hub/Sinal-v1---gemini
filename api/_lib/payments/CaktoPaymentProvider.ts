@@ -55,6 +55,27 @@ export function normalizeCaktoAmountToCents(rawAmount: unknown): number | undefi
   return Math.round(num * 100);
 }
 
+const BOOLEAN_METHOD_KEYS: Array<[string, string]> = [
+  ['pix', 'pix'],
+  ['accepts_pix', 'pix'],
+  ['pix_common', 'pix'],
+  ['boleto', 'boleto'],
+  ['accepts_boleto', 'boleto'],
+  ['picpay', 'picpay'],
+  ['accepts_picpay', 'picpay'],
+  ['applepay', 'applepay'],
+  ['apple_pay', 'applepay'],
+  ['googlepay', 'googlepay'],
+  ['google_pay', 'googlepay'],
+  ['nupay', 'nupay'],
+  ['nu_pay', 'nupay'],
+  ['credit_card', 'credit_card'],
+  ['accepts_credit_card', 'credit_card'],
+  ['pix_auto', 'pix_auto'],
+  ['accepts_pix_auto', 'pix_auto'],
+  ['pix_automatico', 'pix_auto'],
+];
+
 function extractMethodsFromContainer(container: any): string[] {
   if (!container || typeof container !== 'object') return [];
   const rawList: unknown[] = [];
@@ -63,26 +84,84 @@ function extractMethodsFromContainer(container: any): string[] {
   if (Array.isArray(container.payment_methods)) rawList.push(...container.payment_methods);
   if (Array.isArray(container.allowed_methods)) rawList.push(...container.allowed_methods);
   if (Array.isArray(container.methods)) rawList.push(...container.methods);
+  if (Array.isArray(container.enabled_methods)) rawList.push(...container.enabled_methods);
 
-  if (container.pix === true || container.accepts_pix === true) rawList.push('pix');
-  if (container.boleto === true || container.accepts_boleto === true) rawList.push('boleto');
-  if (container.picpay === true || container.accepts_picpay === true) rawList.push('picpay');
-  if (container.credit_card === true || container.accepts_credit_card === true) rawList.push('credit_card');
-  if (
-    container.pix_auto === true ||
-    container.accepts_pix_auto === true ||
-    container.pix_automatico === true
-  ) {
-    rawList.push('pix_auto');
+  for (const [key, canonical] of BOOLEAN_METHOD_KEYS) {
+    if (container[key] === true) {
+      rawList.push(canonical);
+    }
   }
 
   return Array.from(
     new Set(
       rawList
-        .map((m) => normalizePaymentMethod(String(m)))
+        .map((m) => {
+          if (m && typeof m === 'object') {
+            const obj = m as Record<string, any>;
+            if (obj.enabled === false || obj.active === false) return '';
+            return normalizePaymentMethod(String(obj.method || obj.id || obj.name || obj.type || ''));
+          }
+          return normalizePaymentMethod(String(m));
+        })
         .filter((m) => m && m !== 'unknown')
     )
   );
+}
+
+function extractMethodsFromCheckoutDeep(checkoutData: any): {
+  methods: string[];
+  hasValidConfigObject: boolean;
+  configIncompleteReason?: string;
+} {
+  if (!checkoutData || typeof checkoutData !== 'object') {
+    return {
+      methods: [],
+      hasValidConfigObject: false,
+      configIncompleteReason: 'Resposta do checkout Cakto ausente ou inválida.',
+    };
+  }
+
+  const config = checkoutData.config;
+  const hasValidConfigObject = Boolean(config && typeof config === 'object' && !Array.isArray(config));
+  if (!hasValidConfigObject) {
+    return {
+      methods: [],
+      hasValidConfigObject: false,
+      configIncompleteReason: 'Objeto config ausente ou incompleto na resposta oficial do checkout Cakto.',
+    };
+  }
+
+  const collected = new Set<string>();
+  const visited = new Set<any>();
+
+  const scanNode = (node: any, depth: number) => {
+    if (!node || typeof node !== 'object' || depth > 6 || visited.has(node)) return;
+    visited.add(node);
+
+    for (const m of extractMethodsFromContainer(node)) {
+      collected.add(m);
+    }
+
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        scanNode(item, depth + 1);
+      }
+      return;
+    }
+
+    for (const val of Object.values(node)) {
+      if (val && typeof val === 'object') {
+        scanNode(val, depth + 1);
+      }
+    }
+  };
+
+  scanNode(checkoutData, 0);
+
+  return {
+    methods: Array.from(collected),
+    hasValidConfigObject: true,
+  };
 }
 
 function parseIsoOrNull(val: unknown): string | undefined {
@@ -148,14 +227,14 @@ export class CaktoPaymentProvider implements PaymentProvider {
     const [offerRes, productRes, checkoutRes] = await Promise.all([
       this.client.getOffer(plan.offerId),
       this.client.getProduct(plan.productId),
-      this.client.getCheckout(plan.checkoutId),
+      this.client.getCheckout(plan.productId, plan.checkoutId),
     ]);
 
-    if (!offerRes.ok || !productRes.ok || (!checkoutRes.ok && checkoutRes.status !== 404)) {
+    if (!offerRes.ok || !productRes.ok || !checkoutRes.ok) {
       return {
         ready: false,
         blockedReasonCode: 'CAKTO_CHECKOUT_COMMERCIAL_BLOCKED',
-        blockedMessage: `Não foi possível validar o status comercial da oferta ${plan.offerId} / checkout ${plan.checkoutId} na Cakto (${offerRes.error || productRes.error || checkoutRes.error || 'erro upstream'}).`,
+        blockedMessage: `Não foi possível validar o checkout oficial ${plan.checkoutId} do produto ${plan.productId} na Cakto (offer=${offerRes.status}, product=${productRes.status}, checkout=${checkoutRes.status}).`,
         commercialEnabled,
         methodsVerified,
         allowedMethods: ALLOWED_CAKTO_METHODS,
@@ -165,17 +244,25 @@ export class CaktoPaymentProvider implements PaymentProvider {
 
     const offerData = offerRes.data?.data || offerRes.data || {};
     const productData = productRes.data?.data || productRes.data || {};
-    const checkoutData = checkoutRes.ok
-      ? checkoutRes.data?.data || checkoutRes.data || {}
-      : offerData?.checkout && typeof offerData.checkout === 'object'
-      ? offerData.checkout
-      : null;
+    const checkoutData = checkoutRes.data?.data || checkoutRes.data || null;
+
+    if (!checkoutData || typeof checkoutData !== 'object') {
+      return {
+        ready: false,
+        blockedReasonCode: 'CAKTO_CHECKOUT_COMMERCIAL_BLOCKED',
+        blockedMessage: `Resposta vazia ou inválida ao consultar o checkout '${plan.checkoutId}' na Cakto.`,
+        commercialEnabled,
+        methodsVerified,
+        allowedMethods: ALLOWED_CAKTO_METHODS,
+        prohibitedMethods: PROHIBITED_PAYMENT_METHODS,
+      };
+    }
 
     const offerStatus = String(offerData.status || (offerData.active === false ? 'disabled' : 'active')).toLowerCase();
     const productStatus = String(productData.status || 'unknown').toLowerCase();
-    const checkoutStatus = checkoutData
-      ? String(checkoutData.status || (checkoutData.active === false ? 'disabled' : 'active')).toLowerCase()
-      : 'embedded_not_exposed';
+    const checkoutStatus = String(
+      checkoutData.status || (checkoutData.active === false ? 'disabled' : 'active')
+    ).toLowerCase();
 
     const offerTrialDays = Number.isFinite(Number(offerData.trial_days ?? 0)) ? Number(offerData.trial_days ?? 0) : 0;
     const checkoutTrialDays = Number.isFinite(Number(checkoutData?.trial_days ?? 0)) ? Number(checkoutData?.trial_days ?? 0) : 0;
@@ -186,7 +273,8 @@ export class CaktoPaymentProvider implements PaymentProvider {
       offerStatus === 'inactive' ||
       productStatus === 'waiting_config' ||
       checkoutStatus === 'disabled' ||
-      checkoutStatus === 'inactive'
+      checkoutStatus === 'inactive' ||
+      checkoutStatus === 'waiting_config'
     ) {
       return {
         ready: false,
@@ -220,21 +308,44 @@ export class CaktoPaymentProvider implements PaymentProvider {
     }
 
     const offerMethods = extractMethodsFromContainer(offerData);
-    const checkoutMethods = extractMethodsFromContainer(checkoutData);
+    const checkoutInspection = extractMethodsFromCheckoutDeep(checkoutData);
+    const checkoutMethods = checkoutInspection.methods;
     const detectedMethods = Array.from(new Set([...offerMethods, ...checkoutMethods]));
 
-    const hasProhibited = detectedMethods.some((m) => isProhibitedPaymentMethod(m));
-    const hasAllAllowed = ALLOWED_CAKTO_METHODS.every((m) => detectedMethods.includes(m));
-    const checkoutConflict =
-      checkoutMethods.length > 0 && !ALLOWED_CAKTO_METHODS.every((m) => checkoutMethods.includes(m));
+    if (!checkoutInspection.hasValidConfigObject || checkoutMethods.length === 0 || offerMethods.length === 0) {
+      return {
+        ready: false,
+        blockedReasonCode: 'CAKTO_CHECKOUT_COMMERCIAL_BLOCKED',
+        blockedMessage:
+          checkoutInspection.configIncompleteReason ||
+          `Configuração efetiva do checkout '${plan.checkoutId}' ou oferta '${plan.offerId}' está incompleta na API da Cakto (métodos não comprovados).`,
+        commercialEnabled,
+        methodsVerified,
+        allowedMethods: ALLOWED_CAKTO_METHODS,
+        prohibitedMethods: PROHIBITED_PAYMENT_METHODS,
+        detectedProviderMethods: detectedMethods,
+        offerStatus,
+        productStatus,
+        checkoutStatus,
+        trialDays,
+      };
+    }
 
-    if (hasProhibited || !hasAllAllowed || checkoutConflict) {
+    const unexpectedOfferMethods = offerMethods.filter((m) => !isAllowedPaymentMethod(m));
+    const unexpectedCheckoutMethods = checkoutMethods.filter((m) => !isAllowedPaymentMethod(m));
+    const unexpectedMethods = Array.from(new Set([...unexpectedOfferMethods, ...unexpectedCheckoutMethods]));
+
+    const checkoutHasAllAllowed = ALLOWED_CAKTO_METHODS.every((m) => checkoutMethods.includes(m));
+    const offerHasAllAllowed = ALLOWED_CAKTO_METHODS.every((m) => offerMethods.includes(m));
+
+    if (unexpectedMethods.length > 0 || !checkoutHasAllAllowed || !offerHasAllAllowed) {
       return {
         ready: false,
         blockedReasonCode: 'CAKTO_DISALLOWED_PAYMENT_METHOD_ENABLED',
-        blockedMessage: hasProhibited
-          ? `Oferta/checkout Cakto possui método proibido habilitado (${detectedMethods.filter((m) => isProhibitedPaymentMethod(m)).join(', ')}). Apenas credit_card e pix_auto são permitidos.`
-          : `Oferta/checkout Cakto precisa ter ambos os métodos credit_card e pix_auto ativos (detectado: ${detectedMethods.join(', ') || 'nenhum'}).`,
+        blockedMessage:
+          unexpectedMethods.length > 0
+            ? `Oferta/checkout Cakto possui método não autorizado habilitado (${unexpectedMethods.join(', ')}). Apenas credit_card e pix_auto são permitidos.`
+            : `Checkout '${plan.checkoutId}' e oferta '${plan.offerId}' precisam comprovar ambos os métodos credit_card e pix_auto ativos (checkout: ${checkoutMethods.join(', ')}; oferta: ${offerMethods.join(', ')}).`,
         commercialEnabled,
         methodsVerified,
         allowedMethods: ALLOWED_CAKTO_METHODS,

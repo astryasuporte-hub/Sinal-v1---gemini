@@ -14,7 +14,9 @@ import type { CanonicalWebhookAction, NormalizedPaymentWebhookEvent } from './ty
 export interface ReconciliationResult {
   success: boolean;
   reconciledCount: number;
+  pendingReconciliationCount: number;
   rejectedProhibitedCount: number;
+  rejectedForeignCount: number;
   checkedAttempts: number;
   details: Array<{
     providerOrderId: string;
@@ -39,8 +41,21 @@ export class BillingReconciliationService {
     const provider = getPaymentProvider(getActivePaymentProviderId());
     const plan = resolvePlanPrice('pro');
 
-    const openAttempts = await store.listOpenAttemptsForUser(params.userId);
+    const userAttempts = store.listUserAttemptsForReconciliation
+      ? await store.listUserAttemptsForReconciliation(params.userId)
+      : await store.listOpenAttemptsForUser(params.userId);
     const subRow = await store.findSubscriptionByUserId(params.userId);
+    const persistedUserOrderIds = store.listUserPaymentOrderIds
+      ? new Set(await store.listUserPaymentOrderIds(params.userId))
+      : new Set<string>();
+
+    const userAttemptIds = new Set(userAttempts.map((a) => a.id));
+    const userAttemptOrderIds = new Set(
+      userAttempts.map((a) => a.provider_order_id).filter((v): v is string => Boolean(v))
+    );
+    const userAttemptSubIds = new Set(
+      userAttempts.map((a) => a.provider_subscription_id).filter((v): v is string => Boolean(v))
+    );
 
     const searchQueries: Array<{
       attemptId?: string;
@@ -50,32 +65,75 @@ export class BillingReconciliationService {
     }> = [];
 
     if (params.providerOrderId) {
+      // Verifica previamente se o providerOrderId explícito já pertence a outro usuário no banco
+      const foreignPayment = store.findPaymentByProviderPaymentId
+        ? await store.findPaymentByProviderPaymentId(params.providerOrderId).catch(() => null)
+        : null;
+      const foreignAttempt = store.findBillingAttemptByProviderOrderId
+        ? await store.findBillingAttemptByProviderOrderId(params.providerOrderId).catch(() => null)
+        : null;
+      const foreignSub = store.findSubscriptionByProviderOrderId
+        ? await store.findSubscriptionByProviderOrderId(params.providerOrderId).catch(() => null)
+        : null;
+
+      const belongsToOther =
+        (foreignPayment?.user_id && foreignPayment.user_id !== params.userId) ||
+        (foreignAttempt?.user_id && foreignAttempt.user_id !== params.userId) ||
+        (foreignSub?.user_id && foreignSub.user_id !== params.userId);
+
+      if (belongsToOther) {
+        return {
+          success: true,
+          reconciledCount: 0,
+          pendingReconciliationCount: 0,
+          rejectedProhibitedCount: 0,
+          rejectedForeignCount: 1,
+          checkedAttempts: userAttempts.length,
+          details: [
+            {
+              providerOrderId: params.providerOrderId,
+              status: 'foreign_owner',
+              paymentMethod: 'unknown',
+              outcome: 'REJECTED_FOREIGN_OWNER',
+            },
+          ],
+        };
+      }
+
       searchQueries.push({
         providerOrderId: params.providerOrderId,
         providerSubscriptionId: subRow?.provider_subscription_id || undefined,
       });
     }
-    for (const attempt of openAttempts.slice(0, 3)) {
+
+    for (const attempt of userAttempts.slice(0, 5)) {
       searchQueries.push({
         attemptId: attempt.id,
         providerOrderId: attempt.provider_order_id || undefined,
         providerSubscriptionId: attempt.provider_subscription_id || subRow?.provider_subscription_id || undefined,
       });
     }
-    if (searchQueries.length === 0 && (subRow?.provider_subscription_id || (params.userEmail && params.userEmail.includes('@')))) {
+
+    if (subRow?.provider_subscription_id) {
       searchQueries.push({
-        providerSubscriptionId: subRow?.provider_subscription_id || undefined,
-        customerEmail: params.userEmail || undefined,
+        providerSubscriptionId: subRow.provider_subscription_id,
       });
     }
 
-    const openAttemptIds = new Set(openAttempts.map((a) => a.id));
-    const normalizedAuthEmail = params.userEmail ? params.userEmail.trim().toLowerCase() : null;
+    // O e-mail serve apenas para localizar registros candidatos para auditoria/pendência,
+    // NUNCA como prova suficiente isolada para ativar PRO.
+    if (params.userEmail && params.userEmail.includes('@')) {
+      searchQueries.push({
+        customerEmail: params.userEmail.trim().toLowerCase(),
+      });
+    }
 
     const seenOrders = new Set<string>();
     const details: ReconciliationResult['details'] = [];
     let reconciledCount = 0;
+    let pendingReconciliationCount = 0;
     let rejectedProhibitedCount = 0;
+    let rejectedForeignCount = 0;
 
     for (const query of searchQueries) {
       const orders = await provider.fetchReconcilableOrders(query).catch(() => []);
@@ -83,23 +141,99 @@ export class BillingReconciliationService {
         if (!order.providerOrderId || seenOrders.has(order.providerOrderId)) continue;
         seenOrders.add(order.providerOrderId);
 
-        // Verifica vínculo estrito do pedido com o usuário autenticado (mesmo quando providerOrderId é informado)
-        const matchesAttempt = Boolean(order.attemptId && openAttemptIds.has(order.attemptId));
-        const matchesSub = Boolean(
-          order.providerSubscriptionId &&
-            subRow?.provider_subscription_id &&
-            order.providerSubscriptionId === subRow.provider_subscription_id
-        );
-        const matchesEmail = Boolean(
-          normalizedAuthEmail &&
-            order.customerEmail &&
-            order.customerEmail.trim().toLowerCase() === normalizedAuthEmail
-        );
-        if (!matchesAttempt && !matchesSub && !matchesEmail) {
+        // 1. Bloqueio de associação cruzada: verifica se QUALQUER identificador pertence a outro usuário
+        const attemptInDb = order.attemptId
+          ? await store.getBillingAttemptById(order.attemptId).catch(() => null)
+          : null;
+        const subInDb = order.providerSubscriptionId
+          ? await store.findSubscriptionByProviderSubId(order.providerSubscriptionId).catch(() => null)
+          : null;
+        const payInDb = store.findPaymentByProviderPaymentId
+          ? await store.findPaymentByProviderPaymentId(order.providerOrderId).catch(() => null)
+          : null;
+        const attemptByOrderInDb = store.findBillingAttemptByProviderOrderId
+          ? await store.findBillingAttemptByProviderOrderId(order.providerOrderId).catch(() => null)
+          : null;
+
+        const isForeignAttempt = Boolean(attemptInDb && attemptInDb.user_id !== params.userId);
+        const isForeignSub = Boolean(subInDb && subInDb.user_id !== params.userId);
+        const isForeignPay = Boolean(payInDb?.user_id && payInDb.user_id !== params.userId);
+        const isForeignAttemptOrder = Boolean(attemptByOrderInDb && attemptByOrderInDb.user_id !== params.userId);
+
+        if (isForeignAttempt || isForeignSub || isForeignPay || isForeignAttemptOrder) {
+          rejectedForeignCount += 1;
+          details.push({
+            providerOrderId: order.providerOrderId,
+            status: order.status,
+            paymentMethod: order.paymentMethod,
+            outcome: 'REJECTED_FOREIGN_OWNER',
+          });
           continue;
         }
 
-        if (isProhibitedPaymentMethod(order.paymentMethod) || (order.status === 'paid' && !isAllowedPaymentMethod(order.paymentMethod))) {
+        // 2. Exigir âncora persistida e verificada vinculada ao usuário autenticado
+        const matchesAttempt = Boolean(
+          order.attemptId &&
+            (userAttemptIds.has(order.attemptId) || (attemptInDb && attemptInDb.user_id === params.userId))
+        );
+        const matchesSub = Boolean(
+          order.providerSubscriptionId &&
+            ((subRow?.provider_subscription_id &&
+              order.providerSubscriptionId === subRow.provider_subscription_id) ||
+              userAttemptSubIds.has(order.providerSubscriptionId) ||
+              (subInDb && subInDb.user_id === params.userId))
+        );
+        const matchesPersistedOrder = Boolean(
+          persistedUserOrderIds.has(order.providerOrderId) ||
+            userAttemptOrderIds.has(order.providerOrderId) ||
+            payInDb?.user_id === params.userId ||
+            attemptByOrderInDb?.user_id === params.userId
+        );
+
+        const hasPersistedAnchor = matchesAttempt || matchesSub || matchesPersistedOrder;
+
+        // 3. Sem âncora persistida (mesmo se customerEmail coincidir!), permanece pendente sem ativar PRO
+        if (!hasPersistedAnchor) {
+          pendingReconciliationCount += 1;
+          if (order.status === 'paid') {
+            await this.processor.processEvent(
+              {
+                provider: provider.id,
+                providerEventId: `reconcile_unanchored_${order.providerOrderId}_${order.status}`,
+                eventType: `reconcile.unanchored.${order.status}`,
+                canonicalAction: 'ACTIVATE',
+                providerOrderId: order.providerOrderId,
+                providerSubscriptionId: order.providerSubscriptionId,
+                customerEmail: order.customerEmail,
+                productId: order.productId || plan.productId,
+                offerId: order.offerId || plan.offerId,
+                checkoutId: plan.checkoutId,
+                paymentMethod: order.paymentMethod,
+                amountCents: order.amountCents,
+                currency: order.currency,
+                occurredAt: order.paidAt || new Date().toISOString(),
+                paidAt: order.paidAt,
+                periodStart: order.periodStart,
+                periodEnd: order.periodEnd,
+                nextBillingAt: order.nextBillingAt,
+                rawPayload: { source: 'reconciliation_unanchored', order },
+              },
+              { signatureValid: true }
+            );
+          }
+          details.push({
+            providerOrderId: order.providerOrderId,
+            status: order.status,
+            paymentMethod: order.paymentMethod,
+            outcome: 'PENDING_RECONCILIATION_NO_PERSISTED_ANCHOR',
+          });
+          continue;
+        }
+
+        if (
+          isProhibitedPaymentMethod(order.paymentMethod) ||
+          (order.status === 'paid' && !isAllowedPaymentMethod(order.paymentMethod))
+        ) {
           rejectedProhibitedCount += 1;
           details.push({
             providerOrderId: order.providerOrderId,
@@ -208,8 +342,10 @@ export class BillingReconciliationService {
     return {
       success: true,
       reconciledCount,
+      pendingReconciliationCount,
       rejectedProhibitedCount,
-      checkedAttempts: openAttempts.length,
+      rejectedForeignCount,
+      checkedAttempts: userAttempts.length,
       details,
     };
   }
