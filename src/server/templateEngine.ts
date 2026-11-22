@@ -6,6 +6,24 @@
 import fs from 'fs';
 import path from 'path';
 
+function escapeHtml(raw: unknown): string {
+  return String(raw ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function sanitizeUrl(raw: unknown, fallback: string): string {
+  const s = String(raw ?? '').trim();
+  if (!s) return fallback;
+  if (s.startsWith('https://') || s.startsWith('http://') || s.startsWith('/')) {
+    return s;
+  }
+  return fallback;
+}
+
 /**
  * Interface para acontecimentos passados ao motor de templates de e-mail
  */
@@ -111,14 +129,20 @@ export function renderFeaturedEventsHtml(eventsList: BriefingEmailEvent[], appUr
     : DEFAULT_FEATURED_EVENTS;
 
   return eventsToRender.map((item, idx) => {
-    const itemUrl = `${appUrl}/?event=${encodeURIComponent(item.id)}`;
-    const category = (item.category || 'GERAL').toUpperCase();
-    const sources = item.sources && item.sources.length > 0
-      ? item.sources.map(s => s.name).join(' · ')
-      : 'Imprensa verificada';
-    const extraSources = item.sourceCountText ? ` · ${item.sourceCountText}` : '';
-    const imgUrl = item.imageUrl || DEFAULT_FEATURED_EVENTS[idx % DEFAULT_FEATURED_EVENTS.length].imageUrl;
-    const relTime = item.relativeTime || 'há pouco';
+    const safeAppUrl = sanitizeUrl(appUrl, 'https://app.fatosbr.com.br').replace(/\/+$/, '');
+    const itemUrl = escapeHtml(`${safeAppUrl}/?event=${encodeURIComponent(item.id)}`);
+    const category = escapeHtml((item.category || 'GERAL').toUpperCase());
+    const safeTitle = escapeHtml(item.title);
+    const safeSummary = escapeHtml(item.summary || '');
+    const sources = escapeHtml(
+      item.sources && item.sources.length > 0
+        ? item.sources.map(s => s.name).join(' · ')
+        : 'Imprensa verificada'
+    );
+    const extraSources = item.sourceCountText ? ` · ${escapeHtml(item.sourceCountText)}` : '';
+    const defaultImg = DEFAULT_FEATURED_EVENTS[idx % DEFAULT_FEATURED_EVENTS.length].imageUrl || '';
+    const imgUrl = escapeHtml(sanitizeUrl(item.imageUrl, defaultImg));
+    const relTime = escapeHtml(item.relativeTime || 'há pouco');
 
     return `
       <div style="background-color: #0c0d10; border: 1px solid #1f2228; border-radius: 14px; padding: 14px 16px; margin-bottom: 12px; box-sizing: border-box;">
@@ -126,7 +150,7 @@ export function renderFeaturedEventsHtml(eventsList: BriefingEmailEvent[], appUr
           <tr>
             <td valign="top" width="140" class="event-card-img-cell" style="padding-right: 16px; width: 140px;">
               <a href="${itemUrl}" target="_blank" style="text-decoration: none; display: block;">
-                <img src="${imgUrl}" alt="${item.title}" class="event-card-img" width="140" height="92" style="width: 140px; height: 92px; border-radius: 10px; object-fit: cover; display: block; border: 0; background-color: #1a1c24;" />
+                <img src="${imgUrl}" alt="${safeTitle}" class="event-card-img" width="140" height="92" style="width: 140px; height: 92px; border-radius: 10px; object-fit: cover; display: block; border: 0; background-color: #1a1c24;" />
               </a>
             </td>
             <td valign="middle" class="event-card-content-cell">
@@ -135,11 +159,11 @@ export function renderFeaturedEventsHtml(eventsList: BriefingEmailEvent[], appUr
               </div>
               <div style="margin-bottom: 5px;">
                 <a href="${itemUrl}" target="_blank" style="color: #ffffff; text-decoration: none; font-size: 14.5px; font-weight: 700; line-height: 1.32; letter-spacing: -0.2px;">
-                  ${item.title}
+                  ${safeTitle}
                 </a>
               </div>
               <div style="font-size: 12px; color: #a1a1aa; line-height: 1.45; margin-bottom: 8px;">
-                ${item.summary}
+                ${safeSummary}
               </div>
               <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%">
                 <tr>
@@ -169,9 +193,11 @@ export function renderSecondaryEventsHtml(eventsList: BriefingEmailEvent[], appU
     : DEFAULT_SECONDARY_EVENTS;
 
   return secondaryList.map((row) => {
-    const itemUrl = `${appUrl}/?event=${encodeURIComponent(row.id)}`;
-    const category = (row.category || 'DESTAQUE').toUpperCase();
-    const relTime = row.relativeTime || 'há pouco';
+    const safeAppUrl = sanitizeUrl(appUrl, 'https://app.fatosbr.com.br').replace(/\/+$/, '');
+    const itemUrl = escapeHtml(`${safeAppUrl}/?event=${encodeURIComponent(row.id)}`);
+    const category = escapeHtml((row.category || 'DESTAQUE').toUpperCase());
+    const safeTitle = escapeHtml(row.title);
+    const relTime = escapeHtml(row.relativeTime || 'há pouco');
 
     return `
       <tr>
@@ -185,7 +211,7 @@ export function renderSecondaryEventsHtml(eventsList: BriefingEmailEvent[], appU
               </td>
               <td valign="middle">
                 <a href="${itemUrl}" target="_blank" style="color: #ffffff; font-size: 12.5px; font-weight: 500; text-decoration: none; line-height: 1.35;">
-                  ${row.title}
+                  ${safeTitle}
                 </a>
               </td>
               <td valign="middle" align="right" width="85" style="font-size: 11px; color: #71717a; white-space: nowrap; padding-left: 10px; width: 85px;">
@@ -202,13 +228,13 @@ export function renderSecondaryEventsHtml(eventsList: BriefingEmailEvent[], appU
 
 /**
  * Constrói o HTML editorial definitivo para o Resumo Matinal ou Resumo Noturno
- * correspondendo perfeitamente ao layout preto, branco e cinza da Sinal.
+ * correspondendo perfeitamente ao layout preto, branco e cinza da FatosBR.
  */
 export function buildEditorialBriefingHtml(options: EditorialBriefingOptions = {}): string {
   const isEvening = options.type === 'evening';
   const brandName = options.brandName || 'FatosBR';
   const senderEmail = options.senderEmail || 'noticias@fatosbr.com.br';
-  const appUrl = options.appUrl || 'https://fatosbr.com.br';
+  const appUrl = sanitizeUrl(options.appUrl, 'https://app.fatosbr.com.br').replace(/\/+$/, '');
   const dateFormatted = options.date || new Date().toLocaleDateString('pt-BR', {
     day: '2-digit',
     month: 'long',
@@ -236,21 +262,21 @@ export function buildEditorialBriefingHtml(options: EditorialBriefingOptions = {
   const secondaryHtml = renderSecondaryEventsHtml(options.events || [], appUrl);
 
   const variables: Record<string, string> = {
-    title: `${brandName} • ${editionTitle} — ${dateFormatted}`,
-    preheader: `${heroTitle} ${heroSubtitle}`,
-    date: dateFormatted,
-    edition_time: editionTime,
-    edition_title: editionTitle,
-    edition_name: editionName,
-    edition_subtext: editionSubtext,
-    kicker: kicker,
-    hero_title: heroTitle,
-    hero_subtitle: heroSubtitle,
-    reading_time: readingTime,
-    brand_name: brandName,
-    sender_email: senderEmail,
-    app_url: appUrl,
-    globe_image_url: globeImageUrl,
+    title: escapeHtml(`${brandName} • ${editionTitle} — ${dateFormatted}`),
+    preheader: escapeHtml(`${heroTitle} ${heroSubtitle}`),
+    date: escapeHtml(dateFormatted),
+    edition_time: escapeHtml(editionTime),
+    edition_title: escapeHtml(editionTitle),
+    edition_name: escapeHtml(editionName),
+    edition_subtext: escapeHtml(editionSubtext),
+    kicker: escapeHtml(kicker),
+    hero_title: escapeHtml(heroTitle),
+    hero_subtitle: escapeHtml(heroSubtitle),
+    reading_time: escapeHtml(readingTime),
+    brand_name: escapeHtml(brandName),
+    sender_email: escapeHtml(senderEmail),
+    app_url: escapeHtml(appUrl),
+    globe_image_url: escapeHtml(globeImageUrl),
     featured_events_html: featuredHtml,
     secondary_events_html: secondaryHtml
   };

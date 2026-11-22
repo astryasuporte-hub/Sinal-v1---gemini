@@ -16,6 +16,7 @@
 import crypto from 'crypto';
 import { executeSql, withTransaction, isPostgresConfigured } from './postgres.js';
 import { getServerKeys, isAllowedDomain } from './common.js';
+import { notificationEngine, SegmentedEventDispatchInput } from './notificationEngine.js';
 
 // Namespace fixo oficial para UUID v5 (FatosBR News Engine)
 const FATOSBR_NAMESPACE_UUID = '8f4c2c10-9b42-5f8e-a612-4f81023a845d';
@@ -43,6 +44,7 @@ export interface IngestionResult {
   eventsCreated: number;
   eventsUpdated: number;
   sourcesUpserted: number;
+  notificationsCreated?: number;
   durationMs: number;
   providers: Record<string, { configured: boolean; count: number; error?: string }>;
   error?: string;
@@ -479,6 +481,8 @@ export async function runServerSideIngestion(options?: {
     let articlesPersisted = 0;
     let eventsCreated = 0;
     let eventsUpdated = 0;
+    let notificationsCreated = 0;
+    const eventsToNotify: SegmentedEventDispatchInput[] = [];
 
     // 3. Execução em Transação Atômica Parametrizada
     await withTransaction(async (client) => {
@@ -780,8 +784,40 @@ export async function runServerSideIngestion(options?: {
            ON CONFLICT (event_id, topic_id) DO NOTHING`,
           [eventUuid, realTopicId]
         );
+
+        const clusterSourceIds = Array.from(
+          new Set(
+            cl.relatedArticles
+              .map((r) => sourceMap.get(r.record.article.domain))
+              .filter((sid): sid is string => Boolean(sid))
+          )
+        );
+        eventsToNotify.push({
+          eventId: eventUuid,
+          title: primary.article.title,
+          summary,
+          relevanceScore,
+          topicIds: realTopicId ? [realTopicId] : [],
+          sourceIds: clusterSourceIds,
+          type: existingEvt.rows.length === 0 ? 'NEWS_HIGH_RELEVANCE' : 'EVENT_UPDATED',
+        });
       }
     });
+
+    // Passo 4: Disparo pós-commit de alertas segmentados (isolado de falhas transacionais)
+    if (eventsToNotify.length > 0 && process.env.SUPABASE_SERVICE_ROLE_KEY) {
+      for (const evtInput of eventsToNotify) {
+        try {
+          const dispatchRes = await notificationEngine.dispatchSegmentedNotificationsForEvent(evtInput);
+          notificationsCreated += dispatchRes.created || 0;
+        } catch (dispatchErr: any) {
+          console.warn(
+            `[Ingest Engine ${executionId}] Aviso ao segmentar alertas pós-ingestão:`,
+            dispatchErr?.message || dispatchErr
+          );
+        }
+      }
+    }
 
     console.log(`[Ingest Engine ${executionId}] Persistência concluída com sucesso em ${Date.now() - startTime}ms: ` +
       `${articlesPersisted} matérias persistidas, ${sourcesUpserted} fontes atualizadas, ` +
@@ -796,6 +832,7 @@ export async function runServerSideIngestion(options?: {
       eventsCreated,
       eventsUpdated,
       sourcesUpserted,
+      notificationsCreated,
       durationMs: Date.now() - startTime,
       providers
     };

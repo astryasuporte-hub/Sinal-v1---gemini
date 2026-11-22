@@ -25,6 +25,7 @@ import {
 import { CompanyLogoBadge } from './CompanyLogoBadge';
 import { notificationService } from '../services/notificationService';
 import { userService } from '../services/userService';
+import { supabase, isSupabaseConfigured } from '../lib/supabase';
 import { User as SupabaseUser } from '@supabase/supabase-js';
 
 export type NotificationCategory =
@@ -279,6 +280,35 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
       if (foundEvent && onOpenEvent) {
         onOpenEvent(foundEvent);
         return;
+      }
+      if (isSupabaseConfigured && onOpenEvent) {
+        try {
+          const { data: evRow } = await (supabase as any)
+            .from('events')
+            .select('id, title, slug, summary, why_it_matters, relevance_score, article_count, published_at, updated_at')
+            .eq('id', item.eventId)
+            .maybeSingle();
+          if (evRow?.id) {
+            const published = evRow.published_at || evRow.updated_at || new Date().toISOString();
+            onOpenEvent({
+              id: String(evRow.id),
+              title: evRow.title || 'Acontecimento registrado',
+              summary: evRow.summary || '',
+              whatHappened: evRow.summary || '',
+              whyItMatters: evRow.why_it_matters || 'Fato apurado pelo motor editorial da FatosBR.',
+              category: 'Brasil',
+              relevanceScore: Number(evRow.relevance_score || 75),
+              publishedAt: published,
+              updatedAt: evRow.updated_at || published,
+              relativeTime: new Date(published).toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' }),
+              sources: [],
+              entities: [],
+              topics: [],
+              timeline: [],
+            });
+            return;
+          }
+        } catch {}
       }
       showToast('Este acontecimento não está mais disponível no catálogo atual.', true);
       return;

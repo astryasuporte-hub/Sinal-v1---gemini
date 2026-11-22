@@ -17,6 +17,7 @@
 import { getServerSupabase } from './db.js';
 import { getServerKeys } from './common.js';
 import { notificationEngine } from './notificationEngine.js';
+import { getPostgresPool, isPostgresConfigured } from './postgres.js';
 
 export type BriefingEditionType = 'MORNING' | 'EVENING';
 
@@ -71,7 +72,29 @@ export interface GenerateBriefingResult {
   eventsCount: number;
   notificationCreated?: boolean;
   emailSent?: boolean;
+  emailSkippedReason?: 'DISABLED_OR_NO_EMAIL' | 'OPTED_OUT' | 'ALREADY_SENT' | 'RESEND_UNCONFIGURED';
   emailError?: string;
+  recoveredFromStatus?: string;
+  error?: string;
+}
+
+export interface BriefingRunLogEntry {
+  runId: string;
+  mode: 'BATCH_CYCLE' | 'SINGLE_USER';
+  type: BriefingEditionType;
+  localDate: string;
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
+  eligibleUsers: number;
+  ready: number;
+  sent: number;
+  skippedDuplicates: number;
+  skippedNoEvents: number;
+  failed: number;
+  locked: boolean;
+  sendEmail: boolean;
+  respectScheduleWindow: boolean;
   error?: string;
 }
 
@@ -79,6 +102,8 @@ interface BriefingEngineDeps {
   getServerSupabase: typeof getServerSupabase;
   getServerKeys: typeof getServerKeys;
   fetchFn: typeof fetch;
+  isPostgresConfigured: typeof isPostgresConfigured;
+  getPostgresPool: typeof getPostgresPool;
 }
 
 let testDeps: BriefingEngineDeps | null = null;
@@ -92,6 +117,8 @@ export function setBriefingEngineTestDeps(deps: Partial<BriefingEngineDeps> | nu
     getServerSupabase: deps.getServerSupabase || getServerSupabase,
     getServerKeys: deps.getServerKeys || getServerKeys,
     fetchFn: deps.fetchFn || fetch,
+    isPostgresConfigured: deps.isPostgresConfigured || isPostgresConfigured,
+    getPostgresPool: deps.getPostgresPool || getPostgresPool,
   };
 }
 
@@ -101,8 +128,110 @@ function getDeps(): BriefingEngineDeps {
       getServerSupabase,
       getServerKeys,
       fetchFn: fetch,
+      isPostgresConfigured,
+      getPostgresPool,
     }
   );
+}
+
+const activeBriefingLocks = new Set<string>();
+const recentRunLogs: BriefingRunLogEntry[] = [];
+const MAX_RUN_LOGS = 50;
+const STALE_GENERATING_MS = 15 * 60 * 1000;
+
+function sanitizeRunErrorMessage(raw: unknown): string {
+  const msg = String(raw || '').trim();
+  if (!msg) return '';
+  return msg.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[email-redacted]').slice(0, 240);
+}
+
+interface AcquiredLockHandle {
+  acquired: boolean;
+  lockKey: string;
+  release: () => Promise<void>;
+}
+
+async function acquireBriefingCycleLock(
+  type: BriefingEditionType,
+  localDate: string
+): Promise<AcquiredLockHandle> {
+  const lockKey = `${type}:${localDate}`;
+  if (activeBriefingLocks.has(lockKey)) {
+    return {
+      acquired: false,
+      lockKey,
+      release: async () => {},
+    };
+  }
+
+  activeBriefingLocks.add(lockKey);
+  let pgClient: any = null;
+  let pgLockHeld = false;
+
+  try {
+    const { isPostgresConfigured: pgConfigured, getPostgresPool: getPool } = getDeps();
+    if (pgConfigured()) {
+      const pool = getPool();
+      pgClient = await pool.connect();
+      try {
+        const res = await pgClient.query(
+          `SELECT pg_try_advisory_lock(hashtext($1)) AS acquired`,
+          [`fatosbr:briefing:${lockKey}`]
+        );
+        const acquired = Boolean(res?.rows?.[0]?.acquired);
+        if (!acquired) {
+          activeBriefingLocks.delete(lockKey);
+          try {
+            pgClient.release();
+          } catch {}
+          return {
+            acquired: false,
+            lockKey,
+            release: async () => {},
+          };
+        }
+        pgLockHeld = true;
+      } catch {
+        // Caso o ambiente (ex: PGlite sem extensão específica ou mock mínimo) não suporte advisory lock,
+        // mantém o mutex em memória já adquirido sem derrubar o ciclo.
+        try {
+          pgClient.release();
+        } catch {}
+        pgClient = null;
+      }
+    }
+  } catch {
+    if (pgClient) {
+      try {
+        pgClient.release();
+      } catch {}
+      pgClient = null;
+    }
+  }
+
+  let released = false;
+  return {
+    acquired: true,
+    lockKey,
+    release: async () => {
+      if (released) return;
+      released = true;
+      activeBriefingLocks.delete(lockKey);
+      if (pgClient && pgLockHeld) {
+        try {
+          await pgClient.query(`SELECT pg_advisory_unlock(hashtext($1))`, [
+            `fatosbr:briefing:${lockKey}`,
+          ]);
+        } catch {}
+      }
+      if (pgClient) {
+        try {
+          pgClient.release();
+        } catch {}
+        pgClient = null;
+      }
+    },
+  };
 }
 
 function isMissingColumnError(err: any): boolean {
@@ -385,14 +514,18 @@ function renderBriefingEmailHtml(params: {
   events: BriefingEventCandidate[];
 }): string {
   const badge = params.type === 'EVENING' ? 'EDIÇÃO NOTURNA' : 'EDIÇÃO MATINAL';
+  const appBaseUrl = String(process.env.APP_URL || 'https://app.fatosbr.com.br').replace(/\/+$/, '');
   const itemsHtml = params.events
     .map(
       (ev, idx) => `
       <tr>
         <td style="padding:16px 0;border-bottom:1px solid #22242a;">
-          <div style="font-size:11px;color:#9ca3af;font-family:monospace;margin-bottom:4px;">#${idx + 1} · RELEVÂNCIA ${ev.relevance_score}</div>
-          <div style="font-size:16px;font-weight:700;color:#ffffff;margin-bottom:6px;">${escapeHtml(ev.title)}</div>
+          <div style="font-size:11px;color:#9ca3af;font-family:monospace;margin-bottom:4px;">#${idx + 1} · RELEVÂNCIA ${Number(ev.relevance_score || 0)}${ev.isFollowedMatch ? ' · DO SEU INTERESSE' : ''}</div>
+          <div style="font-size:16px;font-weight:700;color:#ffffff;margin-bottom:6px;">
+            <a href="${escapeHtml(`${appBaseUrl}/?event=${encodeURIComponent(ev.id)}`)}" style="color:#ffffff;text-decoration:none;">${escapeHtml(ev.title)}</a>
+          </div>
           <div style="font-size:13px;line-height:1.5;color:#d4d4d8;">${escapeHtml(ev.summary || '')}</div>
+          ${ev.why_it_matters ? `<div style="font-size:12px;line-height:1.45;color:#a1a1aa;margin-top:6px;"><strong>Por que importa:</strong> ${escapeHtml(ev.why_it_matters)}</div>` : ''}
         </td>
       </tr>`
     )
@@ -410,6 +543,11 @@ function renderBriefingEmailHtml(params: {
       </td>
     </tr>
     ${itemsHtml}
+    <tr>
+      <td style="padding-top:20px;font-size:11px;color:#71717a;text-align:center;">
+        FatosBR · <a href="${escapeHtml(`${appBaseUrl}/?tab=briefings`)}" style="color:#a1a1aa;text-decoration:underline;">Ler na plataforma</a> · <a href="${escapeHtml(`${appBaseUrl}/?tab=profile`)}" style="color:#a1a1aa;text-decoration:underline;">Gerenciar preferências</a>
+      </td>
+    </tr>
   </table>
 </body>
 </html>`;
@@ -422,6 +560,9 @@ async function fetchUserSchedulePreferences(
   timezone: string;
   morningTime: string;
   eveningTime: string;
+  morningEnabled: boolean;
+  eveningEnabled: boolean;
+  briefingEmail: string | null;
 }> {
   let prefRow: any = null;
   let settingsRow: any = null;
@@ -429,14 +570,14 @@ async function fetchUserSchedulePreferences(
   try {
     let { data, error } = await supabase
       .from('user_preferences')
-      .select('timezone, morning_time, evening_time')
+      .select('timezone, morning_time, evening_time, email_morning_briefing, email_evening_briefing, briefing_email')
       .eq('id', userId)
       .maybeSingle();
 
     if (error && isMissingColumnError(error)) {
       const retry = await supabase
         .from('user_preferences')
-        .select('timezone')
+        .select('timezone, email_morning_briefing, email_evening_briefing, briefing_email')
         .eq('id', userId)
         .maybeSingle();
       data = retry.data;
@@ -447,20 +588,24 @@ async function fetchUserSchedulePreferences(
   try {
     let { data, error } = await supabase
       .from('user_settings')
-      .select('timezone, morning_time, evening_time')
+      .select('timezone, morning_time, evening_time, email_morning_briefing, email_evening_briefing, briefing_email')
       .eq('user_id', userId)
       .maybeSingle();
 
     if (error && isMissingColumnError(error)) {
       const retry = await supabase
         .from('user_settings')
-        .select('timezone')
+        .select('timezone, briefing_email')
         .eq('user_id', userId)
         .maybeSingle();
       data = retry.data;
     }
     settingsRow = data || null;
   } catch {}
+
+  const rawMorningEnabled = settingsRow?.email_morning_briefing ?? prefRow?.email_morning_briefing;
+  const rawEveningEnabled = settingsRow?.email_evening_briefing ?? prefRow?.email_evening_briefing;
+  const rawEmail = settingsRow?.briefing_email || prefRow?.briefing_email || null;
 
   return {
     timezone: resolveTimezone(prefRow?.timezone || settingsRow?.timezone),
@@ -472,6 +617,9 @@ async function fetchUserSchedulePreferences(
       prefRow?.evening_time || settingsRow?.evening_time,
       DEFAULT_EVENING_TIME
     ),
+    morningEnabled: rawMorningEnabled !== false,
+    eveningEnabled: rawEveningEnabled !== false,
+    briefingEmail: rawEmail ? String(rawEmail).trim() : null,
   };
 }
 
@@ -607,9 +755,22 @@ export const briefingEngine = {
     const anchorMs = (options?.referenceDate || new Date()).getTime();
     const cutoffIso = new Date(anchorMs - windowHours * 3600 * 1000).toISOString();
 
-    const [entFollowRes, topicFollowRes, recentEventsRes] = await Promise.all([
-      (supabase as any).from('user_entity_follows').select('entity_id').eq('user_id', userId),
-      (supabase as any).from('user_topic_follows').select('topic_id').eq('user_id', userId),
+    const safeSelect = async (fn: () => Promise<any>) => {
+      try {
+        const res = await fn();
+        if (res?.error && (isMissingRelationError(res.error) || isMissingColumnError(res.error))) {
+          return { data: [], error: null };
+        }
+        return res;
+      } catch {
+        return { data: [], error: null };
+      }
+    };
+
+    const [entFollowRes, topicFollowRes, sourceFollowRes, recentEventsRes] = await Promise.all([
+      safeSelect(() => (supabase as any).from('user_entity_follows').select('entity_id').eq('user_id', userId)),
+      safeSelect(() => (supabase as any).from('user_topic_follows').select('topic_id').eq('user_id', userId)),
+      safeSelect(() => (supabase as any).from('user_source_follows').select('source_id').eq('user_id', userId)),
       (supabase as any)
         .from('events')
         .select('id, title, summary, why_it_matters, relevance_score, published_at')
@@ -644,46 +805,92 @@ export const briefingEngine = {
     const followedTopicIds = new Set(
       (topicFollowRes.data || []).map((r: any) => String(r.topic_id)).filter(Boolean)
     );
+    const followedSourceIds = new Set(
+      (sourceFollowRes.data || []).map((r: any) => String(r.source_id)).filter(Boolean)
+    );
 
-    const boostedEventIds = new Set<string>();
+    const boostedEventSignals = new Map<string, number>();
+    const addBoost = (eventId: string) => {
+      boostedEventSignals.set(eventId, (boostedEventSignals.get(eventId) || 0) + 1);
+    };
     const candidateIds = candidates.map((c) => c.id);
 
     if (followedEntityIds.size > 0 && candidateIds.length > 0) {
-      const { data: eeRows } = await (supabase as any)
-        .from('event_entities')
-        .select('event_id, entity_id')
-        .in('event_id', candidateIds);
+      const { data: eeRows } = await safeSelect(() =>
+        (supabase as any).from('event_entities').select('event_id, entity_id').in('event_id', candidateIds)
+      );
       for (const r of eeRows || []) {
         if (followedEntityIds.has(String(r.entity_id))) {
-          boostedEventIds.add(String(r.event_id));
+          addBoost(String(r.event_id));
         }
       }
     }
 
     if (followedTopicIds.size > 0 && candidateIds.length > 0) {
-      const { data: etRows } = await (supabase as any)
-        .from('event_topics')
-        .select('event_id, topic_id')
-        .in('event_id', candidateIds);
+      const { data: etRows } = await safeSelect(() =>
+        (supabase as any).from('event_topics').select('event_id, topic_id').in('event_id', candidateIds)
+      );
       for (const r of etRows || []) {
         if (followedTopicIds.has(String(r.topic_id))) {
-          boostedEventIds.add(String(r.event_id));
+          addBoost(String(r.event_id));
         }
       }
     }
 
+    if (followedSourceIds.size > 0 && candidateIds.length > 0) {
+      const matchedEventsBySource = new Set<string>();
+      const { data: eaRows } = await safeSelect(() =>
+        (supabase as any).from('event_articles').select('event_id, article_id').in('event_id', candidateIds)
+      );
+      const articleIds = Array.from(
+        new Set((eaRows || []).map((r: any) => (r?.article_id ? String(r.article_id) : '')).filter(Boolean))
+      );
+      if (articleIds.length > 0) {
+        const { data: artRows } = await safeSelect(() =>
+          (supabase as any).from('articles').select('id, source_id').in('id', articleIds)
+        );
+        const matchedArticleIds = new Set(
+          (artRows || [])
+            .filter((a: any) => a?.source_id && followedSourceIds.has(String(a.source_id)))
+            .map((a: any) => String(a.id))
+        );
+        for (const r of eaRows || []) {
+          if (r?.article_id && matchedArticleIds.has(String(r.article_id)) && r?.event_id) {
+            matchedEventsBySource.add(String(r.event_id));
+          }
+        }
+      }
+
+      // Compatibilidade com eventual tabela event_sources
+      const { data: esRows } = await safeSelect(() =>
+        (supabase as any).from('event_sources').select('event_id, source_id').in('event_id', candidateIds)
+      );
+      for (const r of esRows || []) {
+        if (r?.source_id && followedSourceIds.has(String(r.source_id)) && r?.event_id) {
+          matchedEventsBySource.add(String(r.event_id));
+        }
+      }
+
+      for (const eid of matchedEventsBySource) {
+        addBoost(eid);
+      }
+    }
+
     const ranked = [...candidates]
-      .map((c) => ({
-        ...c,
-        isFollowedMatch: boostedEventIds.has(c.id),
-      }))
+      .map((c) => {
+        const matchCount = boostedEventSignals.get(c.id) || 0;
+        return {
+          ...c,
+          isFollowedMatch: matchCount > 0,
+          _boostPoints: matchCount > 0 ? 25 + Math.min(matchCount - 1, 3) * 10 : 0,
+        };
+      })
       .sort((a, b) => {
-        const aBoost = a.isFollowedMatch ? 25 : 0;
-        const bBoost = b.isFollowedMatch ? 25 : 0;
-        const scoreDiff = b.relevance_score + bBoost - (a.relevance_score + aBoost);
+        const scoreDiff = b.relevance_score + b._boostPoints - (a.relevance_score + a._boostPoints);
         if (scoreDiff !== 0) return scoreDiff;
         return new Date(b.published_at).getTime() - new Date(a.published_at).getTime();
-      });
+      })
+      .map(({ _boostPoints, ...rest }) => rest);
 
     return ranked.slice(0, limit);
   },
@@ -705,14 +912,7 @@ export const briefingEngine = {
     const supabase = getSb();
     const refDate = params.referenceDate || new Date();
 
-    const userSchedule =
-      params.timezone && params.morningTime && params.eveningTime
-        ? {
-            timezone: resolveTimezone(params.timezone),
-            morningTime: normalizeScheduleTime(params.morningTime, DEFAULT_MORNING_TIME),
-            eveningTime: normalizeScheduleTime(params.eveningTime, DEFAULT_EVENING_TIME),
-          }
-        : await fetchUserSchedulePreferences(supabase, params.userId);
+    const userSchedule = await fetchUserSchedulePreferences(supabase, params.userId);
 
     const effectiveTimezone = params.timezone ? resolveTimezone(params.timezone) : userSchedule.timezone;
     const effectiveMorningTime = params.morningTime
@@ -721,6 +921,12 @@ export const briefingEngine = {
     const effectiveEveningTime = params.eveningTime
       ? normalizeScheduleTime(params.eveningTime, DEFAULT_EVENING_TIME)
       : userSchedule.eveningTime;
+    const resolvedEmail =
+      (params.briefingEmail ? String(params.briefingEmail).trim() : '') ||
+      userSchedule.briefingEmail ||
+      '';
+    const userEditionOptIn =
+      params.type === 'EVENING' ? userSchedule.eveningEnabled : userSchedule.morningEnabled;
 
     const { localDate, dayStart, dayEnd, periodStart, periodEnd, scheduledFor, dateLabelPt } =
       getBriefingPeriodWindow(params.type, refDate, {
@@ -731,40 +937,54 @@ export const briefingEngine = {
 
     // Verifica duplicidade utilizando preferencialmente (user_id, type, local_date),
     // alinhado a idx_briefing_delivery_slot, com fallback para (period_start, period_end) ou dia local.
-    let existing: { id?: string; status?: string } | null = null;
+    let existing: { id?: string; status?: string; updated_at?: string; sent_at?: string | null } | null = null;
     let dupErr: any = null;
 
-    const localDateCheck = await (supabase as any)
-      .from('briefings')
-      .select('id, status')
-      .eq('user_id', params.userId)
-      .eq('type', params.type)
-      .eq('local_date', localDate)
-      .maybeSingle();
+    const selectSlotCols = async (buildQuery: (cols: string) => Promise<any>) => {
+      const full = await buildQuery('id, status, updated_at, sent_at');
+      if (full?.error && isMissingColumnError(full.error)) {
+        return buildQuery('id, status');
+      }
+      return full;
+    };
+
+    const localDateCheck = await selectSlotCols((cols) =>
+      (supabase as any)
+        .from('briefings')
+        .select(cols)
+        .eq('user_id', params.userId)
+        .eq('type', params.type)
+        .eq('local_date', localDate)
+        .maybeSingle()
+    );
 
     if (!localDateCheck.error) {
       existing = localDateCheck.data;
     } else if (isMissingColumnError(localDateCheck.error)) {
-      const periodCheck = await (supabase as any)
-        .from('briefings')
-        .select('id, status')
-        .eq('user_id', params.userId)
-        .eq('type', params.type)
-        .eq('period_start', periodStart)
-        .eq('period_end', periodEnd)
-        .maybeSingle();
+      const periodCheck = await selectSlotCols((cols) =>
+        (supabase as any)
+          .from('briefings')
+          .select(cols)
+          .eq('user_id', params.userId)
+          .eq('type', params.type)
+          .eq('period_start', periodStart)
+          .eq('period_end', periodEnd)
+          .maybeSingle()
+      );
 
       if (!periodCheck.error) {
         existing = periodCheck.data;
       } else if (isMissingColumnError(periodCheck.error)) {
-        const dayCheck = await (supabase as any)
-          .from('briefings')
-          .select('id, status')
-          .eq('user_id', params.userId)
-          .eq('type', params.type)
-          .gte('scheduled_for', dayStart)
-          .lte('scheduled_for', dayEnd)
-          .maybeSingle();
+        const dayCheck = await selectSlotCols((cols) =>
+          (supabase as any)
+            .from('briefings')
+            .select(cols)
+            .eq('user_id', params.userId)
+            .eq('type', params.type)
+            .gte('scheduled_for', dayStart)
+            .lte('scheduled_for', dayEnd)
+            .maybeSingle()
+        );
         existing = dayCheck.data;
         dupErr = dayCheck.error;
       } else {
@@ -783,11 +1003,22 @@ export const briefingEngine = {
         periodStart,
         periodEnd,
         eventsCount: 0,
-        error: `Falha ao verificar duplicidade de briefing: ${dupErr.message}`,
+        error: sanitizeRunErrorMessage(`Falha ao verificar duplicidade de briefing: ${dupErr.message}`),
       };
     }
 
-    if (existing?.id && existing.status !== 'FAILED' && existing.status !== 'CANCELED') {
+    const existingUpdatedMs = existing?.updated_at ? new Date(existing.updated_at).getTime() : 0;
+    const isStaleGenerating =
+      existing?.status === 'GENERATING' &&
+      existingUpdatedMs > 0 &&
+      refDate.getTime() - existingUpdatedMs > STALE_GENERATING_MS;
+
+    const isRecoverableExisting = Boolean(
+      existing?.id &&
+        (existing.status === 'FAILED' || existing.status === 'CANCELED' || isStaleGenerating)
+    );
+
+    if (existing?.id && !isRecoverableExisting) {
       return {
         userId: params.userId,
         type: params.type,
@@ -800,7 +1031,7 @@ export const briefingEngine = {
       };
     }
 
-    // Etapa 1: Selecionar acontecimentos reais (não cria briefing vazio como completo!)
+    // Etapa 1: Selecionar acontecimentos reais (não cria/sobrescreve briefing vazio como completo)
     const selectedEvents = await this.selectEventsForUser(params.userId, {
       referenceDate: refDate,
     });
@@ -825,100 +1056,175 @@ export const briefingEngine = {
         ? 'O fechamento dos principais acontecimentos apurados ao longo do dia.'
         : 'Os principais acontecimentos consolidados para iniciar o dia.';
 
-    // Etapa 2: Criação do registro com local_date, period_start, period_end, status GENERATING e type canônico
-    const baseInsertPayload = {
-      user_id: params.userId,
-      type: params.type,
-      local_date: localDate,
-      title,
-      description,
-      status: 'GENERATING',
-      period_start: periodStart,
-      period_end: periodEnd,
-      scheduled_for: scheduledFor,
-    };
+    // Etapa 2: Criação do registro (ou recuperação segura de slot FAILED / CANCELED / GENERATING expirado)
+    let briefingId = '';
+    const recoveredFromStatus = isRecoverableExisting ? String(existing?.status || '') : undefined;
 
-    let { data: createdRow, error: createErr } = await (supabase as any)
-      .from('briefings')
-      .insert(baseInsertPayload)
-      .select('id')
-      .single();
+    if (isRecoverableExisting && existing?.id) {
+      briefingId = String(existing.id);
 
-    if (
-      createErr &&
-      isMissingColumnError(createErr) &&
-      String(createErr.message || '').toLowerCase().includes('local_date')
-    ) {
-      const { local_date: _omitted, ...fallbackPayload } = baseInsertPayload;
-      const retry = await (supabase as any)
+      // Limpa itens órfãos anteriores desse mesmo briefing antes de reescrever
+      try {
+        await (supabase as any).from('briefing_items').delete().eq('briefing_id', briefingId);
+      } catch {}
+
+      const nowIso = new Date().toISOString();
+      const recoverPayload: Record<string, any> = {
+        title,
+        description,
+        status: 'GENERATING',
+        period_start: periodStart,
+        period_end: periodEnd,
+        scheduled_for: scheduledFor,
+        local_date: localDate,
+        sent_at: null,
+        updated_at: nowIso,
+      };
+
+      let { error: recErr } = await (supabase as any)
         .from('briefings')
-        .insert(fallbackPayload)
-        .select('id')
-        .single();
-      createdRow = retry.data;
-      createErr = retry.error;
-    }
+        .update(recoverPayload)
+        .eq('id', briefingId);
 
-    if (createErr || !createdRow?.id) {
-      if (createErr?.code === '23505') {
-        let conflictId: string | undefined;
-        const byLocalDate = await (supabase as any)
+      if (recErr && isMissingColumnError(recErr)) {
+        const msg = String(recErr.message || '').toLowerCase();
+        const fallbackUpdate = { ...recoverPayload };
+        if (msg.includes('local_date')) delete fallbackUpdate.local_date;
+        if (msg.includes('sent_at')) delete fallbackUpdate.sent_at;
+        const retry = await (supabase as any)
           .from('briefings')
-          .select('id')
-          .eq('user_id', params.userId)
-          .eq('type', params.type)
-          .eq('local_date', localDate)
-          .maybeSingle();
+          .update(fallbackUpdate)
+          .eq('id', briefingId);
+        recErr = retry.error;
+      }
 
-        if (!byLocalDate.error && byLocalDate.data?.id) {
-          conflictId = String(byLocalDate.data.id);
-        } else {
-          const byPeriod = await (supabase as any)
-            .from('briefings')
-            .select('id')
-            .eq('user_id', params.userId)
-            .eq('type', params.type)
-            .eq('period_start', periodStart)
-            .maybeSingle();
-          if (byPeriod?.data?.id) {
-            conflictId = String(byPeriod.data.id);
-          }
-        }
-
+      if (recErr) {
         return {
           userId: params.userId,
           type: params.type,
-          status: 'SKIPPED_DUPLICATE',
-          briefingId: conflictId,
+          status: 'FAILED',
+          briefingId,
           localDate,
           periodStart,
           periodEnd,
           eventsCount: 0,
+          recoveredFromStatus,
+          error: sanitizeRunErrorMessage(`Falha ao reprocessar slot ${briefingId}: ${recErr.message}`),
         };
       }
-      return {
-        userId: params.userId,
+    } else {
+      const baseInsertPayload = {
+        user_id: params.userId,
         type: params.type,
-        status: 'FAILED',
-        localDate,
-        periodStart,
-        periodEnd,
-        eventsCount: 0,
-        error: createErr?.message || 'Falha ao inserir registro inicial de briefing.',
+        local_date: localDate,
+        title,
+        description,
+        status: 'GENERATING',
+        period_start: periodStart,
+        period_end: periodEnd,
+        scheduled_for: scheduledFor,
       };
+
+      let { data: createdRow, error: createErr } = await (supabase as any)
+        .from('briefings')
+        .insert(baseInsertPayload)
+        .select('id')
+        .single();
+
+      if (
+        createErr &&
+        isMissingColumnError(createErr) &&
+        String(createErr.message || '').toLowerCase().includes('local_date')
+      ) {
+        const { local_date: _omitted, ...fallbackPayload } = baseInsertPayload;
+        const retry = await (supabase as any)
+          .from('briefings')
+          .insert(fallbackPayload)
+          .select('id')
+          .single();
+        createdRow = retry.data;
+        createErr = retry.error;
+      }
+
+      if (createErr || !createdRow?.id) {
+        if (createErr?.code === '23505') {
+          let conflictId: string | undefined;
+          const byLocalDate = await (supabase as any)
+            .from('briefings')
+            .select('id')
+            .eq('user_id', params.userId)
+            .eq('type', params.type)
+            .eq('local_date', localDate)
+            .maybeSingle();
+
+          if (!byLocalDate.error && byLocalDate.data?.id) {
+            conflictId = String(byLocalDate.data.id);
+          } else {
+            const byPeriod = await (supabase as any)
+              .from('briefings')
+              .select('id')
+              .eq('user_id', params.userId)
+              .eq('type', params.type)
+              .eq('period_start', periodStart)
+              .maybeSingle();
+            if (byPeriod?.data?.id) {
+              conflictId = String(byPeriod.data.id);
+            }
+          }
+
+          return {
+            userId: params.userId,
+            type: params.type,
+            status: 'SKIPPED_DUPLICATE',
+            briefingId: conflictId,
+            localDate,
+            periodStart,
+            periodEnd,
+            eventsCount: 0,
+          };
+        }
+        return {
+          userId: params.userId,
+          type: params.type,
+          status: 'FAILED',
+          localDate,
+          periodStart,
+          periodEnd,
+          eventsCount: 0,
+          error: sanitizeRunErrorMessage(
+            createErr?.message || 'Falha ao inserir registro inicial de briefing.'
+          ),
+        };
+      }
+
+      briefingId = String(createdRow.id);
     }
 
-    const briefingId = String(createdRow.id);
-
-    // Etapa 3: Persistir itens ordenados em public.briefing_items (position + section canônicos do PostgreSQL)
-    const itemsPayload = selectedEvents.map((ev, index) => ({
+    // Etapa 3: Persistir itens ordenados em public.briefing_items
+    // Popula position (e order_index quando a coluna existe no esquema) com section canônico
+    const itemsWithDualOrder = selectedEvents.map((ev, index) => ({
       briefing_id: briefingId,
       event_id: ev.id,
       position: index + 1,
+      order_index: index + 1,
       section: classifyBriefingItemSection(ev, index, selectedEvents.length),
     }));
 
-    const { error: itemsErr } = await (supabase as any).from('briefing_items').insert(itemsPayload);
+    let { error: itemsErr } = await (supabase as any).from('briefing_items').insert(itemsWithDualOrder);
+
+    if (itemsErr && isMissingColumnError(itemsErr)) {
+      const errMsg = String(itemsErr.message || '').toLowerCase();
+      if (errMsg.includes('position') && !errMsg.includes('order_index')) {
+        const onlyOrderIndex = itemsWithDualOrder.map(({ position: _p, ...rest }) => rest);
+        const retry = await (supabase as any).from('briefing_items').insert(onlyOrderIndex);
+        itemsErr = retry.error;
+      } else {
+        const onlyPosition = itemsWithDualOrder.map(({ order_index: _o, ...rest }) => rest);
+        const retry = await (supabase as any).from('briefing_items').insert(onlyPosition);
+        itemsErr = retry.error;
+      }
+    }
+
     if (itemsErr) {
       await (supabase as any)
         .from('briefings')
@@ -933,7 +1239,8 @@ export const briefingEngine = {
         periodStart,
         periodEnd,
         eventsCount: 0,
-        error: `Falha ao persistir itens do briefing: ${itemsErr.message}`,
+        recoveredFromStatus,
+        error: sanitizeRunErrorMessage(`Falha ao persistir itens do briefing: ${itemsErr.message}`),
       };
     }
 
@@ -953,7 +1260,8 @@ export const briefingEngine = {
         periodStart,
         periodEnd,
         eventsCount: selectedEvents.length,
-        error: `Itens salvos, mas falhou atualização para READY: ${readyErr.message}`,
+        recoveredFromStatus,
+        error: sanitizeRunErrorMessage(`Itens salvos, mas falhou atualização para READY: ${readyErr.message}`),
       };
     }
 
@@ -966,8 +1274,8 @@ export const briefingEngine = {
       eventsCount: selectedEvents.length,
     });
 
-    // Etapas 6 & 7: Envio por e-mail somente se solicitado e com Resend operacional
-    if (!params.sendEmail || !params.briefingEmail) {
+    // Etapas 6 & 7: Envio por e-mail somente se solicitado, opt-in ativo, não enviado antes e Resend operacional
+    if (!params.sendEmail || !resolvedEmail) {
       return {
         userId: params.userId,
         type: params.type,
@@ -979,8 +1287,52 @@ export const briefingEngine = {
         eventsCount: selectedEvents.length,
         notificationCreated: Boolean(notifRes.success && !notifRes.skipped),
         emailSent: false,
+        emailSkippedReason: 'DISABLED_OR_NO_EMAIL',
+        recoveredFromStatus,
       };
     }
+
+    if (!userEditionOptIn) {
+      return {
+        userId: params.userId,
+        type: params.type,
+        status: 'READY',
+        briefingId,
+        localDate,
+        periodStart,
+        periodEnd,
+        eventsCount: selectedEvents.length,
+        notificationCreated: Boolean(notifRes.success && !notifRes.skipped),
+        emailSent: false,
+        emailSkippedReason: 'OPTED_OUT',
+        recoveredFromStatus,
+      };
+    }
+
+    // Proteção extra anti-reenvio em caso de corrida antes da confirmação de envio
+    try {
+      const { data: sendCheck } = await (supabase as any)
+        .from('briefings')
+        .select('status, sent_at')
+        .eq('id', briefingId)
+        .maybeSingle();
+      if (sendCheck && (sendCheck.status === 'SENT' || sendCheck.sent_at)) {
+        return {
+          userId: params.userId,
+          type: params.type,
+          status: 'SENT',
+          briefingId,
+          localDate,
+          periodStart,
+          periodEnd,
+          eventsCount: selectedEvents.length,
+          notificationCreated: Boolean(notifRes.success && !notifRes.skipped),
+          emailSent: false,
+          emailSkippedReason: 'ALREADY_SENT',
+          recoveredFromStatus,
+        };
+      }
+    } catch {}
 
     const apiKey = getKeys().RESEND;
     if (!apiKey) {
@@ -995,7 +1347,9 @@ export const briefingEngine = {
         eventsCount: selectedEvents.length,
         notificationCreated: Boolean(notifRes.success && !notifRes.skipped),
         emailSent: false,
+        emailSkippedReason: 'RESEND_UNCONFIGURED',
         emailError: 'RESEND_API_KEY não configurada no servidor.',
+        recoveredFromStatus,
       };
     }
 
@@ -1016,7 +1370,7 @@ export const briefingEngine = {
         },
         body: JSON.stringify({
           from,
-          to: [params.briefingEmail],
+          to: [resolvedEmail],
           subject: `FatosBR • ${title}`,
           html,
           text: `${title} — ${description}`,
@@ -1025,6 +1379,7 @@ export const briefingEngine = {
 
       if (!resendRes.ok) {
         const errPayload = await resendRes.json().catch(() => ({}));
+        const sanitizedErr = sanitizeRunErrorMessage(errPayload?.message || `Resend HTTP ${resendRes.status}`);
         return {
           userId: params.userId,
           type: params.type,
@@ -1036,7 +1391,8 @@ export const briefingEngine = {
           eventsCount: selectedEvents.length,
           notificationCreated: Boolean(notifRes.success && !notifRes.skipped),
           emailSent: false,
-          emailError: errPayload?.message || `Resend HTTP ${resendRes.status}`,
+          emailError: sanitizedErr,
+          recoveredFromStatus,
         };
       }
 
@@ -1058,6 +1414,7 @@ export const briefingEngine = {
         eventsCount: selectedEvents.length,
         notificationCreated: Boolean(notifRes.success && !notifRes.skipped),
         emailSent: true,
+        recoveredFromStatus,
       };
     } catch (sendErr: any) {
       return {
@@ -1071,15 +1428,36 @@ export const briefingEngine = {
         eventsCount: selectedEvents.length,
         notificationCreated: Boolean(notifRes.success && !notifRes.skipped),
         emailSent: false,
-        emailError: sendErr?.message || 'Erro de rede ao enviar briefing por e-mail.',
+        emailError: sanitizeRunErrorMessage(sendErr?.message || 'Erro de rede ao enviar briefing por e-mail.'),
+        recoveredFromStatus,
       };
     }
   },
 
+  recordRunLog(entry: Omit<BriefingRunLogEntry, 'runId'>): BriefingRunLogEntry {
+    const fullEntry: BriefingRunLogEntry = {
+      ...entry,
+      runId: `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+      error: entry.error ? sanitizeRunErrorMessage(entry.error) : undefined,
+    };
+    recentRunLogs.unshift(fullEntry);
+    if (recentRunLogs.length > MAX_RUN_LOGS) {
+      recentRunLogs.length = MAX_RUN_LOGS;
+    }
+    return fullEntry;
+  },
+
+  getRecentRunLogs(): BriefingRunLogEntry[] {
+    return recentRunLogs.map((l) => ({ ...l }));
+  },
+
+  getActiveLocks(): string[] {
+    return Array.from(activeBriefingLocks);
+  },
+
   /**
-   * Executa um ciclo completo de geração para todos os usuários elegíveis.
-   * Quando `respectScheduleWindow: true`, gera apenas para usuários cuja janela horária
-   * configurada (`morning_time` / `evening_time` em `timezone`) já foi atingida no dia local.
+   * Executa um ciclo completo de geração para todos os usuários elegíveis,
+   * protegido por trava contra execução concorrente do mesmo slot (type + localDate).
    */
   async runGenerationCycle(options: {
     type: BriefingEditionType;
@@ -1087,6 +1465,8 @@ export const briefingEngine = {
     referenceDate?: Date;
     respectScheduleWindow?: boolean;
   }): Promise<{
+    locked?: boolean;
+    lockKey?: string;
     eligibleUsers: number;
     ready: number;
     sent: number;
@@ -1095,45 +1475,127 @@ export const briefingEngine = {
     failed: number;
     results: GenerateBriefingResult[];
   }> {
-    const eligible = await this.listEligibleUsers(options.type, options.referenceDate, {
-      respectScheduleWindow: Boolean(options.respectScheduleWindow),
-    });
-    const results: GenerateBriefingResult[] = [];
+    const startedMs = Date.now();
+    const startedAt = new Date(startedMs).toISOString();
+    const refDate = options.referenceDate || new Date();
+    const brParts = getZonedDateParts(refDate, DEFAULT_BRIEFING_TIMEZONE);
+    const lock = await acquireBriefingCycleLock(options.type, brParts.localDate);
 
-    let ready = 0;
-    let sent = 0;
-    let skippedDuplicates = 0;
-    let skippedNoEvents = 0;
-    let failed = 0;
-
-    for (const u of eligible) {
-      const res = await this.generateForUser({
-        userId: u.userId,
+    if (!lock.acquired) {
+      this.recordRunLog({
+        mode: 'BATCH_CYCLE',
         type: options.type,
-        briefingEmail: u.email,
+        localDate: brParts.localDate,
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        durationMs: Date.now() - startedMs,
+        eligibleUsers: 0,
+        ready: 0,
+        sent: 0,
+        skippedDuplicates: 0,
+        skippedNoEvents: 0,
+        failed: 0,
+        locked: true,
         sendEmail: Boolean(options.sendEmail),
-        referenceDate: options.referenceDate,
-        timezone: u.timezone,
-        morningTime: u.morningTime,
-        eveningTime: u.eveningTime,
+        respectScheduleWindow: Boolean(options.respectScheduleWindow),
+        error: `Ciclo concorrente bloqueado (${lock.lockKey}).`,
       });
-      results.push(res);
-
-      if (res.status === 'READY') ready++;
-      else if (res.status === 'SENT') sent++;
-      else if (res.status === 'SKIPPED_DUPLICATE') skippedDuplicates++;
-      else if (res.status === 'SKIPPED_NO_EVENTS') skippedNoEvents++;
-      else if (res.status === 'FAILED') failed++;
+      return {
+        locked: true,
+        lockKey: lock.lockKey,
+        eligibleUsers: 0,
+        ready: 0,
+        sent: 0,
+        skippedDuplicates: 0,
+        skippedNoEvents: 0,
+        failed: 0,
+        results: [],
+      };
     }
 
-    return {
-      eligibleUsers: eligible.length,
-      ready,
-      sent,
-      skippedDuplicates,
-      skippedNoEvents,
-      failed,
-      results,
-    };
+    try {
+      const eligible = await this.listEligibleUsers(options.type, refDate, {
+        respectScheduleWindow: Boolean(options.respectScheduleWindow),
+      });
+      const results: GenerateBriefingResult[] = [];
+
+      let ready = 0;
+      let sent = 0;
+      let skippedDuplicates = 0;
+      let skippedNoEvents = 0;
+      let failed = 0;
+
+      for (const u of eligible) {
+        const res = await this.generateForUser({
+          userId: u.userId,
+          type: options.type,
+          briefingEmail: u.email,
+          sendEmail: Boolean(options.sendEmail),
+          referenceDate: refDate,
+          timezone: u.timezone,
+          morningTime: u.morningTime,
+          eveningTime: u.eveningTime,
+        });
+        results.push(res);
+
+        if (res.status === 'READY') ready++;
+        else if (res.status === 'SENT') sent++;
+        else if (res.status === 'SKIPPED_DUPLICATE') skippedDuplicates++;
+        else if (res.status === 'SKIPPED_NO_EVENTS') skippedNoEvents++;
+        else if (res.status === 'FAILED') failed++;
+      }
+
+      this.recordRunLog({
+        mode: 'BATCH_CYCLE',
+        type: options.type,
+        localDate: brParts.localDate,
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        durationMs: Date.now() - startedMs,
+        eligibleUsers: eligible.length,
+        ready,
+        sent,
+        skippedDuplicates,
+        skippedNoEvents,
+        failed,
+        locked: false,
+        sendEmail: Boolean(options.sendEmail),
+        respectScheduleWindow: Boolean(options.respectScheduleWindow),
+      });
+
+      return {
+        locked: false,
+        lockKey: lock.lockKey,
+        eligibleUsers: eligible.length,
+        ready,
+        sent,
+        skippedDuplicates,
+        skippedNoEvents,
+        failed,
+        results,
+      };
+    } catch (err: any) {
+      this.recordRunLog({
+        mode: 'BATCH_CYCLE',
+        type: options.type,
+        localDate: brParts.localDate,
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        durationMs: Date.now() - startedMs,
+        eligibleUsers: 0,
+        ready: 0,
+        sent: 0,
+        skippedDuplicates: 0,
+        skippedNoEvents: 0,
+        failed: 1,
+        locked: false,
+        sendEmail: Boolean(options.sendEmail),
+        respectScheduleWindow: Boolean(options.respectScheduleWindow),
+        error: err?.message || 'Erro no ciclo de geração.',
+      });
+      throw err;
+    } finally {
+      await lock.release();
+    }
   },
 };

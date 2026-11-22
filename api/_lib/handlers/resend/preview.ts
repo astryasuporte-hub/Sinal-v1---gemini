@@ -40,7 +40,7 @@ export default async function handler(req: any, res: any) {
     events: previewEvents,
     brandName: 'FatosBR',
     senderEmail: 'briefing@fatosbr.com.br',
-    appUrl: process.env.APP_URL || 'https://fatosbr.com.br',
+    appUrl: process.env.APP_URL || 'https://app.fatosbr.com.br',
     customTitle,
     customSubtitle
   });

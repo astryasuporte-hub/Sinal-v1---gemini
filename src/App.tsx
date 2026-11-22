@@ -245,6 +245,7 @@ export default function App() {
     }
     return 'landing';
   });
+  const [pendingBriefingId, setPendingBriefingId] = useState<string | null>(null);
   const [isAuthChecking, setIsAuthChecking] = useState<boolean>(() => {
     if (typeof window !== 'undefined' && isSupabaseConfigured) {
       const pathname = window.location.pathname;
@@ -1980,7 +1981,10 @@ export default function App() {
               currentUser={currentUser}
               onOpenEvent={(ev) => handleOpenEventDetail(ev)}
               onOpenEntity={(ent) => setActiveEntityModal(ent)}
-              onOpenBriefing={() => setCurrentNav('briefings')}
+              onOpenBriefing={(briefingId) => {
+                setPendingBriefingId(briefingId || null);
+                setCurrentNav('briefings');
+              }}
               onRequireAuth={() => setIsAuthModalOpen(true)}
               onBack={() => setCurrentNav('home')}
             />
@@ -2036,6 +2040,8 @@ export default function App() {
               events={events}
               subscription={subscription}
               currentUser={currentUser}
+              initialBriefingId={pendingBriefingId}
+              onClearInitialBriefing={() => setPendingBriefingId(null)}
               onOpenEventDetail={(ev) => handleOpenEventDetail(ev)}
               onOpenBilling={() => setIsBillingModalOpen(true)}
               onRequireAuth={() => setIsAuthModalOpen(true)}

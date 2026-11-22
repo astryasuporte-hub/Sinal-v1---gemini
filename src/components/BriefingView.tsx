@@ -33,6 +33,8 @@ interface BriefingViewProps {
   events?: Event[];
   subscription?: UserSubscription;
   currentUser?: SupabaseUser | null;
+  initialBriefingId?: string | null;
+  onClearInitialBriefing?: () => void;
   onOpenEventDetail?: (event: Event) => void;
   onOpenBilling?: () => void;
   onRequireAuth?: () => void;
@@ -59,6 +61,8 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
   events = [],
   subscription: _subscription,
   currentUser,
+  initialBriefingId,
+  onClearInitialBriefing,
   onOpenEventDetail,
   onOpenBilling: _onOpenBilling,
   onRequireAuth
@@ -253,6 +257,16 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
       cancelled = true;
     };
   }, [currentUser?.id, currentUser?.email, events, reloadNonce]);
+
+  // Deep-link automático quando o usuário abre um briefing a partir de uma notificação BRIEFING_READY
+  useEffect(() => {
+    if (!initialBriefingId || userBriefings.length === 0) return;
+    const target = userBriefings.find((b) => b.id === initialBriefingId);
+    if (target) {
+      setSelectedBriefing(target);
+      onClearInitialBriefing?.();
+    }
+  }, [initialBriefingId, userBriefings, onClearInitialBriefing]);
 
   // Filtragem dos briefings reais do usuário
   const filteredBriefings = useMemo(() => {

@@ -70,6 +70,7 @@ import { ThreeGlobeScene } from './ThreeGlobeScene';
 import { ResendConfigPanel } from './ResendConfigPanel';
 import { AdminCompanyManager } from './AdminCompanyManager';
 import { AdminBriefingCustomizer } from './AdminBriefingCustomizer';
+import { AdminBriefingOpsPanel } from './AdminBriefingOpsPanel';
 import { AdminMobileView } from './AdminMobileView';
 import { AdminFinancialDashboard } from './AdminFinancialDashboard';
 import { ResendWebhookLiveMonitor } from './ResendWebhookLiveMonitor';
@@ -1456,7 +1457,7 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
                     </span>
                   </div>
                   <p className="text-xs text-zinc-400 mt-0.5">
-                    Modelos prontos no padrão visual @radar.fin adaptados para as cores e tipografia da Sinal (Preto e Branco).
+                    Modelos prontos no padrão visual @radar.fin adaptados para as cores e tipografia da FatosBR (Preto e Branco).
                   </p>
                 </div>
               </div>
@@ -3094,6 +3095,9 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
         {/* ================= TAB 8: BRIEFINGS & E-MAILS ================= */}
         {activeAdminTab === 'briefings' && (
           <div className="space-y-6">
+            {/* Monitoramento Operacional de Briefings, Agendamento & Notificações */}
+            <AdminBriefingOpsPanel />
+
             {/* Customizador de Títulos e Subtítulos de Briefings com Preview e Webhooks em Tempo Real */}
             <AdminBriefingCustomizer
               events={events}

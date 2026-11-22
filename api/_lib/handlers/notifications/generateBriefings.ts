@@ -100,12 +100,33 @@ export default async function handler(req: any, res: any) {
     const briefingEmail = body?.briefingEmail ? String(body.briefingEmail).trim() : undefined;
 
     if (targetUserId) {
+      const startedMs = Date.now();
+      const startedAt = new Date(startedMs).toISOString();
       const result = await briefingEngine.generateForUser({
         userId: targetUserId,
         type: requestedType,
         briefingEmail,
         sendEmail,
         referenceDate,
+      });
+
+      briefingEngine.recordRunLog({
+        mode: 'SINGLE_USER',
+        type: requestedType,
+        localDate: result.localDate || defaultBrParts.localDate,
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        durationMs: Date.now() - startedMs,
+        eligibleUsers: 1,
+        ready: result.status === 'READY' ? 1 : 0,
+        sent: result.status === 'SENT' ? 1 : 0,
+        skippedDuplicates: result.status === 'SKIPPED_DUPLICATE' ? 1 : 0,
+        skippedNoEvents: result.status === 'SKIPPED_NO_EVENTS' ? 1 : 0,
+        failed: result.status === 'FAILED' ? 1 : 0,
+        locked: false,
+        sendEmail,
+        respectScheduleWindow,
+        error: result.error || result.emailError,
       });
 
       const statusCode = result.status === 'FAILED' ? 500 : 200;
@@ -123,6 +144,17 @@ export default async function handler(req: any, res: any) {
       referenceDate,
       respectScheduleWindow,
     });
+
+    if (cycleSummary.locked) {
+      return sendJson(res, 409, {
+        success: false,
+        error: 'BRIEFING_CYCLE_ALREADY_RUNNING',
+        message: 'Já existe um ciclo de geração em execução para esta edição e data.',
+        mode: 'BATCH_CYCLE',
+        type: requestedType,
+        lockKey: cycleSummary.lockKey,
+      });
+    }
 
     return sendJson(res, 200, {
       success: true,

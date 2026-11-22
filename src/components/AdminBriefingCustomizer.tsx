@@ -187,7 +187,7 @@ export const AdminBriefingCustomizer: React.FC<AdminBriefingCustomizerProps> = (
             email_id: `em_test_${Date.now()}`,
             to: [testEmail],
             subject: customTitle || 'FatosBR • Briefing Executivo',
-            click: type === 'clicked' ? { link: 'https://fatosbr.app/news/1' } : undefined
+            click: type === 'clicked' ? { link: 'https://app.fatosbr.com.br/?tab=briefings' } : undefined
           }
         })
       });

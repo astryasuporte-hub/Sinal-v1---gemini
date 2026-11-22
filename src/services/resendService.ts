@@ -333,7 +333,7 @@ class ResendService {
     const isEvening = options.type === 'evening';
     const recipient = options.toEmail || this.getStoredSubscriberEmail();
     const editionTitle = isEvening ? 'Resumo Noturno (20h00)' : 'Resumo Matinal (07h00)';
-    const defaultSubject = `Sinal • ${editionTitle} — ${new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: 'long' })}`;
+    const defaultSubject = `FatosBR • ${editionTitle} — ${new Date().toLocaleDateString('pt-BR', { day: '2-digit', month: 'long' })}`;
 
     const mappedEvents = options.events && options.events.length > 0
       ? options.events.map(e => ({
@@ -465,7 +465,7 @@ class ResendService {
             email_id: emailId,
             to: [recipient],
             subject: subject,
-            click: type === 'clicked' ? { link: customData?.link || 'https://fatosbr.app/briefings/latest' } : undefined
+            click: type === 'clicked' ? { link: customData?.link || 'https://app.fatosbr.com.br/?tab=briefings' } : undefined
           }
         })
       });

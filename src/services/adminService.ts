@@ -868,8 +868,96 @@ export const adminService = {
     } catch (err: any) {
       return { success: false, error: err?.message || 'Erro de conexão ao reprocessar lote.' };
     }
+  },
+
+  /**
+   * Consulta o painel operacional consolidado de Briefings, Agendamento, Notificações e Resend.
+   */
+  async getBriefingOperationsSnapshot(): Promise<{
+    success: boolean;
+    snapshot?: BriefingOpsSnapshotDto;
+    error?: string;
+  }> {
+    try {
+      const headers = await this.getAdminAuthHeaders();
+      const resp = await fetch('/api/admin/briefings-ops', {
+        method: 'GET',
+        headers,
+      });
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok || !data?.success || !data?.snapshot) {
+        return {
+          success: false,
+          error: data?.message || data?.error || `Falha ao consultar operação de briefings (HTTP ${resp.status}).`,
+        };
+      }
+      return { success: true, snapshot: data.snapshot };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: err?.message || 'Erro de rede ao consultar operação de briefings.',
+      };
+    }
   }
 };
+
+export interface BriefingOpsSnapshotDto {
+  generatedAt: string;
+  environment: {
+    resendConfigured: boolean;
+    cronSecretConfigured: boolean;
+    cronBriefingsEnabledInVercel: boolean;
+    activeLocks: string[];
+  };
+  briefingsSummary: {
+    total: number;
+    byStatus: Record<'PENDING' | 'GENERATING' | 'READY' | 'SENT' | 'FAILED' | 'CANCELED', number>;
+    byType: Record<'MORNING' | 'EVENING', number>;
+    last24hTotal: number;
+    last24hFailed: number;
+  };
+  notificationsSummary: {
+    totalProcessed: number;
+    unreadTotal: number;
+    briefingReadyCount: number;
+    highRelevanceCount: number;
+  };
+  schedulesSummary: {
+    eligibleMorningUsers: number;
+    eligibleEveningUsers: number;
+    weekendSubscribers: number;
+    recipientsWithEmailCount: number;
+  };
+  recentBriefings: Array<{
+    id: string;
+    userMask: string;
+    type: 'MORNING' | 'EVENING';
+    status: string;
+    localDate: string | null;
+    scheduledFor: string | null;
+    sentAt: string | null;
+    updatedAt: string | null;
+  }>;
+  recentRunLogs: Array<{
+    runId: string;
+    mode: 'BATCH_CYCLE' | 'SINGLE_USER';
+    type: 'MORNING' | 'EVENING';
+    localDate: string;
+    startedAt: string;
+    finishedAt: string;
+    durationMs: number;
+    eligibleUsers: number;
+    ready: number;
+    sent: number;
+    skippedDuplicates: number;
+    skippedNoEvents: number;
+    failed: number;
+    locked: boolean;
+    sendEmail: boolean;
+    respectScheduleWindow: boolean;
+    error?: string;
+  }>;
+}
 
 export interface ImageImportItemDto {
   id: string;
