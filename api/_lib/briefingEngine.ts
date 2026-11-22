@@ -27,6 +27,7 @@ export interface BriefingEventCandidate {
   why_it_matters?: string;
   relevance_score: number;
   published_at: string;
+  isFollowedMatch?: boolean;
 }
 
 export interface EligibleBriefingUser {
@@ -90,14 +91,40 @@ function isWeekendInTimezone(date: Date, timezone = 'America/Sao_Paulo'): boolea
   }
 }
 
-function getEditionDateRangeIso(referenceDate: Date): { dayStart: string; dayEnd: string; dateLabelPt: string } {
+function getBriefingPeriodWindow(
+  type: BriefingEditionType,
+  referenceDate: Date
+): {
+  dayStart: string;
+  dayEnd: string;
+  periodStart: string;
+  periodEnd: string;
+  dateLabelPt: string;
+} {
   const y = referenceDate.getUTCFullYear();
   const m = String(referenceDate.getUTCMonth() + 1).padStart(2, '0');
   const d = String(referenceDate.getUTCDate()).padStart(2, '0');
   const dayStart = `${y}-${m}-${d}T00:00:00.000Z`;
   const dayEnd = `${y}-${m}-${d}T23:59:59.999Z`;
   const dateLabelPt = `${d}/${m}/${y}`;
-  return { dayStart, dayEnd, dateLabelPt };
+
+  if (type === 'EVENING') {
+    return {
+      dayStart,
+      dayEnd,
+      periodStart: `${y}-${m}-${d}T12:00:00.000Z`,
+      periodEnd: dayEnd,
+      dateLabelPt,
+    };
+  }
+
+  return {
+    dayStart,
+    dayEnd,
+    periodStart: dayStart,
+    periodEnd: `${y}-${m}-${d}T11:59:59.999Z`,
+    dateLabelPt,
+  };
 }
 
 function escapeHtml(raw: string): string {
@@ -296,13 +323,18 @@ export const briefingEngine = {
       }
     }
 
-    const ranked = [...candidates].sort((a, b) => {
-      const aBoost = boostedEventIds.has(a.id) ? 25 : 0;
-      const bBoost = boostedEventIds.has(b.id) ? 25 : 0;
-      const scoreDiff = b.relevance_score + bBoost - (a.relevance_score + aBoost);
-      if (scoreDiff !== 0) return scoreDiff;
-      return new Date(b.published_at).getTime() - new Date(a.published_at).getTime();
-    });
+    const ranked = [...candidates]
+      .map((c) => ({
+        ...c,
+        isFollowedMatch: boostedEventIds.has(c.id),
+      }))
+      .sort((a, b) => {
+        const aBoost = a.isFollowedMatch ? 25 : 0;
+        const bBoost = b.isFollowedMatch ? 25 : 0;
+        const scoreDiff = b.relevance_score + bBoost - (a.relevance_score + aBoost);
+        if (scoreDiff !== 0) return scoreDiff;
+        return new Date(b.published_at).getTime() - new Date(a.published_at).getTime();
+      });
 
     return ranked.slice(0, limit);
   },
@@ -320,17 +352,40 @@ export const briefingEngine = {
     const { getServerSupabase: getSb, getServerKeys: getKeys, fetchFn } = getDeps();
     const supabase = getSb();
     const refDate = params.referenceDate || new Date();
-    const { dayStart, dayEnd, dateLabelPt } = getEditionDateRangeIso(refDate);
+    const { dayStart, dayEnd, periodStart, periodEnd, dateLabelPt } = getBriefingPeriodWindow(
+      params.type,
+      refDate
+    );
 
-    // Verifica duplicidade para o mesmo usuário + tipo + dia
-    const { data: existing, error: dupErr } = await (supabase as any)
+    // Verifica duplicidade utilizando janela do período (period_start/period_end) ou scheduled_for do dia
+    let existing: { id?: string; status?: string } | null = null;
+    let dupErr: any = null;
+
+    const periodCheck = await (supabase as any)
       .from('briefings')
       .select('id, status')
       .eq('user_id', params.userId)
       .eq('type', params.type)
-      .gte('scheduled_for', dayStart)
-      .lte('scheduled_for', dayEnd)
+      .eq('period_start', periodStart)
+      .eq('period_end', periodEnd)
       .maybeSingle();
+
+    if (!periodCheck.error && periodCheck.data?.id) {
+      existing = periodCheck.data;
+    } else if (periodCheck.error && periodCheck.error.code !== '42703' && periodCheck.error.code !== 'PGRST204') {
+      dupErr = periodCheck.error;
+    } else {
+      const dayCheck = await (supabase as any)
+        .from('briefings')
+        .select('id, status')
+        .eq('user_id', params.userId)
+        .eq('type', params.type)
+        .gte('scheduled_for', dayStart)
+        .lte('scheduled_for', dayEnd)
+        .maybeSingle();
+      existing = dayCheck.data;
+      dupErr = dayCheck.error;
+    }
 
     if (dupErr) {
       return {
@@ -372,7 +427,7 @@ export const briefingEngine = {
         ? 'O fechamento dos principais acontecimentos apurados ao longo do dia.'
         : 'Os principais acontecimentos consolidados para iniciar o dia.';
 
-    // Etapa 2: Criação do registro com status GENERATING e type canônico
+    // Etapa 2: Criação do registro com period_start, period_end, status GENERATING e type canônico
     const { data: createdRow, error: createErr } = await (supabase as any)
       .from('briefings')
       .insert({
@@ -381,6 +436,8 @@ export const briefingEngine = {
         title,
         description,
         status: 'GENERATING',
+        period_start: periodStart,
+        period_end: periodEnd,
         scheduled_for: refDate.toISOString(),
       })
       .select('id')
@@ -388,10 +445,18 @@ export const briefingEngine = {
 
     if (createErr || !createdRow?.id) {
       if (createErr?.code === '23505') {
+        const { data: conflictRow } = await (supabase as any)
+          .from('briefings')
+          .select('id')
+          .eq('user_id', params.userId)
+          .eq('type', params.type)
+          .eq('period_start', periodStart)
+          .maybeSingle();
         return {
           userId: params.userId,
           type: params.type,
           status: 'SKIPPED_DUPLICATE',
+          briefingId: conflictRow?.id ? String(conflictRow.id) : undefined,
           eventsCount: 0,
         };
       }
@@ -406,11 +471,12 @@ export const briefingEngine = {
 
     const briefingId = String(createdRow.id);
 
-    // Etapa 3: Persistir itens ordenados em public.briefing_items
+    // Etapa 3: Persistir itens ordenados em public.briefing_items (position + section canônicos)
     const itemsPayload = selectedEvents.map((ev, index) => ({
       briefing_id: briefingId,
       event_id: ev.id,
-      order_index: index,
+      position: index + 1,
+      section: ev.isFollowedMatch ? 'Para você' : index < 2 ? 'Destaques' : 'Panorama',
     }));
 
     const { error: itemsErr } = await (supabase as any).from('briefing_items').insert(itemsPayload);

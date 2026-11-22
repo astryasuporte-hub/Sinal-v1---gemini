@@ -48,6 +48,8 @@ export interface RealBriefingItem {
   rawEvents: Event[];
   createdAt: string;
   scheduledFor: string;
+  periodStart?: string;
+  periodEnd?: string;
 }
 
 export interface BriefingsFetchResult {
@@ -201,12 +203,12 @@ export const briefingService = {
       const briefingIds = briefings.map((b: any) => b.id);
       let items: any[] = [];
 
-      // Busca itens usando exclusivamente colunas canônicas reais de `public.events`
+      // Busca itens usando exclusivamente colunas canônicas reais de `public.briefing_items` e `public.events`
       const { data: joinedItems, error: joinErr } = await client
         .from('briefing_items')
-        .select('id, briefing_id, event_id, order_index, events(id, title, slug, summary, why_it_matters, relevance_score, article_count, published_at, updated_at)')
+        .select('id, briefing_id, event_id, position, section, events(id, title, slug, summary, why_it_matters, relevance_score, article_count, published_at, updated_at)')
         .in('briefing_id', briefingIds)
-        .order('order_index', { ascending: true });
+        .order('position', { ascending: true });
 
       if (!joinErr && Array.isArray(joinedItems)) {
         items = joinedItems;
@@ -261,7 +263,7 @@ export const briefingService = {
       const result: RealBriefingItem[] = briefings.map((b: any) => {
         const briefingItems = items
           .filter((it: any) => it.briefing_id === b.id)
-          .sort((a: any, bItem: any) => Number(a.order_index ?? a.position ?? 0) - Number(bItem.order_index ?? bItem.position ?? 0));
+          .sort((a: any, bItem: any) => Number(a.position ?? a.order_index ?? 0) - Number(bItem.position ?? bItem.order_index ?? 0));
 
         const relatedEvents: Event[] = briefingItems
           .map((it: any) => {
@@ -321,7 +323,9 @@ export const briefingService = {
           bgImage,
           rawEvents: relatedEvents,
           createdAt: b.created_at,
-          scheduledFor: scheduledIso
+          scheduledFor: scheduledIso,
+          periodStart: b.period_start || undefined,
+          periodEnd: b.period_end || undefined
         };
       });
 

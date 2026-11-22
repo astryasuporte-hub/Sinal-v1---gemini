@@ -238,17 +238,14 @@ async function fetchUserAlertPreferences(
     settingsErrorMsg = err?.message || 'Exceção ao consultar user_settings';
   }
 
-  if (!prefAvailable && !settingsAvailable) {
-    const errText = prefErrorMsg || settingsErrorMsg || 'Nenhuma fonte de preferências de usuário disponível.';
+  if ((!prefAvailable && !settingsAvailable) || Boolean(settingsErrorMsg)) {
+    const errText = settingsErrorMsg || prefErrorMsg || 'Nenhuma fonte de preferências de usuário disponível.';
     console.error('[NotificationEngine] Falha ao carregar preferências (fail-closed):', errText);
     return { map, error: errText };
   }
 
   if (prefErrorMsg) {
     console.warn('[NotificationEngine] Aviso ao consultar user_preferences:', prefErrorMsg);
-  }
-  if (settingsErrorMsg) {
-    console.warn('[NotificationEngine] Aviso ao consultar user_settings:', settingsErrorMsg);
   }
 
   for (const uid of userIds) {
@@ -410,6 +407,16 @@ export const notificationEngine = {
               .eq('category', category)
               .maybeSingle();
             return { success: true, id: existing?.id, duplicate: true };
+          }
+          if (enrichedMetadata?.briefingId) {
+            const { data: existingBr } = await (supabase as any)
+              .from('notifications')
+              .select('id')
+              .eq('user_id', userId)
+              .eq('type', canonicalType)
+              .contains('metadata', { briefingId: enrichedMetadata.briefingId })
+              .maybeSingle();
+            return { success: true, id: existingBr?.id, duplicate: true };
           }
           return { success: true, duplicate: true };
         }
