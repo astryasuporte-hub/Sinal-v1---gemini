@@ -10,6 +10,8 @@
  *   npx tsx scripts/backfill-event-entities.ts --apply --batch-size=50 --limit=500
  */
 
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { executeSql, isPostgresConfigured, closePostgresPool } from '../api/_lib/postgres.js';
 import { backfillEventEntities } from '../api/_lib/entityMatcher.js';
 
@@ -48,7 +50,11 @@ async function main() {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+const isEntrypoint =
+  Boolean(process.argv[1]) &&
+  fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
+
+if (isEntrypoint) {
   main().catch((err) => {
     console.error('[Backfill event_entities] Erro fatal:', err?.message || err);
     process.exit(1);

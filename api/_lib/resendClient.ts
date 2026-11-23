@@ -197,55 +197,61 @@ export function verifyResendWebhookSignature(params: {
   secret: string;
   toleranceSeconds?: number;
   nowMs?: number;
-}): { valid: boolean; reason?: string } {
+}): { valid: boolean; reason?: string; svixId?: string; timestampSec?: number } {
   const secret = String(params.secret || '').trim();
   if (!secret) {
     return { valid: false, reason: 'RESEND_WEBHOOK_SECRET não configurado' };
   }
 
-  const svixId = getHeaderCaseInsensitive(params.headers, 'svix-id') || getHeaderCaseInsensitive(params.headers, 'webhook-id');
-  const svixTs = getHeaderCaseInsensitive(params.headers, 'svix-timestamp') || getHeaderCaseInsensitive(params.headers, 'webhook-timestamp');
-  const svixSig = getHeaderCaseInsensitive(params.headers, 'svix-signature') || getHeaderCaseInsensitive(params.headers, 'webhook-signature');
+  const svixId = getHeaderCaseInsensitive(params.headers, 'svix-id').trim();
+  const svixTs = getHeaderCaseInsensitive(params.headers, 'svix-timestamp').trim();
+  const svixSig = getHeaderCaseInsensitive(params.headers, 'svix-signature').trim();
 
-  if (svixId && svixTs && svixSig) {
-    const tsNum = Number(svixTs);
-    if (!Number.isFinite(tsNum) || tsNum <= 0) {
-      return { valid: false, reason: 'Timestamp Svix inválido' };
-    }
-    const nowSec = Math.floor((params.nowMs ?? Date.now()) / 1000);
-    const tolerance = params.toleranceSeconds ?? 300;
-    if (Math.abs(nowSec - tsNum) > tolerance) {
-      return { valid: false, reason: 'Timestamp Svix fora da janela permitida' };
-    }
-
-    const signedContent = `${svixId}.${svixTs}.${params.rawBody}`;
-    const key = decodeWebhookSecretKey(secret);
-    const expectedSig = crypto.createHmac('sha256', key).update(signedContent).digest('base64');
-
-    const candidates = svixSig
-      .split(/\s+/)
-      .map((part) => part.trim())
-      .filter(Boolean);
-
-    for (const candidate of candidates) {
-      const [version, sigVal] = candidate.split(',', 2);
-      if (version === 'v1' && sigVal && safeCompare(sigVal, expectedSig)) {
-        return { valid: true };
-      }
-    }
-    return { valid: false, reason: 'Assinatura Svix inválida' };
+  if (!svixId || !svixTs || !svixSig) {
+    return {
+      valid: false,
+      reason: 'Cabeçalhos oficiais Svix (svix-id, svix-timestamp, svix-signature) ausentes',
+    };
   }
 
-  // Fallback compatível com HMAC direto via x-resend-signature (sha256=<hex> ou <hex>)
-  const directSig = getHeaderCaseInsensitive(params.headers, 'x-resend-signature');
-  if (directSig) {
-    const cleaned = directSig.replace(/^sha256=/i, '').trim();
-    const expectedHex = crypto.createHmac('sha256', secret).update(params.rawBody).digest('hex');
-    if (safeCompare(cleaned, expectedHex)) {
-      return { valid: true };
-    }
-    return { valid: false, reason: 'Assinatura x-resend-signature inválida' };
+  if (svixId.length > 256 || /\s/.test(svixId)) {
+    return { valid: false, reason: 'Cabeçalho svix-id inválido' };
   }
 
-  return { valid: false, reason: 'Cabeçalhos de assinatura do webhook ausentes' };
+  if (!/^\d{1,12}$/.test(svixTs)) {
+    return { valid: false, reason: 'Timestamp Svix inválido (esperado inteiro Unix em segundos)' };
+  }
+
+  const tsNum = Number.parseInt(svixTs, 10);
+  if (!Number.isSafeInteger(tsNum) || tsNum <= 0) {
+    return { valid: false, reason: 'Timestamp Svix inválido' };
+  }
+
+  const nowSec = Math.floor((params.nowMs ?? Date.now()) / 1000);
+  const tolerance = Math.max(1, Number(params.toleranceSeconds ?? 300));
+  if (Math.abs(nowSec - tsNum) > tolerance) {
+    return { valid: false, reason: 'Timestamp Svix fora da janela permitida' };
+  }
+
+  const key = decodeWebhookSecretKey(secret);
+  if (key.length === 0) {
+    return { valid: false, reason: 'RESEND_WEBHOOK_SECRET inválido (chave decodificada vazia)' };
+  }
+
+  const signedContent = `${svixId}.${svixTs}.${params.rawBody}`;
+  const expectedSig = crypto.createHmac('sha256', key).update(signedContent).digest('base64');
+
+  const candidates = svixSig
+    .split(/\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  for (const candidate of candidates) {
+    const [version, sigVal] = candidate.split(',', 2);
+    if (version === 'v1' && sigVal && safeCompare(sigVal, expectedSig)) {
+      return { valid: true, svixId, timestampSec: tsNum };
+    }
+  }
+
+  return { valid: false, reason: 'Assinatura Svix inválida' };
 }

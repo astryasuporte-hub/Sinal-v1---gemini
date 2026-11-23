@@ -37,7 +37,19 @@ const STOPWORD_ALIASES = new Set([
   'brasil', 'governo', 'estado', 'mercado', 'grupo', 'banco', 'rede', 'nova', 'novo',
 ]);
 
-const LEGAL_SUFFIX_REGEX = /\b(s\.?a\.?|ltda\.?|inc\.?|corp\.?|llc|plc|s\/a)\b/gi;
+const AMBIGUOUS_COMMON_WORD_PROPER_NOUNS = new Set([
+  'vale', 'azul', 'vivo', 'brava', 'aura', 'soma', 'casa',
+]);
+
+const LEGAL_SUFFIX_REGEX = /(?:^|\s)(s\.?a\.?|ltda\.?|inc\.?|corp\.?|llc|plc|s\/a)(?=\s|$|[.,;:])/gi;
+
+function stripLegalSuffixes(raw: string): string {
+  return String(raw || '')
+    .replace(LEGAL_SUFFIX_REGEX, ' ')
+    .replace(/[.,;:\s]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
 export function normalizeEntityText(raw: string): string {
   return String(raw || '')
@@ -51,6 +63,14 @@ export function normalizeEntityText(raw: string): string {
 
 function escapeRegExp(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function isSafeDerivedCandidate(rawTerm: string): boolean {
+  const clean = String(rawTerm || '').trim();
+  if (!clean) return false;
+  const norm = normalizeEntityText(clean);
+  if (norm.length >= 4) return true;
+  return /^[A-Z0-9]{2,5}$/.test(clean);
 }
 
 function deriveCandidateTerms(entry: EntityCatalogEntry): Array<{ original: string; normalized: string }> {
@@ -70,13 +90,23 @@ function deriveCandidateTerms(entry: EntityCatalogEntry): Array<{ original: stri
 
   addTerm(entry.name);
 
-  // Variação segura sem sufixo societário (ex: "Petrobras S.A." -> "Petrobras")
-  const strippedLegal = String(entry.name || '')
-    .replace(LEGAL_SUFFIX_REGEX, ' ')
+  // Variação segura sem sufixo societário (ex: "Petrobras S.A." -> "Petrobras", "B3 S.A." -> "B3")
+  const strippedLegal = stripLegalSuffixes(entry.name);
+  if (strippedLegal && strippedLegal !== entry.name && isSafeDerivedCandidate(strippedLegal)) {
+    addTerm(strippedLegal);
+  }
+
+  // Variação segura sem parênteses (ex: "Supremo Tribunal Federal (STF)" -> "Supremo Tribunal Federal")
+  const withoutParens = String(entry.name || '')
+    .replace(/\([^)]*\)/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-  if (strippedLegal && strippedLegal !== entry.name && normalizeEntityText(strippedLegal).length >= 4) {
-    addTerm(strippedLegal);
+  if (withoutParens && withoutParens !== entry.name && isSafeDerivedCandidate(withoutParens)) {
+    addTerm(withoutParens);
+    const strippedParensLegal = stripLegalSuffixes(withoutParens);
+    if (strippedParensLegal && strippedParensLegal !== withoutParens && isSafeDerivedCandidate(strippedParensLegal)) {
+      addTerm(strippedParensLegal);
+    }
   }
 
   // Conteúdo entre parênteses como sigla explícita no nome oficial (ex: "Banco Central (BC)" -> "BC")
@@ -102,9 +132,12 @@ export function compileEntityMatchers(catalog: EntityCatalogEntry[]): CompiledEn
 
     for (const term of terms) {
       const tokens = term.normalized.split(' ').filter(Boolean);
-      // Termos curtos (1 token com <= 3 chars) exigem correspondência case-sensitive no texto original (siglas como STF, BC, PF, TSE, Vale S.A. não)
+      const trimmedOrig = term.original.trim();
+      // Termos curtos (1 token com <= 3 chars) exigem correspondência case-sensitive no texto original (siglas como STF, BC, B3)
       const isShortSingleToken = tokens.length === 1 && term.normalized.length <= 3;
-      const isAcronymOriginal = /^[A-Z0-9]{2,5}$/.test(term.original.trim());
+      const isAcronymOriginal = /^[A-Z0-9]{2,5}$/.test(trimmedOrig);
+      const isAmbiguousProperNoun =
+        tokens.length === 1 && AMBIGUOUS_COMMON_WORD_PROPER_NOUNS.has(term.normalized);
 
       if (isShortSingleToken && !isAcronymOriginal) {
         // Evita falsos positivos com termos curtos genéricos em minúsculo (ex: "gol", "via", "oi")
@@ -112,12 +145,23 @@ export function compileEntityMatchers(catalog: EntityCatalogEntry[]): CompiledEn
       }
 
       if (isShortSingleToken && isAcronymOriginal) {
-        const escapedOrig = escapeRegExp(term.original.trim());
+        const escapedOrig = escapeRegExp(trimmedOrig);
         patterns.push({
           normalizedTerm: term.normalized,
-          originalTerm: term.original.trim(),
+          originalTerm: trimmedOrig,
           requireCaseSensitive: true,
           regex: new RegExp(`(^|[^A-Za-z0-9À-ÿ])${escapedOrig}($|[^A-Za-z0-9À-ÿ])`),
+        });
+      } else if (isAmbiguousProperNoun) {
+        // Nomes próprios idênticos a palavras comuns em português (ex: "Vale" vs "vale-transporte") exigem inicial maiúscula
+        const capForm = trimmedOrig.charAt(0).toUpperCase() + trimmedOrig.slice(1).toLowerCase();
+        const upperForm = trimmedOrig.toUpperCase();
+        const variants = Array.from(new Set([trimmedOrig, capForm, upperForm])).map(escapeRegExp);
+        patterns.push({
+          normalizedTerm: term.normalized,
+          originalTerm: trimmedOrig,
+          requireCaseSensitive: true,
+          regex: new RegExp(`(^|[^A-Za-z0-9À-ÿ])(?:${variants.join('|')})($|[^A-Za-z0-9À-ÿ])`),
         });
       } else {
         const escapedNorm = escapeRegExp(term.normalized);
@@ -238,6 +282,12 @@ export async function linkEventEntities(
   return inserted;
 }
 
+export interface BackfillMatchPreview {
+  eventId: string;
+  eventTitle: string;
+  entityIds: string[];
+}
+
 export async function backfillEventEntities(options: {
   queryFn: SqlQueryExecutor;
   batchSize?: number;
@@ -250,6 +300,7 @@ export async function backfillEventEntities(options: {
   linksInserted: number;
   linksPlanned: number;
   dryRun: boolean;
+  matchesPreview: BackfillMatchPreview[];
 }> {
   const dryRun = options.dryRun !== false;
   const batchSize = Math.max(1, Math.min(200, Number(options.batchSize ?? 50)));
@@ -265,9 +316,17 @@ export async function backfillEventEntities(options: {
   let linksPlanned = 0;
   let offset = 0;
   let unmatchedSkipped = 0;
+  const matchesPreview: BackfillMatchPreview[] = [];
 
   if (matchers.length === 0) {
-    return { scanned: 0, eventsWithMatches: 0, linksInserted: 0, linksPlanned: 0, dryRun };
+    return {
+      scanned: 0,
+      eventsWithMatches: 0,
+      linksInserted: 0,
+      linksPlanned: 0,
+      dryRun,
+      matchesPreview,
+    };
   }
 
   while (scanned < maxEvents) {
@@ -289,17 +348,48 @@ export async function backfillEventEntities(options: {
     const rows = eventsRes.rows || [];
     if (rows.length === 0) break;
 
+    const batchIds = rows.map((r: any) => String(r.id));
+    const articleTextsByEvent = new Map<string, string[]>();
+    try {
+      const artRes = await options.queryFn(
+        `SELECT ea.event_id::text AS event_id, a.title, a.description
+           FROM public.event_articles ea
+           JOIN public.articles a ON a.id = ea.article_id
+          WHERE ea.event_id::text = ANY($1::text[])`,
+        [batchIds]
+      );
+      for (const ar of artRes.rows || []) {
+        const list = articleTextsByEvent.get(ar.event_id) || [];
+        if (ar.title) list.push(String(ar.title));
+        if (ar.description) list.push(String(ar.description));
+        articleTextsByEvent.set(ar.event_id, list);
+      }
+    } catch {
+      // Ambientes sem event_articles/articles seguem apenas com campos do acontecimento
+    }
+
     for (const ev of rows) {
       scanned++;
-      const text = [ev.title, ev.summary, ev.why_it_matters].filter(Boolean).join(' • ');
+      const eventId = String(ev.id);
+      const extraArticles = articleTextsByEvent.get(eventId) || [];
+      const text = [ev.title, ev.summary, ev.why_it_matters, ...extraArticles]
+        .filter(Boolean)
+        .join(' • ');
       const matched = matchCompiledEntities(text, matchers);
       if (matched.length > 0) {
         eventsWithMatches++;
         linksPlanned += matched.length;
+        if (matchesPreview.length < 25) {
+          matchesPreview.push({
+            eventId,
+            eventTitle: String(ev.title || ''),
+            entityIds: matched,
+          });
+        }
         if (!dryRun) {
-          const added = await linkEventEntities(options.queryFn, String(ev.id), matched);
+          const added = await linkEventEntities(options.queryFn, eventId, matched);
           linksInserted += added;
-          if (added === 0) unmatchedSkipped++;
+          if (added === 0 && onlyMissing) unmatchedSkipped++;
         }
       } else if (!dryRun && onlyMissing) {
         unmatchedSkipped++;
@@ -310,5 +400,5 @@ export async function backfillEventEntities(options: {
     if (rows.length < fetchLimit) break;
   }
 
-  return { scanned, eventsWithMatches, linksInserted, linksPlanned, dryRun };
+  return { scanned, eventsWithMatches, linksInserted, linksPlanned, dryRun, matchesPreview };
 }

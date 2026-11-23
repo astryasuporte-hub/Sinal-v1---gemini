@@ -59,6 +59,42 @@ export interface IngestionResult {
   error?: string;
 }
 
+export interface IngestionEngineDeps {
+  withTransaction: typeof withTransaction;
+  executeSql: typeof executeSql;
+  isPostgresConfigured: typeof isPostgresConfigured;
+  fetchUpstreamFn: typeof fetchAllUpstreamArticles;
+  enqueueOutboxFn: typeof enqueueNotificationOutbox;
+}
+
+let testIngestionDeps: IngestionEngineDeps | null = null;
+
+export function setIngestionEngineTestDeps(deps: Partial<IngestionEngineDeps> | null): void {
+  if (!deps) {
+    testIngestionDeps = null;
+    return;
+  }
+  testIngestionDeps = {
+    withTransaction: deps.withTransaction || withTransaction,
+    executeSql: deps.executeSql || executeSql,
+    isPostgresConfigured: deps.isPostgresConfigured || isPostgresConfigured,
+    fetchUpstreamFn: deps.fetchUpstreamFn || fetchAllUpstreamArticles,
+    enqueueOutboxFn: deps.enqueueOutboxFn || enqueueNotificationOutbox,
+  };
+}
+
+function getIngestionDeps(): IngestionEngineDeps {
+  return (
+    testIngestionDeps || {
+      withTransaction,
+      executeSql,
+      isPostgresConfigured,
+      fetchUpstreamFn: fetchAllUpstreamArticles,
+      enqueueOutboxFn: enqueueNotificationOutbox,
+    }
+  );
+}
+
 /**
  * Converte UUID string em Buffer de 16 bytes.
  */
@@ -423,10 +459,11 @@ export async function runServerSideIngestion(options?: {
 }): Promise<IngestionResult> {
   const startTime = Date.now();
   const executionId = `ingest-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`;
+  const deps = getIngestionDeps();
 
   console.log(`[Ingest Engine ${executionId}] Início da ingestão: ${new Date().toISOString()}`);
 
-  if (!isPostgresConfigured()) {
+  if (!deps.isPostgresConfigured()) {
     console.error(`[Ingest Engine ${executionId}] Falha: PostgreSQL não configurado no ambiente server-side.`);
     return {
       executionId,
@@ -446,7 +483,7 @@ export async function runServerSideIngestion(options?: {
   try {
     // 1. Coleta das matérias reais
     console.log(`[Ingest Engine ${executionId}] Consultando provedores de notícias...`);
-    const { articles: rawArticles, providers } = await fetchAllUpstreamArticles(options?.keywords);
+    const { articles: rawArticles, providers } = await deps.fetchUpstreamFn(options?.keywords);
 
     const providerSummary = Object.entries(providers)
       .map(([name, stat]) => `${name}: ${stat.count} artigos (configurado: ${stat.configured}${stat.error ? `, erro: ${stat.error}` : ''})`)
@@ -495,8 +532,8 @@ export async function runServerSideIngestion(options?: {
     const notificationsCreated = 0;
     const eventsToNotify: SegmentedEventDispatchInput[] = [];
 
-    // 3. Execução em Transação Atômica Parametrizada
-    await withTransaction(async (client) => {
+    // 3. Execução em Transação Atômica Parametrizada (inclui transactional outbox)
+    await deps.withTransaction(async (client) => {
       const entityCatalog = await loadActiveEntityCatalog((q, p) => client.query(q, p));
       const entityMatchers = compileEntityMatchers(entityCatalog);
 
@@ -840,29 +877,38 @@ export async function runServerSideIngestion(options?: {
           type: existingEvt.rows.length === 0 ? 'NEWS_HIGH_RELEVANCE' : 'EVENT_UPDATED',
         });
       }
-    });
 
-    // Passo 4: Enfileiramento pós-commit na outbox durável (desacoplado da transação de ingestão)
-    if (eventsToNotify.length > 0) {
+      // 3.6 Transactional Outbox Atômica: grava alertas na mesma transação dos acontecimentos
       for (const evtInput of eventsToNotify) {
-        try {
-          const queueRes = await enqueueNotificationOutbox(evtInput);
-          if (queueRes.enqueued) {
-            outboxEnqueued++;
-          } else if (queueRes.error) {
+        await client.query(`SAVEPOINT sp_notification_outbox`);
+        const queueRes = await deps.enqueueOutboxFn(evtInput, {
+          queryFn: (q, p) => client.query(q, p),
+        });
+
+        if (queueRes.enqueued) {
+          await client.query(`RELEASE SAVEPOINT sp_notification_outbox`);
+          outboxEnqueued++;
+        } else {
+          await client.query(`ROLLBACK TO SAVEPOINT sp_notification_outbox`);
+          const errMsg = String(queueRes.error || '');
+          const isLegacySchemaMissing =
+            queueRes.errorCode === '42883' ||
+            queueRes.errorCode === '42P01' ||
+            (/enqueue_notification_outbox|notification_outbox/i.test(errMsg) &&
+              /does not exist|n[aã]o existe|undefined_function/i.test(errMsg));
+
+          if (isLegacySchemaMissing) {
             console.warn(
-              `[Ingest Engine ${executionId}] Aviso ao enfileirar evento ${evtInput.eventId} na notification_outbox:`,
-              queueRes.error
+              `[Ingest Engine ${executionId}] Esquema legado sem notification_outbox (${errMsg}); ingestão preservada.`
+            );
+          } else {
+            throw new Error(
+              `OUTBOX_ATOMIC_ENQUEUE_FAILED (${evtInput.eventId}): ${errMsg || 'Falha durável ao enfileirar alerta na outbox'}`
             );
           }
-        } catch (queueErr: any) {
-          console.warn(
-            `[Ingest Engine ${executionId}] Exceção ao enfileirar evento na outbox:`,
-            queueErr?.message || queueErr
-          );
         }
       }
-    }
+    });
 
     console.log(`[Ingest Engine ${executionId}] Persistência concluída com sucesso em ${Date.now() - startTime}ms: ` +
       `${articlesPersisted} matérias persistidas, ${sourcesUpserted} fontes atualizadas, ` +

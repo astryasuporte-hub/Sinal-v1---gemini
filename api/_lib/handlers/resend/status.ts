@@ -19,12 +19,16 @@ export default async function handler(req: any, res: any) {
 
   const keys = getServerKeys();
   const apiKey = keys.RESEND;
+  const webhookConfigured = Boolean(String(process.env.RESEND_WEBHOOK_SECRET || '').trim());
+  const sender = getResendFromEmail();
 
   if (!apiKey) {
     return sendJson(res, 200, {
       ok: false,
       connected: false,
       provider: 'Resend',
+      sender,
+      webhookConfigured,
       keyMasked: 'Não configurado',
       message: 'RESEND_API_KEY não definida no ambiente de produção.'
     });
@@ -48,7 +52,8 @@ export default async function handler(req: any, res: any) {
       connected: checkRes.ok,
       provider: 'Resend',
       latencyMs,
-      sender: getResendFromEmail(),
+      sender,
+      webhookConfigured,
       keyMasked: maskSecret(apiKey),
       statusCode: checkRes.status
     });
@@ -58,6 +63,8 @@ export default async function handler(req: any, res: any) {
       ok: false,
       connected: false,
       provider: 'Resend',
+      sender,
+      webhookConfigured,
       error: err.message,
       keyMasked: maskSecret(apiKey)
     });

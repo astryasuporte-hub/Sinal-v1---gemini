@@ -68,10 +68,12 @@ function getDeps(): OutboxDeps {
   );
 }
 
+export type SqlQueryExecutor = (sql: string, params?: any[]) => Promise<{ rows: any[] }>;
+
 export async function enqueueNotificationOutbox(
   input: SegmentedEventDispatchInput,
-  options?: { maxAttempts?: number }
-): Promise<{ enqueued: boolean; id?: string; dedupKey?: string; error?: string }> {
+  options?: { maxAttempts?: number; queryFn?: SqlQueryExecutor }
+): Promise<{ enqueued: boolean; id?: string; dedupKey?: string; error?: string; errorCode?: string }> {
   if (!input?.eventId || !input?.title) {
     return { enqueued: false, error: 'INVALID_OUTBOX_PAYLOAD' };
   }
@@ -80,6 +82,28 @@ export async function enqueueNotificationOutbox(
   const eventType = input.type || 'NEWS_HIGH_RELEVANCE';
   const maxAttempts = Math.max(1, Math.min(10, Number(options?.maxAttempts ?? 5)));
   const deps = getDeps();
+
+  if (options?.queryFn) {
+    try {
+      const res = await options.queryFn(
+        `SELECT public.enqueue_notification_outbox($1, $2, $3, $4::jsonb, $5) AS row`,
+        [dedupKey, input.eventId, eventType, JSON.stringify(input), maxAttempts]
+      );
+      const row = res?.rows?.[0]?.row;
+      return {
+        enqueued: true,
+        id: row?.id ? String(row.id) : undefined,
+        dedupKey,
+      };
+    } catch (err: any) {
+      return {
+        enqueued: false,
+        dedupKey,
+        error: err?.message || 'Erro SQL ao enfileirar outbox na transação',
+        errorCode: err?.code ? String(err.code) : undefined,
+      };
+    }
+  }
 
   if (deps.isPostgresConfigured()) {
     try {
@@ -94,7 +118,12 @@ export async function enqueueNotificationOutbox(
         dedupKey,
       };
     } catch (err: any) {
-      return { enqueued: false, dedupKey, error: err?.message || 'Erro SQL ao enfileirar outbox' };
+      return {
+        enqueued: false,
+        dedupKey,
+        error: err?.message || 'Erro SQL ao enfileirar outbox',
+        errorCode: err?.code ? String(err.code) : undefined,
+      };
     }
   }
 
@@ -109,7 +138,12 @@ export async function enqueueNotificationOutbox(
         p_max_attempts: maxAttempts,
       });
       if (rpcRes?.error) {
-        return { enqueued: false, dedupKey, error: rpcRes.error.message };
+        return {
+          enqueued: false,
+          dedupKey,
+          error: rpcRes.error.message,
+          errorCode: rpcRes.error.code ? String(rpcRes.error.code) : undefined,
+        };
       }
       return {
         enqueued: true,
@@ -118,10 +152,135 @@ export async function enqueueNotificationOutbox(
       };
     }
   } catch (err: any) {
-    return { enqueued: false, dedupKey, error: err?.message || 'Erro RPC ao enfileirar outbox' };
+    return {
+      enqueued: false,
+      dedupKey,
+      error: err?.message || 'Erro RPC ao enfileirar outbox',
+      errorCode: err?.code ? String(err.code) : undefined,
+    };
   }
 
   return { enqueued: false, dedupKey, error: 'OUTBOX_STORE_UNAVAILABLE' };
+}
+
+export async function recoverMissingNotificationOutbox(options?: {
+  sinceHours?: number;
+  limit?: number;
+  queryFn?: SqlQueryExecutor;
+}): Promise<{
+  scanned: number;
+  recovered: number;
+  errors: string[];
+}> {
+  const deps = getDeps();
+  const queryFn: SqlQueryExecutor | null =
+    options?.queryFn ||
+    (deps.isPostgresConfigured() ? (sql, params) => deps.executeSql(sql, params) : null);
+
+  if (!queryFn) {
+    return { scanned: 0, recovered: 0, errors: [] };
+  }
+
+  const sinceHours = Math.max(1, Math.min(168, Number(options?.sinceHours ?? 48)));
+  const limit = Math.max(1, Math.min(200, Number(options?.limit ?? 50)));
+  const cutoffIso = new Date(Date.now() - sinceHours * 3600_000).toISOString();
+
+  const missingRes = await queryFn(
+    `SELECT e.id, e.title, e.summary, e.relevance_score, e.status
+       FROM public.events e
+      WHERE COALESCE(e.published_at, e.created_at) >= $1::timestamptz
+        AND NOT EXISTS (
+          SELECT 1 FROM internal.notification_outbox o
+           WHERE o.event_id = e.id::text
+        )
+      ORDER BY COALESCE(e.published_at, e.created_at) DESC
+      LIMIT $2`,
+    [cutoffIso, limit]
+  );
+
+  const missingEvents = missingRes.rows || [];
+  if (missingEvents.length === 0) {
+    return { scanned: 0, recovered: 0, errors: [] };
+  }
+
+  const eventIds = missingEvents.map((e: any) => String(e.id));
+  const topicsByEvent = new Map<string, string[]>();
+  const entitiesByEvent = new Map<string, string[]>();
+  const sourcesByEvent = new Map<string, string[]>();
+
+  try {
+    const tRes = await queryFn(
+      `SELECT event_id::text AS event_id, topic_id::text AS topic_id
+         FROM public.event_topics
+        WHERE event_id::text = ANY($1::text[])`,
+      [eventIds]
+    );
+    for (const r of tRes.rows || []) {
+      const list = topicsByEvent.get(r.event_id) || [];
+      if (r.topic_id) list.push(String(r.topic_id));
+      topicsByEvent.set(r.event_id, list);
+    }
+  } catch {}
+
+  try {
+    const eRes = await queryFn(
+      `SELECT event_id::text AS event_id, entity_id::text AS entity_id
+         FROM public.event_entities
+        WHERE event_id::text = ANY($1::text[])`,
+      [eventIds]
+    );
+    for (const r of eRes.rows || []) {
+      const list = entitiesByEvent.get(r.event_id) || [];
+      if (r.entity_id) list.push(String(r.entity_id));
+      entitiesByEvent.set(r.event_id, list);
+    }
+  } catch {}
+
+  try {
+    const sRes = await queryFn(
+      `SELECT ea.event_id::text AS event_id, a.source_id::text AS source_id
+         FROM public.event_articles ea
+         JOIN public.articles a ON a.id = ea.article_id
+        WHERE ea.event_id::text = ANY($1::text[])
+          AND a.source_id IS NOT NULL`,
+      [eventIds]
+    );
+    for (const r of sRes.rows || []) {
+      const list = sourcesByEvent.get(r.event_id) || [];
+      if (r.source_id && !list.includes(String(r.source_id))) {
+        list.push(String(r.source_id));
+      }
+      sourcesByEvent.set(r.event_id, list);
+    }
+  } catch {}
+
+  let recovered = 0;
+  const errors: string[] = [];
+
+  for (const ev of missingEvents) {
+    const eventId = String(ev.id);
+    const eventType = String(ev.status || '').toUpperCase() === 'UPDATED' ? 'EVENT_UPDATED' : 'NEWS_HIGH_RELEVANCE';
+    const res = await enqueueNotificationOutbox(
+      {
+        eventId,
+        title: String(ev.title || ''),
+        summary: ev.summary ? String(ev.summary) : undefined,
+        relevanceScore: ev.relevance_score !== undefined ? Number(ev.relevance_score) : undefined,
+        entityIds: entitiesByEvent.get(eventId) || [],
+        topicIds: topicsByEvent.get(eventId) || [],
+        sourceIds: sourcesByEvent.get(eventId) || [],
+        type: eventType,
+      },
+      options?.queryFn ? { queryFn: options.queryFn } : undefined
+    );
+    if (res.enqueued) {
+      recovered++;
+    } else if (res.error) {
+      errors.push(`${eventId}: ${res.error}`);
+    }
+  }
+
+  return { scanned: missingEvents.length, recovered, errors };
 }
 
 export async function processNotificationOutboxBatch(options?: {

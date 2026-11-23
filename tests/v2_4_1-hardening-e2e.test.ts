@@ -818,7 +818,10 @@ async function run() {
       },
       secret: process.env.RESEND_WEBHOOK_SECRET!,
     });
-    assert(directSigCheck.valid === true, 'verifyResendWebhookSignature valida HMAC direto x-resend-signature');
+    assert(
+      directSigCheck.valid === false,
+      'verifyResendWebhookSignature rejeita fallback não-oficial x-resend-signature (contrato estrito Svix V2.4.2)'
+    );
 
     // -------------------------------------------------------------------------
     // TESTE 4: Entity Matcher, Multi-batch Backfill & Notification Outbox Worker
