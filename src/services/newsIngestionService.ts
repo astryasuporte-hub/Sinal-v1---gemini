@@ -14,6 +14,8 @@
 
 import { Event, Entity, Topic, SourceReference } from '../types/sinal';
 import { eventService } from './eventService';
+import { dedupInFlight, fetchWithTimeoutAndRetry } from './requestCache';
+import { performanceMonitor } from './performanceMonitor';
 
 export interface ProviderSpec {
   name: string;
@@ -139,17 +141,21 @@ export const newsIngestionService = {
    * Obtém status de cotas e especificações de todos os provedores via endpoint seguro
    */
   async fetchTelemetry(): Promise<ProviderTelemetry | null> {
-    try {
-      const res = await fetch('/api/proxy/status');
-      if (!res.ok) {
-        console.warn(`[News Engine Telemetry] HTTP ${res.status} ao consultar /api/proxy/status`);
+    return dedupInFlight('proxy:status', async () => {
+      const start = performance.now();
+      try {
+        const res = await fetchWithTimeoutAndRetry('/api/proxy/status', { timeoutMs: 8000, retries: 1 });
+        performanceMonitor.trackApiCall('/api/proxy/status', performance.now() - start, res.status);
+        if (!res.ok) {
+          console.warn(`[News Engine Telemetry] HTTP ${res.status} ao consultar /api/proxy/status`);
+          return null;
+        }
+        return await res.json();
+      } catch (err: any) {
+        console.warn('[News Engine Telemetry] Falha ao consultar status de provedores:', err?.message);
         return null;
       }
-      return await res.json();
-    } catch (err: any) {
-      console.warn('[News Engine Telemetry] Falha ao consultar status de provedores:', err?.message);
-      return null;
-    }
+    });
   },
 
   /**
@@ -159,7 +165,7 @@ export const newsIngestionService = {
     const startTime = performance.now();
     try {
       const url = `/api/proxy/gnews?q=${encodeURIComponent(query)}&lang=pt&country=br&max=10`;
-      const res = await fetch(url).catch((netErr) => {
+      const res = await fetchWithTimeoutAndRetry(url, { timeoutMs: 8500, retries: 1 }).catch((netErr) => {
         throw new Error(`Falha de rede GNews: ${netErr.message}`);
       });
 
@@ -253,7 +259,7 @@ export const newsIngestionService = {
     const startTime = performance.now();
     try {
       const url = `/api/proxy/newsapi?q=${encodeURIComponent(query)}&pageSize=15`;
-      const res = await fetch(url).catch((netErr) => {
+      const res = await fetchWithTimeoutAndRetry(url, { timeoutMs: 8500, retries: 1 }).catch((netErr) => {
         throw new Error(`Falha de rede NewsAPI: ${netErr.message}`);
       });
 
@@ -347,7 +353,7 @@ export const newsIngestionService = {
     const startTime = performance.now();
     try {
       const url = `/api/proxy/worldnews?text=${encodeURIComponent(query)}&language=pt&number=10`;
-      const res = await fetch(url).catch((netErr) => {
+      const res = await fetchWithTimeoutAndRetry(url, { timeoutMs: 8500, retries: 1 }).catch((netErr) => {
         throw new Error(`Falha de rede World News: ${netErr.message}`);
       });
 
@@ -563,11 +569,15 @@ export const newsIngestionService = {
    *    deduplica, gera Acontecimentos e solicita persistência no backend.
    * 3. ZERO dados mockados. Se nada for encontrado, retorna [].
    */
-  async fetchRealTimeEventsFeed(savedIds?: Set<string>): Promise<Event[]> {
+  async fetchRealTimeEventsFeed(
+    savedIds?: Set<string>,
+    options?: { limit?: number; offset?: number }
+  ): Promise<Event[]> {
+    return dedupInFlight(`feed:${options?.limit ?? 30}:${options?.offset ?? 0}`, async () => {
     try {
-      // 1. Consulta a fonte canônica da verdade: Supabase / Banco de Dados
+      // 1. Consulta a fonte canônica da verdade: /api/proxy/events + Supabase via eventService
       try {
-        const dbEvents = await eventService.getEvents();
+        const dbEvents = await eventService.getEvents(options);
         if (dbEvents && dbEvents.length > 0) {
           return dbEvents.map((e) => ({
             ...e,
@@ -575,23 +585,7 @@ export const newsIngestionService = {
           }));
         }
       } catch (dbErr: any) {
-        console.warn('[News Engine] Supabase client não retornou eventos:', dbErr?.message);
-      }
-
-      // 2. Consulta endpoint de backend seguro consolidado /api/proxy/events
-      try {
-        const backendRes = await fetch('/api/proxy/events').catch(() => null);
-        if (backendRes && backendRes.ok) {
-          const backendData = await backendRes.json();
-          if (Array.isArray(backendData.events) && backendData.events.length > 0) {
-            return backendData.events.map((e: Event) => ({
-              ...e,
-              isSaved: savedIds ? savedIds.has(e.id) : Boolean(e.isSaved)
-            }));
-          }
-        }
-      } catch (proxyErr: any) {
-        console.warn('[News Engine] Backend /api/proxy/events indisponível:', proxyErr?.message);
+        console.warn('[News Engine] Supabase/proxy não retornou eventos:', dbErr?.message);
       }
 
       // 3. Coleta direta e real dos múltiplos provedores de notícias
@@ -725,6 +719,7 @@ export const newsIngestionService = {
       console.warn('[News Engine Error ao buscar feed]:', err?.message);
       return [];
     }
+    });
   },
 
   /**

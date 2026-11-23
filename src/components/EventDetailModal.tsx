@@ -361,8 +361,12 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
                 <img
                   src={event.imageUrl}
                   alt={event.title}
+                  width={1200}
+                  height={675}
                   referrerPolicy="no-referrer"
                   loading="eager"
+                  fetchPriority="high"
+                  decoding="async"
                   onError={() => setHeroImgError(true)}
                   className="w-full h-full object-cover object-center"
                 />

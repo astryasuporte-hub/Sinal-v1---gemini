@@ -20,47 +20,156 @@ export const aiSummarizerService = {
    * Executa chamada de inferência no modelo NVIDIA NIM
    * através do proxy interno (/api/proxy/nvidia/chat) mantendo chaves e endpoints ocultos
    */
-  async callNvidiaNemotron(prompt: string, systemPrompt?: string): Promise<{
+  async callNvidiaNemotron(prompt: string, systemPrompt?: string, timeoutMs: number = 20000): Promise<{
     content: string;
     reasoning?: string;
   }> {
-    const res = await fetch('/api/proxy/nvidia/chat', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: 'nvidia/nemotron-3.5-lightning-30b-a3b',
-        messages: [
-          {
-            role: 'system',
-            content:
-              systemPrompt ||
-              'Você é o motor de inteligência e síntese contextual do FatosBR. ' +
-                'Seu objetivo é analisar múltiplos artigos de imprensa sobre o mesmo fato, extrair os fatos verificados ' +
-                'e produzir uma síntese rigorosa sem viés partidário ou sensacionalismo. ' +
-                'Responda SEMPRE em JSON válido com as chaves: "title", "summary", "whatHappened", "whyItMatters", "category", "relevanceScore".'
-          },
-          {
-            role: 'user',
-            content: prompt
-          }
-        ],
-        temperature: 0.6,
-        max_tokens: 1500
-      })
-    }).catch(() => null);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-    if (!res || !res.ok) {
-      throw new Error(`NVIDIA NIM indisponível (HTTP ${res ? res.status : 'Offline'})`);
+    try {
+      const res = await fetch('/api/proxy/nvidia/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        signal: controller.signal,
+        body: JSON.stringify({
+          model: 'nvidia/nemotron-3.5-lightning-30b-a3b',
+          messages: [
+            {
+              role: 'system',
+              content:
+                systemPrompt ||
+                'Você é o motor de inteligência e síntese contextual do FatosBR. ' +
+                  'Seu objetivo é analisar múltiplos artigos de imprensa sobre o mesmo fato, extrair os fatos verificados ' +
+                  'e produzir uma síntese rigorosa sem viés partidário ou sensacionalismo. ' +
+                  'Responda SEMPRE em JSON válido com as chaves: "title", "summary", "whatHappened", "whyItMatters", "category", "relevanceScore".'
+            },
+            {
+              role: 'user',
+              content: prompt
+            }
+          ],
+          temperature: 0.6,
+          max_tokens: 1500
+        })
+      }).catch(() => null);
+
+      if (!res || !res.ok) {
+        throw new Error(`NVIDIA NIM indisponível (HTTP ${res ? res.status : 'Offline'})`);
+      }
+
+      const data = await res.json();
+      const choice = data.choices?.[0];
+      const content = choice?.message?.content || '';
+      const reasoning = choice?.message?.reasoning_content || '';
+
+      return { content, reasoning };
+    } finally {
+      clearTimeout(timer);
     }
+  },
 
-    const data = await res.json();
-    const choice = data.choices?.[0];
-    const content = choice?.message?.content || '';
-    const reasoning = choice?.message?.reasoning_content || '';
+  /**
+   * Executa streaming SSE incremental do modelo NVIDIA NIM com fallback para resposta JSON única.
+   */
+  async streamNvidiaNemotron(
+    prompt: string,
+    onChunk: (delta: string, accumulated: string) => void,
+    systemPrompt?: string,
+    signal?: AbortSignal,
+    timeoutMs: number = 30000
+  ): Promise<{ content: string; reasoning?: string }> {
+    const controller = new AbortController();
+    const onExternalAbort = () => controller.abort();
+    if (signal) {
+      if (signal.aborted) controller.abort();
+      else signal.addEventListener('abort', onExternalAbort, { once: true });
+    }
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-    return { content, reasoning };
+    try {
+      const res = await fetch('/api/proxy/nvidia/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'text/event-stream'
+        },
+        signal: controller.signal,
+        body: JSON.stringify({
+          model: 'nvidia/nemotron-3.5-lightning-30b-a3b',
+          stream: true,
+          messages: [
+            {
+              role: 'system',
+              content:
+                systemPrompt ||
+                'Você é o motor de inteligência e síntese contextual do FatosBR. ' +
+                  'Responda de forma objetiva, factual e estruturada.'
+            },
+            { role: 'user', content: prompt }
+          ],
+          temperature: 0.6,
+          max_tokens: 1500
+        })
+      });
+
+      if (!res.ok) {
+        throw new Error(`NVIDIA NIM indisponível (HTTP ${res.status})`);
+      }
+
+      const contentType = (res.headers.get('content-type') || '').toLowerCase();
+      if (!contentType.includes('text/event-stream') || !res.body) {
+        const data = await res.json();
+        const choice = data.choices?.[0];
+        const content = choice?.message?.content || '';
+        const reasoning = choice?.message?.reasoning_content || '';
+        if (content) onChunk(content, content);
+        return { content, reasoning };
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let fullContent = '';
+      let fullReasoning = '';
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const rawLine of lines) {
+          const line = rawLine.trim();
+          if (!line.startsWith('data:')) continue;
+          const payload = line.slice(5).trim();
+          if (!payload || payload === '[DONE]') continue;
+
+          try {
+            const parsed = JSON.parse(payload);
+            const delta = parsed?.choices?.[0]?.delta;
+            const textChunk = delta?.content || '';
+            const reasoningChunk = delta?.reasoning_content || '';
+            if (reasoningChunk) fullReasoning += reasoningChunk;
+            if (textChunk) {
+              fullContent += textChunk;
+              onChunk(textChunk, fullContent);
+            }
+          } catch {
+            // Ignora linha parcial ou comentário SSE
+          }
+        }
+      }
+
+      return { content: fullContent, reasoning: fullReasoning || undefined };
+    } finally {
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', onExternalAbort);
+    }
   },
 
   /**

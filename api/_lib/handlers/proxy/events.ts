@@ -148,8 +148,16 @@ export default async function handler(req: any, res: any) {
       if (isPostgresConfigured()) {
         try {
           const [entRes, srcRes] = await Promise.all([
-            executeSql(`SELECT * FROM public.entities ORDER BY name ASC`),
-            executeSql(`SELECT * FROM public.news_sources ORDER BY name ASC`)
+            executeSql(
+              `SELECT id, name, slug, type, description, sector, role, organization, website, image_url, logo_url, avatar_url, brand_color
+               FROM public.entities
+               ORDER BY name ASC`
+            ),
+            executeSql(
+              `SELECT id, name, slug, domain, category, logo_url, brand_color
+               FROM public.news_sources
+               ORDER BY name ASC`
+            )
           ]);
           entities = (entRes.rows || []).map((e: any) => {
             const normType = String(e.type || 'company').trim().toLowerCase();
@@ -190,8 +198,14 @@ export default async function handler(req: any, res: any) {
         try {
           const client = getServerSupabase();
           const [entRes, srcRes] = await Promise.all([
-            client.from('entities').select('*').order('name'),
-            client.from('news_sources').select('*').order('name')
+            client
+              .from('entities')
+              .select('id, name, slug, type, description, sector, role, organization, website, image_url, logo_url, avatar_url, brand_color')
+              .order('name'),
+            client
+              .from('news_sources')
+              .select('id, name, slug, domain, category, logo_url, brand_color')
+              .order('name')
           ]);
           entities = (entRes.data || []).map((e: any) => {
             const normType = String(e.type || 'company').trim().toLowerCase();
@@ -250,6 +264,8 @@ export default async function handler(req: any, res: any) {
 
     try {
       const limit = Math.min(50, Math.max(1, parseInt(urlObj.searchParams.get('limit') || '30', 10)));
+      const offset = Math.max(0, parseInt(urlObj.searchParams.get('offset') || '0', 10) || 0);
+      const queryLimit = limit + 1;
       const categoryParam = urlObj.searchParams.get('category');
       const categoryFilter = categoryParam && categoryParam !== 'Todos' ? categoryParam.toLowerCase() : null;
 
@@ -322,18 +338,21 @@ export default async function handler(req: any, res: any) {
             LEFT JOIN public.news_sources ns ON a.source_id = ns.id
             GROUP BY e.id
             ORDER BY e.published_at DESC
-            LIMIT $1
+            LIMIT $1 OFFSET $2
           `;
 
-          const dbRes = await executeSql(sql, [limit]);
+          const dbRes = await executeSql(sql, [queryLimit, offset]);
+          const rawRows = dbRes.rows || [];
+          const hasMore = rawRows.length > limit;
+          const pageRows = hasMore ? rawRows.slice(0, limit) : rawRows;
 
           // Carregar event_entities separadamente para não falhar caso a tabela/colunas variem
           const entitiesByEventId = new Map<string, any[]>();
           try {
-            const eventIds = (dbRes.rows || []).map((r: any) => String(r.id));
+            const eventIds = pageRows.map((r: any) => String(r.id));
             if (eventIds.length > 0) {
               const eeRes = await executeSql(
-                `SELECT ee.event_id, ent.*
+                `SELECT ee.event_id, ent.id, ent.name, ent.slug, ent.type, ent.description, ent.sector, ent.role, ent.website, ent.image_url, ent.logo_url, ent.avatar_url, ent.brand_color
                  FROM public.event_entities ee
                  JOIN public.entities ent ON ent.id::text = ee.entity_id::text
                  WHERE ee.event_id::text = ANY($1::text[])`,
@@ -364,7 +383,7 @@ export default async function handler(req: any, res: any) {
             }
           } catch {}
 
-          let mapped = (dbRes.rows || []).map((row: any) => {
+          let mapped = pageRows.map((row: any) => {
             const sources = Array.isArray(row.sources) ? row.sources : [];
             const mainArticle = sources[0] || {};
             const itemCategory = row.category || 'Brasil';
@@ -406,6 +425,9 @@ export default async function handler(req: any, res: any) {
           return sendJson(res, 200, {
             success: true,
             count: mapped.length,
+            limit,
+            offset,
+            hasMore,
             events: mapped,
             source: 'postgresql_canonical'
           });
@@ -421,10 +443,12 @@ export default async function handler(req: any, res: any) {
             .from('events')
             .select('id, title, slug, summary, why_it_matters, published_at, updated_at, relevance_score, article_count')
             .order('published_at', { ascending: false })
-            .limit(limit);
+            .range(offset, offset + queryLimit - 1);
 
           if (!error && Array.isArray(data)) {
-            const events = data.map((row: any) => ({
+            const hasMore = data.length > limit;
+            const pageData = hasMore ? data.slice(0, limit) : data;
+            const events = pageData.map((row: any) => ({
               id: row.id,
               title: row.title,
               slug: row.slug || `evento-${row.id}`,
@@ -445,6 +469,9 @@ export default async function handler(req: any, res: any) {
             return sendJson(res, 200, {
               success: true,
               count: events.length,
+              limit,
+              offset,
+              hasMore,
               events,
               source: 'supabase_client'
             });

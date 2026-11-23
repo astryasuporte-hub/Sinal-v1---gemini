@@ -11,6 +11,7 @@ import {
 } from '../data/mockData';
 import { CompanyLogoBadge } from './CompanyLogoBadge';
 import { HorizontalFilterTabs } from './HorizontalFilterTabs';
+import { useDebounce } from '../hooks/useDebounce';
 import {
   Search,
   Check,
@@ -59,8 +60,10 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
 }) => {
   // Search & Filters State
   const [searchQuery, setSearchQuery] = useState('');
+  const debouncedSearchQuery = useDebounce(searchQuery, 200);
   const [selectedPillCategory, setSelectedPillCategory] = useState<string>('all');
   const [selectedSubTab, setSelectedSubTab] = useState<'companies' | 'people' | 'organizations' | 'sources' | 'topics'>('companies');
+  const [catalogRenderLimit, setCatalogRenderLimit] = useState(24);
 
   // Categories list matching executive intelligence sectors
   const pillCategories = [
@@ -131,7 +134,7 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
 
   // Busca Multientidade com Debounce
   const searchResults = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
+    const q = debouncedSearchQuery.trim().toLowerCase();
     if (!q) return null;
 
     const matchedCompanies = companies.filter(
@@ -171,33 +174,54 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
       sources: matchedSources,
       events: matchedEvents
     };
-  }, [searchQuery, companies, people, organizations, topics, sources, events]);
+  }, [debouncedSearchQuery, companies, people, organizations, topics, sources, events]);
 
-  // Trending items list (sincronizado com catálogo real do Supabase para exibir logos/avatares atualizados)
-  const trendingList = EXPLORE_TRENDING_ITEMS.map((item) => {
-    const normName = item.name.trim().toLowerCase();
-    const foundEntity = entities.find((e) => e.id === item.id || e.name.trim().toLowerCase() === normName);
-    const foundTopic = topics.find((t) => t.id === item.id || t.name.trim().toLowerCase() === normName);
-    const foundSource = sources.find((s) => s.id === item.id || s.name.trim().toLowerCase() === normName);
-    const isFollowed = foundEntity
-      ? foundEntity.isFollowed
-      : foundTopic
-      ? foundTopic.isFollowed
-      : foundSource
-      ? foundSource.isFollowed
-      : item.isFollowed;
-    return {
-      ...item,
-      resolvedEntity: foundEntity,
-      resolvedTopic: foundTopic,
-      resolvedSource: foundSource,
-      imageUrl: foundEntity?.imageUrl || foundEntity?.logoUrl || foundSource?.logoUrl,
-      website: foundEntity?.website,
-      domain: foundSource?.domain,
-      entityType: foundEntity?.type || (foundSource ? 'source' : item.type),
-      isFollowed
-    };
-  });
+  // Trending items list (memoizado e sincronizado com catálogo real do Supabase)
+  const trendingList = useMemo(() => {
+    const entityById = new Map<string, Entity>();
+    const entityByName = new Map<string, Entity>();
+    for (const e of entities) {
+      entityById.set(e.id, e);
+      entityByName.set(e.name.trim().toLowerCase(), e);
+    }
+    const topicById = new Map<string, Topic>();
+    const topicByName = new Map<string, Topic>();
+    for (const t of topics) {
+      topicById.set(t.id, t);
+      topicByName.set(t.name.trim().toLowerCase(), t);
+    }
+    const sourceById = new Map<string, Source>();
+    const sourceByName = new Map<string, Source>();
+    for (const s of sources) {
+      sourceById.set(s.id, s);
+      sourceByName.set(s.name.trim().toLowerCase(), s);
+    }
+
+    return EXPLORE_TRENDING_ITEMS.map((item) => {
+      const normName = item.name.trim().toLowerCase();
+      const foundEntity = entityById.get(item.id) || entityByName.get(normName);
+      const foundTopic = topicById.get(item.id) || topicByName.get(normName);
+      const foundSource = sourceById.get(item.id) || sourceByName.get(normName);
+      const isFollowed = foundEntity
+        ? foundEntity.isFollowed
+        : foundTopic
+        ? foundTopic.isFollowed
+        : foundSource
+        ? foundSource.isFollowed
+        : item.isFollowed;
+      return {
+        ...item,
+        resolvedEntity: foundEntity,
+        resolvedTopic: foundTopic,
+        resolvedSource: foundSource,
+        imageUrl: foundEntity?.imageUrl || foundEntity?.logoUrl || foundSource?.logoUrl,
+        website: foundEntity?.website,
+        domain: foundSource?.domain,
+        entityType: foundEntity?.type || (foundSource ? 'source' : item.type),
+        isFollowed
+      };
+    });
+  }, [entities, topics, sources]);
 
   const handleToggleTrending = (item: typeof trendingList[0]) => {
     if (item.resolvedEntity) {
@@ -603,7 +627,10 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
                   { id: 'topics', label: 'Temas' }
                 ]}
                 activeTabId={selectedSubTab}
-                onSelectTab={(id) => setSelectedSubTab(id as any)}
+                onSelectTab={(id) => {
+                  setSelectedSubTab(id as any);
+                  setCatalogRenderLimit(24);
+                }}
                 ariaLabel="Tipos de entidades no explorar"
               />
 
@@ -616,12 +643,12 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
               </span>
             </div>
 
-            {/* Grid 3x3 de Entidades */}
+            {/* Grid 3x3 de Entidades com renderização progressiva */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
               
               {/* Empresas */}
               {selectedSubTab === 'companies' &&
-                companies.map((company) => (
+                companies.slice(0, catalogRenderLimit).map((company) => (
                   <div
                     key={company.id}
                     className="p-3.5 rounded-2xl border border-[#1e2026] bg-[#111215] hover:border-zinc-700/80 transition flex items-center justify-between"
@@ -662,7 +689,7 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
 
               {/* Pessoas */}
               {selectedSubTab === 'people' &&
-                people.map((person) => (
+                people.slice(0, catalogRenderLimit).map((person) => (
                   <div
                     key={person.id}
                     className="p-3.5 rounded-2xl border border-[#1e2026] bg-[#111215] hover:border-zinc-700/80 transition flex items-center justify-between"
@@ -703,7 +730,7 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
 
               {/* Organizações */}
               {selectedSubTab === 'organizations' &&
-                organizations.map((org) => (
+                organizations.slice(0, catalogRenderLimit).map((org) => (
                   <div
                     key={org.id}
                     className="p-3.5 rounded-2xl border border-[#1e2026] bg-[#111215] hover:border-zinc-700/80 transition flex items-center justify-between"
@@ -744,7 +771,7 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
 
               {/* Fontes */}
               {selectedSubTab === 'sources' &&
-                sources.map((src) => (
+                sources.slice(0, catalogRenderLimit).map((src) => (
                   <div
                     key={src.id}
                     className="p-3.5 rounded-2xl border border-[#1e2026] bg-[#111215] hover:border-zinc-700/80 transition flex items-center justify-between"
@@ -783,7 +810,7 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
 
               {/* Temas */}
               {selectedSubTab === 'topics' &&
-                topics.map((topic) => (
+                topics.slice(0, catalogRenderLimit).map((topic) => (
                   <div
                     key={topic.id}
                     className="p-3.5 rounded-2xl border border-[#1e2026] bg-[#111215] hover:border-zinc-700/80 transition flex items-center justify-between"
@@ -812,6 +839,21 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
                   </div>
                 ))}
             </div>
+            {((selectedSubTab === 'companies' && companies.length > catalogRenderLimit) ||
+              (selectedSubTab === 'people' && people.length > catalogRenderLimit) ||
+              (selectedSubTab === 'organizations' && organizations.length > catalogRenderLimit) ||
+              (selectedSubTab === 'sources' && sources.length > catalogRenderLimit) ||
+              (selectedSubTab === 'topics' && topics.length > catalogRenderLimit)) && (
+              <div className="flex justify-center pt-2">
+                <button
+                  type="button"
+                  onClick={() => setCatalogRenderLimit((prev) => prev + 24)}
+                  className="px-4 py-2 rounded-xl border border-zinc-800 bg-[#111215] hover:bg-zinc-900 text-xs font-semibold text-zinc-300 hover:text-white transition cursor-pointer"
+                >
+                  Mostrar mais itens
+                </button>
+              </div>
+            )}
           </section>
         </div>
       )}

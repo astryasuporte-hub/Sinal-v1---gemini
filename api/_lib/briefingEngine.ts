@@ -54,6 +54,16 @@ export interface BriefingEventCandidate {
   isFollowedMatch?: boolean;
 }
 
+export interface PrefetchedBriefingEventPool {
+  cutoffIso: string;
+  candidates: BriefingEventCandidate[];
+  eeRows: Array<{ event_id: string; entity_id: string }>;
+  etRows: Array<{ event_id: string; topic_id: string }>;
+  eaRows: Array<{ event_id: string; article_id: string }>;
+  articleSourceById: Map<string, string>;
+  esRows: Array<{ event_id: string; source_id: string }>;
+}
+
 export interface EligibleBriefingUser {
   userId: string;
   email: string | null;
@@ -845,12 +855,120 @@ export const briefingEngine = {
     return users;
   },
 
+  async prefetchEventPool(
+    options?: { windowHours?: number; referenceDate?: Date }
+  ): Promise<PrefetchedBriefingEventPool> {
+    const { getServerSupabase: getSb } = getDeps();
+    const supabase = getSb();
+    const windowHours = Math.max(6, options?.windowHours ?? 36);
+    const anchorMs = (options?.referenceDate || new Date()).getTime();
+    const cutoffIso = new Date(anchorMs - windowHours * 3600 * 1000).toISOString();
+
+    const safeSelect = async (fn: () => Promise<any>) => {
+      try {
+        const res = await fn();
+        if (res?.error && (isMissingRelationError(res.error) || isMissingColumnError(res.error))) {
+          return { data: [], error: null };
+        }
+        return res;
+      } catch {
+        return { data: [], error: null };
+      }
+    };
+
+    const recentEventsRes = await (supabase as any)
+      .from('events')
+      .select('id, title, summary, why_it_matters, relevance_score, published_at')
+      .gte('published_at', cutoffIso)
+      .order('relevance_score', { ascending: false })
+      .order('published_at', { ascending: false })
+      .limit(40);
+
+    if (recentEventsRes.error) {
+      throw new Error(`Falha ao consultar acontecimentos reais: ${recentEventsRes.error.message}`);
+    }
+
+    const candidates: BriefingEventCandidate[] = (recentEventsRes.data || [])
+      .filter((e: any) => e?.id && e?.title)
+      .map((e: any) => ({
+        id: String(e.id),
+        title: String(e.title),
+        summary: String(e.summary || ''),
+        why_it_matters: e.why_it_matters ? String(e.why_it_matters) : undefined,
+        relevance_score: Number(e.relevance_score ?? 75),
+        published_at: String(e.published_at || new Date().toISOString()),
+      }));
+
+    if (candidates.length === 0) {
+      return {
+        cutoffIso,
+        candidates: [],
+        eeRows: [],
+        etRows: [],
+        eaRows: [],
+        articleSourceById: new Map(),
+        esRows: [],
+      };
+    }
+
+    const candidateIds = candidates.map((c) => c.id);
+    const [eeRes, etRes, eaRes, esRes] = await Promise.all([
+      safeSelect(() => (supabase as any).from('event_entities').select('event_id, entity_id').in('event_id', candidateIds)),
+      safeSelect(() => (supabase as any).from('event_topics').select('event_id, topic_id').in('event_id', candidateIds)),
+      safeSelect(() => (supabase as any).from('event_articles').select('event_id, article_id').in('event_id', candidateIds)),
+      safeSelect(() => (supabase as any).from('event_sources').select('event_id, source_id').in('event_id', candidateIds)),
+    ]);
+
+    const eaRows = (eaRes.data || [])
+      .filter((r: any) => r?.event_id && r?.article_id)
+      .map((r: any) => ({ event_id: String(r.event_id), article_id: String(r.article_id) }));
+    const articleIds = Array.from(new Set(eaRows.map((r: any) => r.article_id)));
+    const articleSourceById = new Map<string, string>();
+
+    if (articleIds.length > 0) {
+      const { data: artRows } = await safeSelect(() =>
+        (supabase as any).from('articles').select('id, source_id').in('id', articleIds)
+      );
+      for (const a of artRows || []) {
+        if (a?.id && a?.source_id) {
+          articleSourceById.set(String(a.id), String(a.source_id));
+        }
+      }
+    }
+
+    return {
+      cutoffIso,
+      candidates,
+      eeRows: (eeRes.data || []).map((r: any) => ({
+        event_id: String(r.event_id),
+        entity_id: String(r.entity_id),
+      })),
+      etRows: (etRes.data || []).map((r: any) => ({
+        event_id: String(r.event_id),
+        topic_id: String(r.topic_id),
+      })),
+      eaRows,
+      articleSourceById,
+      esRows: (esRes.data || [])
+        .filter((r: any) => r?.event_id && r?.source_id)
+        .map((r: any) => ({
+          event_id: String(r.event_id),
+          source_id: String(r.source_id),
+        })),
+    };
+  },
+
   /**
    * Etapa 1: Seleção de acontecimentos reais persistidos para o usuário (nunca inventa notícias).
    */
   async selectEventsForUser(
     userId: string,
-    options?: { windowHours?: number; limit?: number; referenceDate?: Date }
+    options?: {
+      windowHours?: number;
+      limit?: number;
+      referenceDate?: Date;
+      prefetchedPool?: PrefetchedBriefingEventPool;
+    }
   ): Promise<BriefingEventCandidate[]> {
     const { getServerSupabase: getSb } = getDeps();
     const supabase = getSb();
@@ -858,6 +976,7 @@ export const briefingEngine = {
     const windowHours = Math.max(6, options?.windowHours ?? 36);
     const anchorMs = (options?.referenceDate || new Date()).getTime();
     const cutoffIso = new Date(anchorMs - windowHours * 3600 * 1000).toISOString();
+    const pool = options?.prefetchedPool;
 
     const safeSelect = async (fn: () => Promise<any>) => {
       try {
@@ -875,29 +994,33 @@ export const briefingEngine = {
       safeSelect(() => (supabase as any).from('user_entity_follows').select('entity_id').eq('user_id', userId)),
       safeSelect(() => (supabase as any).from('user_topic_follows').select('topic_id').eq('user_id', userId)),
       safeSelect(() => (supabase as any).from('user_source_follows').select('source_id').eq('user_id', userId)),
-      (supabase as any)
-        .from('events')
-        .select('id, title, summary, why_it_matters, relevance_score, published_at')
-        .gte('published_at', cutoffIso)
-        .order('relevance_score', { ascending: false })
-        .order('published_at', { ascending: false })
-        .limit(40),
+      pool
+        ? Promise.resolve({ data: pool.candidates, error: null })
+        : (supabase as any)
+            .from('events')
+            .select('id, title, summary, why_it_matters, relevance_score, published_at')
+            .gte('published_at', cutoffIso)
+            .order('relevance_score', { ascending: false })
+            .order('published_at', { ascending: false })
+            .limit(40),
     ]);
 
     if (recentEventsRes.error) {
       throw new Error(`Falha ao consultar acontecimentos reais: ${recentEventsRes.error.message}`);
     }
 
-    const candidates: BriefingEventCandidate[] = (recentEventsRes.data || [])
-      .filter((e: any) => e?.id && e?.title)
-      .map((e: any) => ({
-        id: String(e.id),
-        title: String(e.title),
-        summary: String(e.summary || ''),
-        why_it_matters: e.why_it_matters ? String(e.why_it_matters) : undefined,
-        relevance_score: Number(e.relevance_score ?? 75),
-        published_at: String(e.published_at || new Date().toISOString()),
-      }));
+    const candidates: BriefingEventCandidate[] = pool
+      ? pool.candidates
+      : (recentEventsRes.data || [])
+          .filter((e: any) => e?.id && e?.title)
+          .map((e: any) => ({
+            id: String(e.id),
+            title: String(e.title),
+            summary: String(e.summary || ''),
+            why_it_matters: e.why_it_matters ? String(e.why_it_matters) : undefined,
+            relevance_score: Number(e.relevance_score ?? 75),
+            published_at: String(e.published_at || new Date().toISOString()),
+          }));
 
     if (candidates.length === 0) {
       return [];
@@ -920,10 +1043,14 @@ export const briefingEngine = {
     const candidateIds = candidates.map((c) => c.id);
 
     if (followedEntityIds.size > 0 && candidateIds.length > 0) {
-      const { data: eeRows } = await safeSelect(() =>
-        (supabase as any).from('event_entities').select('event_id, entity_id').in('event_id', candidateIds)
-      );
-      for (const r of eeRows || []) {
+      const eeRows = pool
+        ? pool.eeRows
+        : (
+            await safeSelect(() =>
+              (supabase as any).from('event_entities').select('event_id, entity_id').in('event_id', candidateIds)
+            )
+          ).data || [];
+      for (const r of eeRows) {
         if (followedEntityIds.has(String(r.entity_id))) {
           addBoost(String(r.event_id));
         }
@@ -931,10 +1058,14 @@ export const briefingEngine = {
     }
 
     if (followedTopicIds.size > 0 && candidateIds.length > 0) {
-      const { data: etRows } = await safeSelect(() =>
-        (supabase as any).from('event_topics').select('event_id, topic_id').in('event_id', candidateIds)
-      );
-      for (const r of etRows || []) {
+      const etRows = pool
+        ? pool.etRows
+        : (
+            await safeSelect(() =>
+              (supabase as any).from('event_topics').select('event_id, topic_id').in('event_id', candidateIds)
+            )
+          ).data || [];
+      for (const r of etRows) {
         if (followedTopicIds.has(String(r.topic_id))) {
           addBoost(String(r.event_id));
         }
@@ -943,33 +1074,51 @@ export const briefingEngine = {
 
     if (followedSourceIds.size > 0 && candidateIds.length > 0) {
       const matchedEventsBySource = new Set<string>();
-      const { data: eaRows } = await safeSelect(() =>
-        (supabase as any).from('event_articles').select('event_id, article_id').in('event_id', candidateIds)
-      );
-      const articleIds = Array.from(
-        new Set((eaRows || []).map((r: any) => (r?.article_id ? String(r.article_id) : '')).filter(Boolean))
-      );
-      if (articleIds.length > 0) {
-        const { data: artRows } = await safeSelect(() =>
-          (supabase as any).from('articles').select('id, source_id').in('id', articleIds)
-        );
-        const matchedArticleIds = new Set(
-          (artRows || [])
-            .filter((a: any) => a?.source_id && followedSourceIds.has(String(a.source_id)))
-            .map((a: any) => String(a.id))
-        );
-        for (const r of eaRows || []) {
-          if (r?.article_id && matchedArticleIds.has(String(r.article_id)) && r?.event_id) {
+      const eaRows = pool
+        ? pool.eaRows
+        : (
+            await safeSelect(() =>
+              (supabase as any).from('event_articles').select('event_id, article_id').in('event_id', candidateIds)
+            )
+          ).data || [];
+
+      if (pool) {
+        for (const r of eaRows) {
+          const sid = pool.articleSourceById.get(String(r.article_id));
+          if (sid && followedSourceIds.has(sid) && r?.event_id) {
             matchedEventsBySource.add(String(r.event_id));
+          }
+        }
+      } else {
+        const articleIds = Array.from(
+          new Set((eaRows || []).map((r: any) => (r?.article_id ? String(r.article_id) : '')).filter(Boolean))
+        );
+        if (articleIds.length > 0) {
+          const { data: artRows } = await safeSelect(() =>
+            (supabase as any).from('articles').select('id, source_id').in('id', articleIds)
+          );
+          const matchedArticleIds = new Set(
+            (artRows || [])
+              .filter((a: any) => a?.source_id && followedSourceIds.has(String(a.source_id)))
+              .map((a: any) => String(a.id))
+          );
+          for (const r of eaRows || []) {
+            if (r?.article_id && matchedArticleIds.has(String(r.article_id)) && r?.event_id) {
+              matchedEventsBySource.add(String(r.event_id));
+            }
           }
         }
       }
 
       // Compatibilidade com eventual tabela event_sources
-      const { data: esRows } = await safeSelect(() =>
-        (supabase as any).from('event_sources').select('event_id, source_id').in('event_id', candidateIds)
-      );
-      for (const r of esRows || []) {
+      const esRows = pool
+        ? pool.esRows
+        : (
+            await safeSelect(() =>
+              (supabase as any).from('event_sources').select('event_id, source_id').in('event_id', candidateIds)
+            )
+          ).data || [];
+      for (const r of esRows) {
         if (r?.source_id && followedSourceIds.has(String(r.source_id)) && r?.event_id) {
           matchedEventsBySource.add(String(r.event_id));
         }
@@ -1012,6 +1161,7 @@ export const briefingEngine = {
     morningTime?: string | null;
     eveningTime?: string | null;
     retryDelayBaseMs?: number;
+    prefetchedEventPool?: PrefetchedBriefingEventPool;
   }): Promise<GenerateBriefingResult> {
     const { getServerSupabase: getSb, getServerKeys: getKeys, fetchFn } = getDeps();
     const supabase = getSb();
@@ -1165,6 +1315,7 @@ export const briefingEngine = {
     // Etapa 1: Selecionar acontecimentos reais (não cria/sobrescreve briefing vazio como completo)
     const selectedEvents = await this.selectEventsForUser(params.userId, {
       referenceDate: refDate,
+      prefetchedPool: params.prefetchedEventPool,
     });
     if (selectedEvents.length === 0 && !isReconcilingReadyEmail) {
       return {
@@ -1745,6 +1896,10 @@ export const briefingEngine = {
       const eligible = await this.listEligibleUsers(options.type, refDate, {
         respectScheduleWindow: Boolean(options.respectScheduleWindow),
       });
+      const prefetchedEventPool =
+        eligible.length > 0
+          ? await this.prefetchEventPool({ referenceDate: refDate }).catch(() => undefined)
+          : undefined;
       const results: GenerateBriefingResult[] = [];
 
       let ready = 0;
@@ -1763,6 +1918,7 @@ export const briefingEngine = {
           timezone: u.timezone,
           morningTime: u.morningTime,
           eveningTime: u.eveningTime,
+          prefetchedEventPool,
         });
         results.push(res);
 

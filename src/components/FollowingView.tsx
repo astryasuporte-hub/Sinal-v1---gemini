@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import { CompanyLogoBadge } from './CompanyLogoBadge';
 import { HorizontalFilterTabs } from './HorizontalFilterTabs';
+import { useDebounce } from '../hooks/useDebounce';
 
 interface FollowingViewProps {
   entities: Entity[];
@@ -69,6 +70,7 @@ export const FollowingView: React.FC<FollowingViewProps> = ({
   // Filters & Search State
   const [activeTypeFilter, setActiveTypeFilter] = useState<'all' | 'topics' | 'companies' | 'people' | 'organizations' | 'sources'>('all');
   const [searchQuery, setSearchQuery] = useState('');
+  const debouncedSearchQuery = useDebounce(searchQuery, 180);
   const [sortBy, setSortBy] = useState<'recent' | 'az' | 'active'>('recent');
   const [showSortDropdown, setShowSortDropdown] = useState(false);
 
@@ -165,15 +167,27 @@ export const FollowingView: React.FC<FollowingViewProps> = ({
     return list;
   }, [entities, topics, sources, itemNotifOverrides]);
 
-  // Contagens reais por tipo para os filtros do topo
-  const countAll = followedItems.length;
-  const countTopics = followedItems.filter((i) => i.itemType === 'topic').length;
-  const countCompanies = followedItems.filter((i) => i.itemType === 'company').length;
-  const countPeople = followedItems.filter((i) => i.itemType === 'person').length;
-  const countOrganizations = followedItems.filter((i) => i.itemType === 'organization').length;
-  const countSources = followedItems.filter((i) => i.itemType === 'source').length;
+  // Contagens reais por tipo em passagem única memoizada
+  const { countAll, countTopics, countCompanies, countPeople, countOrganizations, countSources } = useMemo(() => {
+    const counts = {
+      countAll: followedItems.length,
+      countTopics: 0,
+      countCompanies: 0,
+      countPeople: 0,
+      countOrganizations: 0,
+      countSources: 0
+    };
+    for (const item of followedItems) {
+      if (item.itemType === 'topic') counts.countTopics += 1;
+      else if (item.itemType === 'company') counts.countCompanies += 1;
+      else if (item.itemType === 'person') counts.countPeople += 1;
+      else if (item.itemType === 'organization') counts.countOrganizations += 1;
+      else if (item.itemType === 'source') counts.countSources += 1;
+    }
+    return counts;
+  }, [followedItems]);
 
-  // Filtragem e Ordenação
+  // Filtragem e Ordenação com Debounce
   const filteredAndSortedItems = useMemo(() => {
     let result = followedItems;
 
@@ -185,7 +199,7 @@ export const FollowingView: React.FC<FollowingViewProps> = ({
     else if (activeTypeFilter === 'sources') result = result.filter((i) => i.itemType === 'source');
 
     // Busca apenas no que o usuário segue
-    const q = searchQuery.trim().toLowerCase();
+    const q = debouncedSearchQuery.trim().toLowerCase();
     if (q) {
       result = result.filter(
         (i) =>
@@ -203,7 +217,7 @@ export const FollowingView: React.FC<FollowingViewProps> = ({
     }
 
     return result;
-  }, [followedItems, activeTypeFilter, searchQuery, sortBy]);
+  }, [followedItems, activeTypeFilter, debouncedSearchQuery, sortBy]);
 
   // Executar Unfollow com confirmação
   const confirmUnfollow = () => {

@@ -7,7 +7,7 @@
  * Implements lazy dynamic imports per route to prevent module-level bootstrap crashes from affecting other services.
  */
 
-import { sendJson, setCorsHeaders } from '../_lib/common.js';
+import { sendJson, setCorsHeaders, readJsonBody } from '../_lib/common.js';
 import eventsHandler from '../_lib/handlers/proxy/events.js';
 import statusHandler from '../_lib/handlers/proxy/status.js';
 import gnewsHandler from '../_lib/handlers/proxy/gnews.js';
@@ -61,6 +61,35 @@ export default async function handler(req: any, res: any) {
     // Rota 6: NVIDIA NIM Chat & Síntese
     if (pathname.includes('/nvidia') || pathname.includes('/chat')) {
       return await nvidiaHandler(req, res);
+    }
+
+    // Rota 7: Telemetria anônima RUM (Web Vitals) sem PII e sem nova função serverless
+    if (pathname.includes('/perf')) {
+      if (req.method !== 'POST') {
+        return sendJson(res, 405, { error: 'METHOD_NOT_ALLOWED' });
+      }
+      const raw = await readJsonBody(req).catch(() => ({}));
+      const clampMetric = (v: unknown, max: number) => {
+        const n = Number(v);
+        return Number.isFinite(n) && n >= 0 && n <= max ? Math.round(n * 100) / 100 : null;
+      };
+      const sanitizedMetrics = {
+        lcpMs: clampMetric(raw?.lcpMs, 120000),
+        inpMs: clampMetric(raw?.inpMs, 60000),
+        cls: clampMetric(raw?.cls, 100),
+        ttfbMs: clampMetric(raw?.ttfbMs, 120000),
+        jsErrors: clampMetric(raw?.jsErrors, 1000) ?? 0,
+        apiCount: clampMetric(raw?.apiCount, 1000) ?? 0,
+        path: typeof raw?.path === 'string' ? raw.path.split('?')[0].split('#')[0].slice(0, 64) : '/',
+      };
+      if (
+        (sanitizedMetrics.lcpMs !== null && sanitizedMetrics.lcpMs > 2500) ||
+        (sanitizedMetrics.inpMs !== null && sanitizedMetrics.inpMs > 200) ||
+        (sanitizedMetrics.cls !== null && sanitizedMetrics.cls > 0.1)
+      ) {
+        console.info('[FatosBR RUM Threshold]', JSON.stringify(sanitizedMetrics));
+      }
+      return sendJson(res, 202, { accepted: true });
     }
 
     return sendJson(res, 404, {

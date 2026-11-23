@@ -354,7 +354,9 @@ function createServerlessPool(): Pool | null {
     connectionTimeoutMillis: 5000,
     // Timeouts estritos de execução de query
     statement_timeout: 10000,
-    query_timeout: 10000
+    query_timeout: 10000,
+    // Permite encerramento limpo em cold-down serverless sem prender o event loop
+    allowExitOnIdle: true
   };
 
   if (resolved.isCloudHost) {
@@ -412,6 +414,14 @@ export async function executeSql<T extends QueryResultRow = any>(
   try {
     client = await pool.connect();
     const res = await client.query<T>(text, params);
+    const durationMs = Date.now() - start;
+    if (durationMs > 250) {
+      const sanitizedOp = String(text || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 120);
+      console.warn(`[Postgres Slow Query] (${durationMs}ms): ${sanitizedOp}`);
+    }
     return res;
   } catch (err: any) {
     console.error(`[Postgres Query Error] Falha na execução da query (${Date.now() - start}ms):`, err?.message);

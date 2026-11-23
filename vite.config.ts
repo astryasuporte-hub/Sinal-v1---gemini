@@ -203,6 +203,24 @@ function apiProxyPlugin(): Plugin {
             return;
           }
 
+          // 0.2 Endpoint leve de coleta de Web Vitals / RUM em desenvolvimento
+          if (req.url === '/api/proxy/perf' || req.url.startsWith('/api/proxy/perf?')) {
+            if (req.method === 'POST') {
+              const buffers: any[] = [];
+              for await (const chunk of req) {
+                buffers.push(chunk);
+              }
+              res.setHeader('Content-Type', 'application/json');
+              res.statusCode = 202;
+              res.end(JSON.stringify({ accepted: true }));
+              return;
+            }
+            res.setHeader('Content-Type', 'application/json');
+            res.statusCode = 200;
+            res.end(JSON.stringify({ ok: true }));
+            return;
+          }
+
           // 0.5. Catálogo, Eventos e Feed canônicos
           if (
             req.url.startsWith('/api/proxy/events') ||
@@ -222,7 +240,9 @@ function apiProxyPlugin(): Plugin {
             const max = urlObj.searchParams.get('max') || '5';
 
             const targetUrl = `https://gnews.io/api/v4/search?q=${encodeURIComponent(q)}&lang=${lang}&country=${country}&max=${max}&apikey=${SERVER_SECRET_KEYS.GNEWS}`;
-            const apiRes = await fetch(targetUrl);
+            const gnewsCtrl = new AbortController();
+            const gnewsTimeout = setTimeout(() => gnewsCtrl.abort(), 8000);
+            const apiRes = await fetch(targetUrl, { signal: gnewsCtrl.signal }).finally(() => clearTimeout(gnewsTimeout));
             const latency = Date.now() - startTime;
             const data = await apiRes.text();
 
@@ -251,11 +271,14 @@ function apiProxyPlugin(): Plugin {
             const pageSize = urlObj.searchParams.get('pageSize') || '5';
 
             const targetUrl = `https://newsapi.org/v2/everything?q=${encodeURIComponent(q)}&pageSize=${pageSize}&apiKey=${SERVER_SECRET_KEYS.NEWSAPI}`;
+            const newsApiCtrl = new AbortController();
+            const newsApiTimeout = setTimeout(() => newsApiCtrl.abort(), 8000);
             const apiRes = await fetch(targetUrl, {
+              signal: newsApiCtrl.signal,
               headers: {
                 'User-Agent': 'FatosBR-News-Engine/1.0'
               }
-            });
+            }).finally(() => clearTimeout(newsApiTimeout));
             const latency = Date.now() - startTime;
             const data = await apiRes.text();
 
@@ -285,7 +308,9 @@ function apiProxyPlugin(): Plugin {
             const number = urlObj.searchParams.get('number') || '5';
 
             const targetUrl = `https://api.worldnewsapi.com/search-news?text=${encodeURIComponent(text)}&language=${language}&number=${number}&api-key=${SERVER_SECRET_KEYS.WORLD_NEWS}`;
-            const apiRes = await fetch(targetUrl);
+            const wnCtrl = new AbortController();
+            const wnTimeout = setTimeout(() => wnCtrl.abort(), 8000);
+            const apiRes = await fetch(targetUrl, { signal: wnCtrl.signal }).finally(() => clearTimeout(wnTimeout));
             const latency = Date.now() - startTime;
             const data = await apiRes.text();
 
@@ -311,26 +336,32 @@ function apiProxyPlugin(): Plugin {
             return;
           }
 
-          // 4. NVIDIA NIM Chat Completions Proxy
+          // 4. NVIDIA NIM Chat Completions Proxy (suporta JSON padrão e SSE streaming)
           if (req.url.startsWith('/api/proxy/nvidia/chat')) {
             const buffers: any[] = [];
             for await (const chunk of req) {
               buffers.push(chunk);
             }
             const bodyStr = Buffer.concat(buffers).toString();
+            let wantsStream = false;
+            try {
+              const parsed = JSON.parse(bodyStr);
+              wantsStream = parsed?.stream === true;
+            } catch {}
 
+            const nvCtrl = new AbortController();
+            const nvTimeout = setTimeout(() => nvCtrl.abort(), wantsStream ? 30000 : 20000);
             const apiRes = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
               method: 'POST',
+              signal: nvCtrl.signal,
               headers: {
                 'Content-Type': 'application/json',
                 Authorization: `Bearer ${SERVER_SECRET_KEYS.NVIDIA_NIM}`
               },
               body: bodyStr
-            });
+            }).finally(() => clearTimeout(nvTimeout));
 
             const latency = Date.now() - startTime;
-            const data = await apiRes.text();
-
             providerStats.nvidia.requestsToday += 1;
             providerStats.nvidia.requestsThisMonth += 1;
             providerStats.nvidia.lastRequestAt = new Date().toISOString();
@@ -341,6 +372,22 @@ function apiProxyPlugin(): Plugin {
               providerStats.nvidia.lastErrorMessage = `HTTP ${apiRes.status}`;
             }
 
+            if (wantsStream && apiRes.ok && apiRes.body) {
+              res.statusCode = 200;
+              res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+              res.setHeader('Cache-Control', 'no-cache, no-transform');
+              res.setHeader('Connection', 'keep-alive');
+              const reader = apiRes.body.getReader();
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                res.write(value);
+              }
+              res.end();
+              return;
+            }
+
+            const data = await apiRes.text();
             res.setHeader('Content-Type', 'application/json');
             res.statusCode = apiRes.status;
             res.end(data);
@@ -1194,6 +1241,27 @@ export default defineConfig(() => {
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),
+      },
+    },
+    build: {
+      target: 'es2020',
+      cssCodeSplit: true,
+      reportCompressedSize: true,
+      chunkSizeWarningLimit: 600,
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (!id.includes('node_modules')) return undefined;
+            if (id.includes('three')) return 'three-vendor';
+            if (id.includes('recharts') || id.includes('d3-')) return 'charts-vendor';
+            if (id.includes('@supabase')) return 'supabase-vendor';
+            if (id.includes('motion')) return 'motion-vendor';
+            if (id.includes('lucide-react')) return 'icons-vendor';
+            if (id.includes('jszip')) return 'jszip-vendor';
+            if (id.includes('react-dom') || id.includes('/react/')) return 'react-vendor';
+            return undefined;
+          },
+        },
       },
     },
     server: {

@@ -5,6 +5,7 @@
 
 import { Event } from '../types/sinal';
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
+import { dedupInFlight } from './requestCache';
 
 const PUSH_PREF_KEY = 'sinal_push_notifications_enabled';
 
@@ -460,12 +461,23 @@ class NotificationService {
     const offset = Math.max(0, options?.offset ?? 0);
 
     try {
-      const { data, error } = await client
+      let { data, error } = await client
         .from('notifications')
-        .select('*')
+        .select('id, user_id, type, category, title, subtitle, body, message, read, read_at, event_id, entity_id, metadata, created_at')
         .eq('user_id', userId)
         .order('created_at', { ascending: false })
         .range(offset, offset + limit);
+
+      if (error && this.isMissingColumnError(error)) {
+        const retry = await client
+          .from('notifications')
+          .select('*')
+          .eq('user_id', userId)
+          .order('created_at', { ascending: false })
+          .range(offset, offset + limit);
+        data = retry.data;
+        error = retry.error;
+      }
 
       if (error) {
         const expired = this.isSessionExpiredError(error);
@@ -525,26 +537,28 @@ class NotificationService {
       return { count: 0 };
     }
 
-    try {
-      const { count, error } = await client
-        .from('notifications')
-        .select('id', { count: 'exact', head: true })
-        .eq('user_id', userId)
-        .eq('read', false);
+    return dedupInFlight(`notif:unread:${userId}`, async () => {
+      try {
+        const { count, error } = await client
+          .from('notifications')
+          .select('id', { count: 'exact', head: true })
+          .eq('user_id', userId)
+          .eq('read', false);
 
-      if (error) {
-        const expired = this.isSessionExpiredError(error);
-        return {
-          count: 0,
-          sessionExpired: expired,
-          error: error.message
-        };
+        if (error) {
+          const expired = this.isSessionExpiredError(error);
+          return {
+            count: 0,
+            sessionExpired: expired,
+            error: error.message
+          };
+        }
+
+        return { count: count || 0 };
+      } catch (err: any) {
+        return { count: 0, error: err?.message || 'Erro de conexão' };
       }
-
-      return { count: count || 0 };
-    } catch (err: any) {
-      return { count: 0, error: err?.message || 'Erro de conexão' };
-    }
+    });
   }
 
   /**

@@ -495,11 +495,17 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
                   background: 'radial-gradient(circle at 50% 50%, rgba(255,255,255,0.18) 0%, rgba(0,0,0,0) 70%)'
                 }}
               />
-              <img
-                src="/assets/aistudio/file_00000000d9dc820eb1300938edc857d3_8a6e1430.png"
-                alt="FatosBR - Observatório Global"
-                className="w-full h-full object-contain object-center scale-[1.08] relative z-10"
-              />
+              <picture className="w-full h-full flex items-center justify-center relative z-10">
+                <source srcSet="/assets/aistudio/file_00000000d9dc820eb1300938edc857d3_8a6e1430.webp" type="image/webp" />
+                <img
+                  src="/assets/aistudio/file_00000000d9dc820eb1300938edc857d3_8a6e1430.png"
+                  alt="FatosBR - Observatório Global"
+                  width={1024}
+                  height={683}
+                  decoding="async"
+                  className="w-full h-full object-contain object-center scale-[1.08] relative z-10"
+                />
+              </picture>
             </div>
 
             {/* Headline e Subtítulo Centralizados Conforme Figma */}

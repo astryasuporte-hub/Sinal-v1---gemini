@@ -75,8 +75,8 @@ export interface BriefingsFetchResult {
   sessionExpired?: boolean;
 }
 
-const MORNING_IMG = '/assets/aistudio/Amanhecer_sobre_a_cidade__1__638f4414.png';
-const EVENING_IMG = '/assets/aistudio/Horizonte_urbano_ao_anoitecer__2__4a1dd254.png';
+const MORNING_IMG = '/assets/aistudio/Amanhecer_sobre_a_cidade__1__638f4414.webp';
+const EVENING_IMG = '/assets/aistudio/Horizonte_urbano_ao_anoitecer__2__4a1dd254.webp';
 
 type SupabaseClientLike = typeof supabase;
 let testBriefingClientOverride: { client: SupabaseClientLike; configured: boolean } | null = null;
@@ -99,6 +99,13 @@ function getDb(): { client: any; configured: boolean } {
     return testBriefingClientOverride;
   }
   return { client: supabase as any, configured: isSupabaseConfigured };
+}
+
+function isMissingColumnError(err: any): boolean {
+  if (!err) return false;
+  const msg = String(err?.message || '').toLowerCase();
+  const code = String(err?.code || '').toUpperCase();
+  return code === '42703' || code === 'PGRST204' || (msg.includes('column') && msg.includes('does not exist'));
 }
 
 function isSessionExpiredError(err: any): boolean {
@@ -209,12 +216,23 @@ export const briefingService = {
     }
 
     try {
-      const { data: briefings, error: briefingsError } = await client
+      let { data: briefings, error: briefingsError } = await client
         .from('briefings')
-        .select('*')
+        .select('id, user_id, type, local_date, title, description, status, period_start, period_end, scheduled_for, created_at, updated_at, sent_at')
         .eq('user_id', userId)
         .order('scheduled_for', { ascending: false })
         .limit(20);
+
+      if (briefingsError && isMissingColumnError(briefingsError)) {
+        const retry = await client
+          .from('briefings')
+          .select('id, user_id, type, title, description, status, scheduled_for, created_at, updated_at')
+          .eq('user_id', userId)
+          .order('scheduled_for', { ascending: false })
+          .limit(20);
+        briefings = retry.data;
+        briefingsError = retry.error;
+      }
 
       if (briefingsError) {
         const expired = isSessionExpiredError(briefingsError);
@@ -249,10 +267,19 @@ export const briefingService = {
       if (!joinErr && Array.isArray(joinedItems)) {
         items = joinedItems;
       } else {
-        const { data: plainItems, error: plainErr } = await client
+        let { data: plainItems, error: plainErr } = await client
           .from('briefing_items')
-          .select('*')
+          .select('id, briefing_id, event_id, position, section')
           .in('briefing_id', briefingIds);
+
+        if (plainErr && isMissingColumnError(plainErr)) {
+          const retryPlain = await client
+            .from('briefing_items')
+            .select('id, briefing_id, event_id, order_index')
+            .in('briefing_id', briefingIds);
+          plainItems = retryPlain.data;
+          plainErr = retryPlain.error;
+        }
 
         if (plainErr) {
           return {

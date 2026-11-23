@@ -26,6 +26,7 @@ import { FatosBrLogo } from './FatosBrLogo';
 import { resendService } from '../services/resendService';
 import { userService } from '../services/userService';
 import { briefingService, RealBriefingItem } from '../services/briefingService';
+import { useDebounce } from '../hooks/useDebounce';
 
 export type BriefingItem = RealBriefingItem;
 
@@ -41,21 +42,9 @@ interface BriefingViewProps {
   isSuperAdmin?: boolean;
 }
 
-// Imagens oficiais enviadas pelo usuário
-const MORNING_IMG = '/assets/aistudio/Amanhecer_sobre_a_cidade__1__638f4414.png';
-const EVENING_IMG = '/assets/aistudio/Horizonte_urbano_ao_anoitecer__2__4a1dd254.png';
-
-let preloadedBriefingImages: HTMLImageElement[] = [];
-
-if (typeof window !== 'undefined') {
-  try {
-    const img1 = new Image();
-    img1.src = MORNING_IMG;
-    const img2 = new Image();
-    img2.src = EVENING_IMG;
-    preloadedBriefingImages = [img1, img2];
-  } catch {}
-}
+// Imagens oficiais otimizadas em WebP (~95% menores)
+const MORNING_IMG = '/assets/aistudio/Amanhecer_sobre_a_cidade__1__638f4414.webp';
+const EVENING_IMG = '/assets/aistudio/Horizonte_urbano_ao_anoitecer__2__4a1dd254.webp';
 
 export const BriefingView: React.FC<BriefingViewProps> = ({
   events = [],
@@ -70,6 +59,7 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
   // Estados de filtro e busca
   const [activeFilter, setActiveFilter] = useState<'all' | 'morning' | 'evening' | 'preferences'>('all');
   const [searchQuery, setSearchQuery] = useState('');
+  const debouncedSearchQuery = useDebounce(searchQuery, 180);
   const [selectedBriefing, setSelectedBriefing] = useState<RealBriefingItem | null>(null);
   const [isPreferencesOpen, setIsPreferencesOpen] = useState(false);
 
@@ -268,13 +258,13 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
     }
   }, [initialBriefingId, userBriefings, onClearInitialBriefing]);
 
-  // Filtragem dos briefings reais do usuário
+  // Filtragem dos briefings reais do usuário com debounce
   const filteredBriefings = useMemo(() => {
+    const q = debouncedSearchQuery.trim().toLowerCase();
     return userBriefings.filter((item) => {
       if (activeFilter === 'morning' && item.type !== 'morning') return false;
       if (activeFilter === 'evening' && item.type !== 'evening') return false;
-      if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase();
+      if (q) {
         return (
           item.title.toLowerCase().includes(q) ||
           item.description.toLowerCase().includes(q) ||
@@ -283,7 +273,7 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
       }
       return true;
     });
-  }, [userBriefings, activeFilter, searchQuery]);
+  }, [userBriefings, activeFilter, debouncedSearchQuery]);
 
   // Agrupamento por Hoje, Ontem e datas anteriores
   const todayItems = filteredBriefings.filter((b) => b.groupDate === 'Hoje');
@@ -655,6 +645,10 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
                     <img
                       src={briefing.bgImage}
                       alt={briefing.title}
+                      width={56}
+                      height={56}
+                      loading="lazy"
+                      decoding="async"
                       className="w-14 h-14 rounded-lg object-cover mr-4 shrink-0 border border-zinc-800"
                     />
                     <div className="flex-1 min-w-0 pr-3">
@@ -697,6 +691,10 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
                     <img
                       src={briefing.bgImage}
                       alt={briefing.title}
+                      width={56}
+                      height={56}
+                      loading="lazy"
+                      decoding="async"
                       className="w-14 h-14 rounded-lg object-cover mr-4 shrink-0 border border-zinc-800"
                     />
                     <div className="flex-1 min-w-0 pr-3">

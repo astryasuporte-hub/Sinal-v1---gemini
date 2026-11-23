@@ -1771,7 +1771,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
 
       requestAnimationFrame(() => {
         stage.classList.add('ready');
-        setTimeout(() => preloader?.classList.add('done'), 300);
+        preloader?.classList.add('done');
       });
 
       ro = new ResizeObserver(() => {

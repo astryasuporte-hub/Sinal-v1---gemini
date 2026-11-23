@@ -3,34 +3,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, lazy, Suspense, useRef } from 'react';
 import {
   INITIAL_ENTITIES,
   INITIAL_TOPICS,
   INITIAL_SOURCES,
   INITIAL_SUBSCRIPTION,
-  INITIAL_NOTIFICATIONS,
   HIGHLIGHTED_ENTITIES,
   TRENDING_SUBJECTS
 } from './data/mockData';
-import { Event, Entity, Topic, Source, UserSubscription, SinalNotification } from './types/sinal';
+import { Event, Entity, Topic, Source, UserSubscription } from './types/sinal';
 import { EventCard } from './components/EventCard';
 import { FeaturedTopCarousel } from './components/FeaturedTopCarousel';
-import { EventDetailModal } from './components/EventDetailModal';
-import { EntityDetailModal } from './components/EntityDetailModal';
-import { ExploreView } from './components/ExploreView';
-import { FollowingView } from './components/FollowingView';
-import { NotificationsView } from './components/NotificationsView';
-import { ProfileView } from './components/ProfileView';
-import { BillingModal } from './components/BillingModal';
 import { FatosBrLogo } from './components/FatosBrLogo';
-import { OnboardingModal } from './components/OnboardingModal';
-import { AuthModal } from './components/AuthModal';
-import { BriefingView } from './components/BriefingView';
-import { QuickSearchModal } from './components/QuickSearchModal';
-import { LandingPage } from './components/LandingPage';
-import { AdminPanel } from './components/AdminPanel';
-import { SavedHistoryView, HistoryItem } from './components/SavedHistoryView';
+import type { HistoryItem } from './components/SavedHistoryView';
 import { authService } from './services/authService';
 import { userService } from './services/userService';
 import { eventService } from './services/eventService';
@@ -43,6 +29,7 @@ import { User as SupabaseUser } from '@supabase/supabase-js';
 import {
   SinalLoading,
   FeedSkeleton,
+  EventDetailSkeleton,
   EmptyFeedState,
   EmptyFollowingState,
   EmptySavedState,
@@ -71,41 +58,49 @@ import {
   Shield,
   Sparkles,
   ArrowUp,
-  Layers,
-  ArrowRight,
-  Settings,
   FileText,
   Clock,
   Globe2,
   RefreshCw,
-  Sun,
-  Moon,
   Command,
   AlertTriangle,
   X,
-  Volume2,
-  VolumeX,
-  Headphones,
   Instagram,
   Check,
-  CheckCircle2,
   SlidersHorizontal,
   ChevronDown,
   Menu
 } from 'lucide-react';
 import { rateLimitService } from './services/rateLimitService';
-import { KeyboardShortcutsModal } from './components/KeyboardShortcutsModal';
 import { soundAlertService } from './services/soundAlertService';
 import { motion, AnimatePresence } from 'motion/react';
-import { EditorialPushBanner, PushNotificationPayload } from './components/EditorialPushBanner';
-import { FatosBRControlView } from './components/FatosBRControlView';
-import { LoginPage } from './components/LoginPage';
-import { OnboardingFlow } from './components/OnboardingFlow';
 import { LanguageSelector } from './components/LanguageSelector';
 import { useI18n, useTranslation } from './i18n';
-import { RecalibrateInterestsModal, ALL_ONBOARDING_THEMES } from './components/RecalibrateInterestsModal';
-import { LegalCenterModal } from './components/LegalCenterModal';
 import { CookieConsentBanner } from './components/CookieConsentBanner';
+import { useDebounce } from './hooks/useDebounce';
+import { runOptimisticMutation } from './utils/optimisticToggle';
+
+// Code splitting de rotas e modais pesados via React.lazy (reduz drasticamente o bundle inicial)
+const LandingPage = lazy(() => import('./components/LandingPage').then((m) => ({ default: m.LandingPage })));
+const AdminPanel = lazy(() => import('./components/AdminPanel').then((m) => ({ default: m.AdminPanel })));
+const ProfileView = lazy(() => import('./components/ProfileView').then((m) => ({ default: m.ProfileView })));
+const BriefingView = lazy(() => import('./components/BriefingView').then((m) => ({ default: m.BriefingView })));
+const ExploreView = lazy(() => import('./components/ExploreView').then((m) => ({ default: m.ExploreView })));
+const FollowingView = lazy(() => import('./components/FollowingView').then((m) => ({ default: m.FollowingView })));
+const NotificationsView = lazy(() => import('./components/NotificationsView').then((m) => ({ default: m.NotificationsView })));
+const SavedHistoryView = lazy(() => import('./components/SavedHistoryView').then((m) => ({ default: m.SavedHistoryView })));
+const OnboardingFlow = lazy(() => import('./components/OnboardingFlow').then((m) => ({ default: m.OnboardingFlow })));
+const FatosBRControlView = lazy(() => import('./components/FatosBRControlView').then((m) => ({ default: m.FatosBRControlView })));
+const LoginPage = lazy(() => import('./components/LoginPage').then((m) => ({ default: m.LoginPage })));
+const BillingModal = lazy(() => import('./components/BillingModal').then((m) => ({ default: m.BillingModal })));
+const EntityDetailModal = lazy(() => import('./components/EntityDetailModal').then((m) => ({ default: m.EntityDetailModal })));
+const EventDetailModal = lazy(() => import('./components/EventDetailModal').then((m) => ({ default: m.EventDetailModal })));
+const LegalCenterModal = lazy(() => import('./components/LegalCenterModal').then((m) => ({ default: m.LegalCenterModal })));
+const OnboardingModal = lazy(() => import('./components/OnboardingModal').then((m) => ({ default: m.OnboardingModal })));
+const AuthModal = lazy(() => import('./components/AuthModal').then((m) => ({ default: m.AuthModal })));
+const QuickSearchModal = lazy(() => import('./components/QuickSearchModal').then((m) => ({ default: m.QuickSearchModal })));
+const KeyboardShortcutsModal = lazy(() => import('./components/KeyboardShortcutsModal').then((m) => ({ default: m.KeyboardShortcutsModal })));
+const RecalibrateInterestsModal = lazy(() => import('./components/RecalibrateInterestsModal').then((m) => ({ default: m.RecalibrateInterestsModal })));
 
 const HISTORY_STORAGE_KEY = 'sinal_history_items_v1';
 const MAX_HISTORY_ITEMS = 50;
@@ -348,13 +343,13 @@ export default function App() {
     };
   }, []);
 
-  // Catálogo oficial (entidades, fontes e eventos) atualizado a partir do Supabase
-  const refreshCatalogFromSupabase = useCallback(async () => {
+  // Catálogo oficial (entidades, fontes e opcionalmente eventos) atualizado a partir do Supabase
+  const refreshCatalogFromSupabase = useCallback(async (includeEvents = false) => {
     try {
       const [remoteEntities, remoteSources, remoteEvents] = await Promise.all([
         eventService.getEntities().catch(() => []),
         eventService.getSources().catch(() => []),
-        eventService.getEvents().catch(() => [])
+        includeEvents ? eventService.getEvents().catch(() => []) : Promise.resolve([])
       ]);
 
       if (Array.isArray(remoteEntities) && remoteEntities.length > 0) {
@@ -385,7 +380,7 @@ export default function App() {
         });
       }
 
-      if (Array.isArray(remoteEvents) && remoteEvents.length > 0) {
+      if (includeEvents && Array.isArray(remoteEvents) && remoteEvents.length > 0) {
         setEvents(remoteEvents);
       }
     } catch {}
@@ -394,7 +389,7 @@ export default function App() {
   // Sincronização em tempo real do catálogo quando houver importação ou alteração de imagens
   useEffect(() => {
     const handleEntitiesUpdated = () => {
-      void refreshCatalogFromSupabase();
+      void refreshCatalogFromSupabase(true);
     };
     window.addEventListener('fatosbr_entities_updated', handleEntitiesUpdated);
     return () => window.removeEventListener('fatosbr_entities_updated', handleEntitiesUpdated);
@@ -433,6 +428,14 @@ export default function App() {
     rateLimitService.getRemainingRefreshes()
   );
   const [rateLimitToast, setRateLimitToast] = useState<string | null>(null);
+  const [actionErrorToast, setActionErrorToast] = useState<string | null>(null);
+
+  const showActionError = useCallback((msg: string) => {
+    setActionErrorToast(msg);
+    setTimeout(() => {
+      setActionErrorToast((curr) => (curr === msg ? null : curr));
+    }, 4000);
+  }, []);
 
   // Domain state - Notícias em tempo real com hidratação instantânea via cache de duas camadas (Memória + localStorage)
   const [events, setEvents] = useState<Event[]>(() => {
@@ -577,15 +580,9 @@ export default function App() {
     }
   };
 
-  // Coleta automática de notícias reais em tempo real ao carregar o Início + Pré-carregamento de Briefings
+  // Coleta automática de notícias reais em tempo real ao carregar o Início
   useEffect(() => {
     loadRealTimeNews(false);
-
-    // Pré-carregamento imediato em segundo plano para abertura instantânea da aba de Briefings
-    const b1 = new Image();
-    b1.src = '/assets/aistudio/Amanhecer_sobre_a_cidade__1__638f4414.png';
-    const b2 = new Image();
-    b2.src = '/assets/aistudio/Horizonte_urbano_ao_anoitecer__2__4a1dd254.png';
   }, []);
 
   // Listener Global de Atalhos de Teclado (G+H, G+E, G+F, G+B, G+N, G+P, G+S, R, T, ?)
@@ -975,6 +972,9 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [hasError, setHasError] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const debouncedSearchQuery = useDebounce(searchQuery, 200);
+  const [visibleFeedLimit, setVisibleFeedLimit] = useState(12);
+  const feedLoadMoreRef = useRef<HTMLDivElement | null>(null);
   const [isSearchingExternalApis, setIsSearchingExternalApis] = useState(false);
   // Contador real de notificações não lidas baseado no usuário autenticado (fonte canônica: Supabase)
   const [unreadCount, setUnreadCount] = useState<number>(0);
@@ -1103,73 +1103,114 @@ export default function App() {
     setHistoryItems([]);
   };
 
-  // Toggle Save Event com sincronização total
-  const handleToggleSave = (eventId: string) => {
+  // Toggle Save Event com UI otimista e rollback automático em caso de falha
+  const handleToggleSave = useCallback((eventId: string) => {
     const isCurrentlySaved = savedEventIds.has(eventId);
-    if (currentUser?.id) {
-      userService.toggleSaveEvent(currentUser.id, eventId, isCurrentlySaved);
+    const applySavedState = (nextSaved: boolean) => {
+      setSavedEventIds((prev) => {
+        const next = new Set(prev);
+        if (nextSaved) next.add(eventId);
+        else next.delete(eventId);
+        return next;
+      });
+      setEvents((prev) =>
+        prev.map((e) => {
+          if (e.id === eventId) {
+            return {
+              ...e,
+              isSaved: nextSaved,
+              savedAt: nextSaved ? (e.savedAt || new Date().toISOString()) : undefined
+            };
+          }
+          return e;
+        })
+      );
+    };
+
+    if (!currentUser?.id) {
+      applySavedState(!isCurrentlySaved);
+      return;
     }
 
-    setSavedEventIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(eventId)) {
-        next.delete(eventId);
-      } else {
-        next.add(eventId);
-      }
-      return next;
+    void runOptimisticMutation({
+      previousState: isCurrentlySaved,
+      applyOptimistic: applySavedState,
+      persist: () => userService.toggleSaveEvent(currentUser.id, eventId, isCurrentlySaved),
+      onRollback: () => showActionError('Não foi possível salvar a alteração. Tente novamente.')
     });
+  }, [savedEventIds, currentUser?.id, showActionError]);
 
-    setEvents((prev) =>
-      prev.map((e) => {
-        if (e.id === eventId) {
-          const nextSaved = !e.isSaved;
-          return {
-            ...e,
-            isSaved: nextSaved,
-            savedAt: nextSaved ? (e.savedAt || new Date().toISOString()) : undefined
-          };
-        }
-        return e;
-      })
-    );
-  };
-
-  // Follow / Unfollow Handlers com persistência no Supabase
-  const handleToggleFollowEntity = (id: string) => {
+  // Follow / Unfollow Handlers com UI otimista + rollback em erro do Supabase
+  const handleToggleFollowEntity = useCallback((id: string) => {
     const entity = entities.find((e) => e.id === id);
-    if (entity && currentUser?.id) {
-      void userService.toggleFollowEntity(currentUser.id, id, entity.isFollowed);
-    }
-    setEntities((prev) =>
-      prev.map((e) => (e.id === id ? { ...e, isFollowed: !e.isFollowed } : e))
-    );
-  };
+    const prevFollowed = Boolean(entity?.isFollowed);
+    const applyState = (nextFollowed: boolean) => {
+      setEntities((prev) =>
+        prev.map((e) => (e.id === id ? { ...e, isFollowed: nextFollowed } : e))
+      );
+    };
 
-  const handleToggleFollowTopic = (id: string) => {
+    if (!entity || !currentUser?.id) {
+      applyState(!prevFollowed);
+      return;
+    }
+
+    void runOptimisticMutation({
+      previousState: prevFollowed,
+      applyOptimistic: applyState,
+      persist: () => userService.toggleFollowEntity(currentUser.id, id, prevFollowed),
+      onRollback: () => showActionError('Falha ao atualizar entidade seguida. Alteração revertida.')
+    });
+  }, [entities, currentUser?.id, showActionError]);
+
+  const handleToggleFollowTopic = useCallback((id: string) => {
     const topic = topics.find((t) => t.id === id);
-    if (topic && currentUser?.id) {
-      void userService.toggleFollowTopic(currentUser.id, id, topic.isFollowed);
-    }
-    setTopics((prev) =>
-      prev.map((t) => (t.id === id ? { ...t, isFollowed: !t.isFollowed } : t))
-    );
-  };
+    const prevFollowed = Boolean(topic?.isFollowed);
+    const applyState = (nextFollowed: boolean) => {
+      setTopics((prev) =>
+        prev.map((t) => (t.id === id ? { ...t, isFollowed: nextFollowed } : t))
+      );
+    };
 
-  const handleToggleFollowSource = (id: string) => {
-    const source = sources.find((s) => s.id === id);
-    if (source && currentUser?.id) {
-      void userService.toggleFollowSource(currentUser.id, id, source.isFollowed);
+    if (!topic || !currentUser?.id) {
+      applyState(!prevFollowed);
+      return;
     }
-    setSources((prev) =>
-      prev.map((s) => (s.id === id ? { ...s, isFollowed: !s.isFollowed } : s))
-    );
-  };
+
+    void runOptimisticMutation({
+      previousState: prevFollowed,
+      applyOptimistic: applyState,
+      persist: () => userService.toggleFollowTopic(currentUser.id, id, prevFollowed),
+      onRollback: () => showActionError('Falha ao atualizar tema seguido. Alteração revertida.')
+    });
+  }, [topics, currentUser?.id, showActionError]);
+
+  const handleToggleFollowSource = useCallback((id: string) => {
+    const source = sources.find((s) => s.id === id);
+    const prevFollowed = Boolean(source?.isFollowed);
+    const applyState = (nextFollowed: boolean) => {
+      setSources((prev) =>
+        prev.map((s) => (s.id === id ? { ...s, isFollowed: nextFollowed } : s))
+      );
+    };
+
+    if (!source || !currentUser?.id) {
+      applyState(!prevFollowed);
+      return;
+    }
+
+    void runOptimisticMutation({
+      previousState: prevFollowed,
+      applyOptimistic: applyState,
+      persist: () => userService.toggleFollowSource(currentUser.id, id, prevFollowed),
+      onRollback: () => showActionError('Falha ao atualizar fonte seguida. Alteração revertida.')
+    });
+  }, [sources, currentUser?.id, showActionError]);
 
   // Hide Event ("Não quero ver isso")
-  const handleHideEvent = (eventId: string) => {
+  const handleHideEvent = useCallback((eventId: string) => {
     setHiddenEventIds((prev) => new Set([...prev, eventId]));
-  };
+  }, []);
 
   // Trigger simulated new events
   const handleSimulateNewEvents = () => {
@@ -1182,69 +1223,93 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  // Filtragem dos eventos de acordo com a tab ativa na Home
-  const visibleEvents = events
-    .filter((e) => !hiddenEventIds.has(e.id))
-    .filter((e) => {
-      if (searchQuery.trim().length > 0) {
-        return (
-          e.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          e.summary.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          e.category.toLowerCase().includes(searchQuery.toLowerCase())
-        );
+  // Sets de itens seguidos pré-computados uma única vez fora do filtro do feed
+  const followedSets = useMemo(() => {
+    const followedEntIds = new Set<string>();
+    const followedEntNames = new Set<string>();
+    for (const ent of entities) {
+      if (ent.isFollowed) {
+        followedEntIds.add(ent.id);
+        followedEntNames.add(ent.name.toLowerCase());
       }
-      if (activeTab === 'following') {
-        const followedEntIds = new Set(entities.filter((ent) => ent.isFollowed).map((ent) => ent.id));
-        const followedEntNames = new Set(entities.filter((ent) => ent.isFollowed).map((ent) => ent.name.toLowerCase()));
-        const followedTopSlugs = new Set(topics.filter((top) => top.isFollowed).map((top) => top.slug.toLowerCase()));
-        const followedTopNames = new Set(topics.filter((top) => top.isFollowed).map((top) => top.name.toLowerCase()));
-        const followedSourceNames = new Set(sources.filter((s) => s.isFollowed).map((s) => s.name.toLowerCase()));
+    }
 
-        // Se o usuário não segue nada, retorna false para exibir o estado vazio orientativo
-        if (followedEntIds.size === 0 && followedTopSlugs.size === 0 && followedSourceNames.size === 0) {
-          return false;
-        }
+    const followedTopSlugs = new Set<string>();
+    const followedTopNames = new Set<string>();
+    for (const top of topics) {
+      if (top.isFollowed) {
+        followedTopSlugs.add(top.slug.toLowerCase());
+        followedTopNames.add(top.name.toLowerCase());
+      }
+    }
 
+    const followedSourceNames = new Set<string>();
+    for (const s of sources) {
+      if (s.isFollowed) {
+        followedSourceNames.add(s.name.toLowerCase());
+      }
+    }
+
+    return {
+      followedEntIds,
+      followedEntNames,
+      followedTopSlugs,
+      followedTopNames,
+      followedSourceNames,
+      hasAnyFollow: followedEntIds.size > 0 || followedTopSlugs.size > 0 || followedSourceNames.size > 0
+    };
+  }, [entities, topics, sources]);
+
+  // Filtragem memoizada dos eventos com busca debounced
+  const visibleEvents = useMemo(() => {
+    const trimmedSearch = debouncedSearchQuery.trim().toLowerCase();
+
+    return events.filter((e) => {
+      if (hiddenEventIds.has(e.id)) return false;
+
+      if (trimmedSearch.length > 0) {
+        const matchesSearch =
+          e.title.toLowerCase().includes(trimmedSearch) ||
+          e.summary.toLowerCase().includes(trimmedSearch) ||
+          e.category.toLowerCase().includes(trimmedSearch);
+        if (!matchesSearch) return false;
+      } else if (activeTab === 'following') {
+        if (!followedSets.hasAnyFollow) return false;
         const matchesEntity = e.entities?.some(
-          (ent) => followedEntIds.has(ent.id) || followedEntNames.has(ent.name?.toLowerCase())
+          (ent) => followedSets.followedEntIds.has(ent.id) || followedSets.followedEntNames.has(ent.name?.toLowerCase())
         );
         const matchesTopic = e.topics?.some(
-          (top) => followedTopSlugs.has(top.slug?.toLowerCase()) || followedTopNames.has(top.name?.toLowerCase())
+          (top) => followedSets.followedTopSlugs.has(top.slug?.toLowerCase()) || followedSets.followedTopNames.has(top.name?.toLowerCase())
         );
         const matchesSource = e.sources?.some(
-          (src) => followedSourceNames.has(src.sourceName?.toLowerCase())
+          (src) => followedSets.followedSourceNames.has(src.sourceName?.toLowerCase())
         );
-
-        return Boolean(matchesEntity || matchesTopic || matchesSource);
-      }
-      if (activeTab === 'trending') {
-        return e.relevanceScore >= 90;
-      }
-      if (activeTab === 'for-you') {
-        // Filtragem estrita pelas categorias escolhidas no Onboarding / Recalibração
+        if (!matchesEntity && !matchesTopic && !matchesSource) return false;
+      } else if (activeTab === 'trending') {
+        if (e.relevanceScore < 90) return false;
+      } else if (activeTab === 'for-you') {
         if (userInterests && userInterests.length > 0) {
-          return eventMatchesAnyUserTheme(e.category, e.title, e.summary, userInterests);
+          if (!eventMatchesAnyUserTheme(e.category, e.title, e.summary, userInterests)) return false;
         }
-        return true;
       }
+
+      if (homeCategoryFilter !== 'all') {
+        if (!eventMatchesAnyUserTheme(e.category, e.title, e.summary, [homeCategoryFilter])) return false;
+      }
+
       return true;
-    })
-    .filter((e) => {
-      if (homeCategoryFilter === 'all') return true;
-      return eventMatchesAnyUserTheme(e.category, e.title, e.summary, [homeCategoryFilter]);
     });
+  }, [events, hiddenEventIds, debouncedSearchQuery, activeTab, followedSets, userInterests, homeCategoryFilter]);
 
   // Manchetes e acontecimentos em destaque para o carrossel do topo do feed Home
   const topFeaturedEvents = useMemo(() => {
-    // Quando houver pesquisa ativa, não exibe o carrossel para focar nos resultados da busca
-    if (searchQuery.trim().length > 0 || visibleEvents.length === 0) return [];
-    // Prioriza eventos com imagem de capa nítida para o banner de alto impacto
+    if (debouncedSearchQuery.trim().length > 0 || visibleEvents.length === 0) return [];
     const withImages = visibleEvents.filter((e) => Boolean(e.imageUrl));
     if (withImages.length >= 2) {
       return withImages.slice(0, 4);
     }
     return visibleEvents.slice(0, 3);
-  }, [visibleEvents, searchQuery]);
+  }, [visibleEvents, debouncedSearchQuery]);
 
   const featuredEventIds = useMemo(() => {
     return new Set(topFeaturedEvents.map((e) => e.id));
@@ -1256,16 +1321,44 @@ export default function App() {
     return visibleEvents.filter((e) => !featuredEventIds.has(e.id));
   }, [visibleEvents, topFeaturedEvents, featuredEventIds]);
 
+  const renderedFeedEvents = useMemo(() => {
+    return verticalFeedEvents.slice(0, visibleFeedLimit);
+  }, [verticalFeedEvents, visibleFeedLimit]);
+
+  // Reseta limite de renderização progressiva ao trocar filtros
+  useEffect(() => {
+    setVisibleFeedLimit(12);
+  }, [activeTab, homeCategoryFilter, debouncedSearchQuery]);
+
+  // Renderização progressiva sob demanda via IntersectionObserver (evita montar todos os cards de uma vez)
+  useEffect(() => {
+    if (currentNav !== 'home') return;
+    const sentinel = feedLoadMoreRef.current;
+    if (!sentinel || visibleFeedLimit >= verticalFeedEvents.length) return;
+    if (typeof IntersectionObserver === 'undefined') return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setVisibleFeedLimit((prev) => Math.min(prev + 12, verticalFeedEvents.length));
+        }
+      },
+      { rootMargin: '400px 0px' }
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [currentNav, visibleFeedLimit, verticalFeedEvents.length]);
+
   // Disparo automático nas APIs externas caso o termo pesquisado não exista no cache local
   useEffect(() => {
-    const q = searchQuery.trim();
+    const q = debouncedSearchQuery.trim();
     if (q.length >= 3 && visibleEvents.length === 0 && !isSearchingExternalApis && externalSearchFailed !== q) {
       const timer = setTimeout(() => {
         handleSearchExternalApis(q);
-      }, 600);
+      }, 400);
       return () => clearTimeout(timer);
     }
-  }, [searchQuery, visibleEvents.length, isSearchingExternalApis, externalSearchFailed, handleSearchExternalApis]);
+  }, [debouncedSearchQuery, visibleEvents.length, isSearchingExternalApis, externalSearchFailed, handleSearchExternalApis]);
 
   // Super Admin oficial e contas autorizadas de administração do FatosBR
   const ADMIN_EMAILS = [
@@ -1356,77 +1449,87 @@ export default function App() {
   if (currentNav === 'landing') {
     return (
       <div className="min-h-screen bg-[#07080b] text-zinc-100 font-sans selection:bg-white selection:text-black">
-        <LandingPage
-          onStartFreeTrial={() => setCurrentNav('login')}
-          onEnterApp={() => setCurrentNav(currentUser ? 'home' : 'login')}
-          onOpenAuth={() => setCurrentNav('login')}
-          onOpenLegal={handleOpenLegal}
-        />
-        <LegalCenterModal
-          isOpen={isLegalModalOpen}
-          onClose={() => setIsLegalModalOpen(false)}
-          initialTab={legalModalTab}
-        />
+        <Suspense fallback={<div className="min-h-screen bg-[#07080b] flex items-center justify-center"><SinalLoading message="Carregando FatosBR..." /></div>}>
+          <LandingPage
+            onStartFreeTrial={() => setCurrentNav('login')}
+            onEnterApp={() => setCurrentNav(currentUser ? 'home' : 'login')}
+            onOpenAuth={() => setCurrentNav('login')}
+            onOpenLegal={handleOpenLegal}
+          />
+        </Suspense>
+        {isLegalModalOpen && (
+          <Suspense fallback={null}>
+            <LegalCenterModal
+              isOpen={isLegalModalOpen}
+              onClose={() => setIsLegalModalOpen(false)}
+              initialTab={legalModalTab}
+            />
+          </Suspense>
+        )}
       </div>
     );
   }
 
   if (currentNav === 'login') {
     return (
-      <LoginPage
-        onBackToLanding={() => {
-          recoverySessionActiveRef.current = false;
-          setProfileLoadError(null);
-          setCurrentNav('landing');
-        }}
-        onRecoveryModeChange={(active) => {
-          recoverySessionActiveRef.current = active;
-        }}
-        onAuthSuccess={async (_email, _name) => {
-          recoverySessionActiveRef.current = false;
-          setProfileLoadError(null);
-          const user = await authService.getCurrentUser();
-          if (user) {
-            handleUserSession(user);
-            await hydrateAndResolveOnboarding(user, 'home');
-          }
-        }}
-      />
+      <Suspense fallback={<div className="min-h-screen bg-[#07080b] flex items-center justify-center"><SinalLoading message="Carregando acesso..." /></div>}>
+        <LoginPage
+          onBackToLanding={() => {
+            recoverySessionActiveRef.current = false;
+            setProfileLoadError(null);
+            setCurrentNav('landing');
+          }}
+          onRecoveryModeChange={(active) => {
+            recoverySessionActiveRef.current = active;
+          }}
+          onAuthSuccess={async (_email, _name) => {
+            recoverySessionActiveRef.current = false;
+            setProfileLoadError(null);
+            const user = await authService.getCurrentUser();
+            if (user) {
+              handleUserSession(user);
+              await hydrateAndResolveOnboarding(user, 'home');
+            }
+          }}
+        />
+      </Suspense>
     );
   }
 
   if (currentNav === 'onboarding') {
     return (
-      <OnboardingFlow
-        entities={entities}
-        topics={topics}
-        sources={sources}
-        initialStep={onboardingResumeState?.step || 1}
-        initialData={onboardingResumeState?.data}
-        onToggleEntity={handleToggleFollowEntity}
-        onToggleSource={handleToggleFollowSource}
-        onOpenLogin={() => setCurrentNav('login')}
-        onSaveProgress={(step, data) => {
-          if (currentUser?.id) {
-            void userService.saveOnboardingProgress(currentUser.id, step, data);
-          }
-        }}
-        onComplete={async (payload) => {
-          if (Array.isArray(payload.themes) && payload.themes.length > 0) {
-            setUserInterests(payload.themes);
-          }
-          if (currentUser?.id) {
-            const res = await userService.completeOnboarding(currentUser.id, payload, currentUser.email);
-            if (isSupabaseConfigured && !res.persistedInDb) {
-              throw new Error(
-                res.error || 'Não foi possível salvar suas preferências no momento. Tente novamente.'
-              );
+      <Suspense fallback={<div className="min-h-screen bg-[#07080b] flex items-center justify-center"><SinalLoading message="Preparando onboarding..." /></div>}>
+        <OnboardingFlow
+          entities={entities}
+          topics={topics}
+          sources={sources}
+          initialStep={onboardingResumeState?.step || 1}
+          initialData={onboardingResumeState?.data}
+          onToggleEntity={handleToggleFollowEntity}
+          onToggleSource={handleToggleFollowSource}
+          onOpenLogin={() => setCurrentNav('login')}
+          onSaveProgress={(step, data) => {
+            if (currentUser?.id) {
+              void userService.saveOnboardingProgress(currentUser.id, step, data);
             }
-          }
-          setOnboardingResumeState(null);
-          setCurrentNav('home');
-        }}
-      />
+          }}
+          onComplete={async (payload) => {
+            if (Array.isArray(payload.themes) && payload.themes.length > 0) {
+              setUserInterests(payload.themes);
+            }
+            if (currentUser?.id) {
+              const res = await userService.completeOnboarding(currentUser.id, payload, currentUser.email);
+              if (isSupabaseConfigured && !res.persistedInDb) {
+                throw new Error(
+                  res.error || 'Não foi possível salvar suas preferências no momento. Tente novamente.'
+                );
+              }
+            }
+            setOnboardingResumeState(null);
+            setCurrentNav('home');
+          }}
+        />
+      </Suspense>
     );
   }
 
@@ -1557,38 +1660,40 @@ export default function App() {
 
     return (
       <div className="animate-view-fade min-h-screen">
-        <AdminPanel
-          onBackToApp={() => setCurrentNav('profile')}
-          onOpenControl={() => setCurrentNav('control')}
-          events={events}
-          sources={sources}
-          topics={topics}
-          entities={entities}
-          onAddEvent={(newEvent) => setEvents((prev) => [newEvent, ...prev])}
-          onDeleteEvent={(eventId) => setEvents((prev) => prev.filter((e) => e.id !== eventId))}
-          onClearEvents={() => setEvents([])}
-          onResetEvents={() => loadRealTimeNews(true)}
-          onAddSource={(newSource) => setSources((prev) => [newSource, ...prev])}
-          onDeleteSource={(sourceId) => setSources((prev) => prev.filter((s) => s.id !== sourceId))}
-          onUpdateEntityLogo={(entityId, logoUrl) => {
-            setEntities((prev) =>
-              prev.map((e) =>
-                e.id === entityId
-                  ? {
-                      ...e,
-                      imageUrl: logoUrl || undefined,
-                      logoUrl: logoUrl || undefined,
-                      avatarUrl: e.type === 'person' ? logoUrl || undefined : e.avatarUrl
-                    }
-                  : e
-              )
-            );
-          }}
-          onRefreshCatalog={refreshCatalogFromSupabase}
-          onAddEntity={(newEntity) => {
-            setEntities((prev) => [newEntity, ...prev]);
-          }}
-        />
+        <Suspense fallback={<div className="min-h-screen bg-[#08090b] flex items-center justify-center"><SinalLoading message="Carregando painel administrativo..." /></div>}>
+          <AdminPanel
+            onBackToApp={() => setCurrentNav('profile')}
+            onOpenControl={() => setCurrentNav('control')}
+            events={events}
+            sources={sources}
+            topics={topics}
+            entities={entities}
+            onAddEvent={(newEvent) => setEvents((prev) => [newEvent, ...prev])}
+            onDeleteEvent={(eventId) => setEvents((prev) => prev.filter((e) => e.id !== eventId))}
+            onClearEvents={() => setEvents([])}
+            onResetEvents={() => loadRealTimeNews(true)}
+            onAddSource={(newSource) => setSources((prev) => [newSource, ...prev])}
+            onDeleteSource={(sourceId) => setSources((prev) => prev.filter((s) => s.id !== sourceId))}
+            onUpdateEntityLogo={(entityId, logoUrl) => {
+              setEntities((prev) =>
+                prev.map((e) =>
+                  e.id === entityId
+                    ? {
+                        ...e,
+                        imageUrl: logoUrl || undefined,
+                        logoUrl: logoUrl || undefined,
+                        avatarUrl: e.type === 'person' ? logoUrl || undefined : e.avatarUrl
+                      }
+                    : e
+                )
+              );
+            }}
+            onRefreshCatalog={() => refreshCatalogFromSupabase(true)}
+            onAddEntity={(newEntity) => {
+              setEntities((prev) => [newEntity, ...prev]);
+            }}
+          />
+        </Suspense>
       </div>
     );
   }
@@ -1866,10 +1971,12 @@ export default function App() {
         {currentNav === 'control' ? (
           /* ================= FATOSBR CONTROL: OPERAÇÃO DO INSTAGRAM ================= */
           <div className="flex-1 w-full overflow-y-auto">
-            <FatosBRControlView
-              onBackToApp={() => setCurrentNav('home')}
-              onOpenCarouselStudio={() => setCurrentNav('admin')}
-            />
+            <Suspense fallback={<div className="p-6"><FeedSkeleton count={3} /></div>}>
+              <FatosBRControlView
+                onBackToApp={() => setCurrentNav('home')}
+                onOpenCarouselStudio={() => setCurrentNav('admin')}
+              />
+            </Suspense>
           </div>
         ) : currentNav === 'explore' ? (
           /* ================= EXPLORAR (MOCKUP 01 & 02) ================= */
@@ -1893,22 +2000,28 @@ export default function App() {
                 <img
                   src={currentUserAvatar || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=120&q=80"}
                   alt="Perfil"
+                  width={32}
+                  height={32}
+                  loading="lazy"
+                  decoding="async"
                   className="w-full h-full object-cover"
                 />
               </button>
             </div>
 
-            <ExploreView
-              entities={entities}
-              topics={topics}
-              sources={sources}
-              events={events}
-              onToggleFollowEntity={handleToggleFollowEntity}
-              onToggleFollowTopic={handleToggleFollowTopic}
-              onToggleFollowSource={handleToggleFollowSource}
-              onOpenEntity={(ent) => setActiveEntityModal(ent)}
-              onOpenEvent={(ev) => handleOpenEventDetail(ev)}
-            />
+            <Suspense fallback={<FeedSkeleton count={3} />}>
+              <ExploreView
+                entities={entities}
+                topics={topics}
+                sources={sources}
+                events={events}
+                onToggleFollowEntity={handleToggleFollowEntity}
+                onToggleFollowTopic={handleToggleFollowTopic}
+                onToggleFollowSource={handleToggleFollowSource}
+                onOpenEntity={(ent) => setActiveEntityModal(ent)}
+                onOpenEvent={(ev) => handleOpenEventDetail(ev)}
+              />
+            </Suspense>
           </div>
         ) : currentNav === 'following' ? (
           /* ================= SEGUINDO (MOCKUP 01 & 02) ================= */
@@ -1932,21 +2045,27 @@ export default function App() {
                 <img
                   src={currentUserAvatar || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=120&q=80"}
                   alt="Perfil"
+                  width={32}
+                  height={32}
+                  loading="lazy"
+                  decoding="async"
                   className="w-full h-full object-cover"
                 />
               </button>
             </div>
 
-            <FollowingView
-              entities={entities}
-              topics={topics}
-              sources={sources}
-              onToggleFollowEntity={handleToggleFollowEntity}
-              onToggleFollowTopic={handleToggleFollowTopic}
-              onToggleFollowSource={handleToggleFollowSource}
-              onOpenEntity={(ent) => setActiveEntityModal(ent)}
-              onNavigateExplore={() => setCurrentNav('explore')}
-            />
+            <Suspense fallback={<FeedSkeleton count={3} />}>
+              <FollowingView
+                entities={entities}
+                topics={topics}
+                sources={sources}
+                onToggleFollowEntity={handleToggleFollowEntity}
+                onToggleFollowTopic={handleToggleFollowTopic}
+                onToggleFollowSource={handleToggleFollowSource}
+                onOpenEntity={(ent) => setActiveEntityModal(ent)}
+                onNavigateExplore={() => setCurrentNav('explore')}
+              />
+            </Suspense>
           </div>
         ) : currentNav === 'notifications' ? (
           /* ================= NOTIFICAÇÕES (MOCKUP 01 & 02) ================= */
@@ -1970,44 +2089,52 @@ export default function App() {
                 <img
                   src={currentUserAvatar || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=120&q=80"}
                   alt="Perfil"
+                  width={32}
+                  height={32}
+                  loading="lazy"
+                  decoding="async"
                   className="w-full h-full object-cover"
                 />
               </button>
             </div>
 
-            <NotificationsView
-              events={events}
-              entities={entities}
-              currentUser={currentUser}
-              onOpenEvent={(ev) => handleOpenEventDetail(ev)}
-              onOpenEntity={(ent) => setActiveEntityModal(ent)}
-              onOpenBriefing={(briefingId) => {
-                setPendingBriefingId(briefingId || null);
-                setCurrentNav('briefings');
-              }}
-              onRequireAuth={() => setIsAuthModalOpen(true)}
-              onBack={() => setCurrentNav('home')}
-            />
+            <Suspense fallback={<FeedSkeleton count={3} />}>
+              <NotificationsView
+                events={events}
+                entities={entities}
+                currentUser={currentUser}
+                onOpenEvent={(ev) => handleOpenEventDetail(ev)}
+                onOpenEntity={(ent) => setActiveEntityModal(ent)}
+                onOpenBriefing={(briefingId) => {
+                  setPendingBriefingId(briefingId || null);
+                  setCurrentNav('briefings');
+                }}
+                onRequireAuth={() => setIsAuthModalOpen(true)}
+                onBack={() => setCurrentNav('home')}
+              />
+            </Suspense>
           </div>
         ) : currentNav === 'saved' || currentNav === 'history' ? (
           /* ================= SALVOS & HISTÓRICO (MOCKUP 01 & 02) ================= */
           <div className="flex-1 w-full px-2 sm:px-6 py-4 sm:py-6 overflow-y-auto">
-            <SavedHistoryView
-              initialTab={currentNav === 'history' ? 'history' : 'saved'}
-              events={events}
-              historyItems={historyItems}
-              onOpenEvent={handleOpenEventDetail}
-              onToggleSaveEvent={handleToggleSave}
-              onRemoveFromHistory={handleRemoveFromHistory}
-              onClearHistory={handleClearHistory}
-              onNavigateExplore={() => setCurrentNav('explore')}
-              onNavigateHome={() => setCurrentNav('home')}
-              onHideEvent={(id) => setHiddenEventIds((prev) => new Set(prev).add(id))}
-              unreadCount={unreadCount}
-              onNavigateNotifications={() => setCurrentNav('notifications')}
-              onNavigateProfile={() => setCurrentNav('profile')}
-              onTabChange={(tab) => setCurrentNav(tab)}
-            />
+            <Suspense fallback={<FeedSkeleton count={3} />}>
+              <SavedHistoryView
+                initialTab={currentNav === 'history' ? 'history' : 'saved'}
+                events={events}
+                historyItems={historyItems}
+                onOpenEvent={handleOpenEventDetail}
+                onToggleSaveEvent={handleToggleSave}
+                onRemoveFromHistory={handleRemoveFromHistory}
+                onClearHistory={handleClearHistory}
+                onNavigateExplore={() => setCurrentNav('explore')}
+                onNavigateHome={() => setCurrentNav('home')}
+                onHideEvent={(id) => setHiddenEventIds((prev) => new Set(prev).add(id))}
+                unreadCount={unreadCount}
+                onNavigateNotifications={() => setCurrentNav('notifications')}
+                onNavigateProfile={() => setCurrentNav('profile')}
+                onTabChange={(tab) => setCurrentNav(tab)}
+              />
+            </Suspense>
           </div>
         ) : currentNav === 'briefings' ? (
           /* ================= BRIEFINGS (MOCKUP 01 & 02) ================= */
@@ -2031,22 +2158,28 @@ export default function App() {
                 <img
                   src={currentUserAvatar || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=120&q=80"}
                   alt="Perfil"
+                  width={32}
+                  height={32}
+                  loading="lazy"
+                  decoding="async"
                   className="w-full h-full object-cover"
                 />
               </button>
             </div>
 
-            <BriefingView
-              events={events}
-              subscription={subscription}
-              currentUser={currentUser}
-              initialBriefingId={pendingBriefingId}
-              onClearInitialBriefing={() => setPendingBriefingId(null)}
-              onOpenEventDetail={(ev) => handleOpenEventDetail(ev)}
-              onOpenBilling={() => setIsBillingModalOpen(true)}
-              onRequireAuth={() => setIsAuthModalOpen(true)}
-              isSuperAdmin={isSuperAdmin}
-            />
+            <Suspense fallback={<FeedSkeleton count={3} />}>
+              <BriefingView
+                events={events}
+                subscription={subscription}
+                currentUser={currentUser}
+                initialBriefingId={pendingBriefingId}
+                onClearInitialBriefing={() => setPendingBriefingId(null)}
+                onOpenEventDetail={(ev) => handleOpenEventDetail(ev)}
+                onOpenBilling={() => setIsBillingModalOpen(true)}
+                onRequireAuth={() => setIsAuthModalOpen(true)}
+                isSuperAdmin={isSuperAdmin}
+              />
+            </Suspense>
           </div>
         ) : currentNav === 'profile' ? (
           /* ================= PERFIL & PREFERÊNCIAS (MOCKUP 01 & 02) ================= */
@@ -2070,52 +2203,58 @@ export default function App() {
                 <img
                   src={currentUserAvatar || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=120&q=80"}
                   alt="Perfil"
+                  width={32}
+                  height={32}
+                  loading="lazy"
+                  decoding="async"
                   className="w-full h-full object-cover"
                 />
               </button>
             </div>
 
-            <ProfileView
-              currentUser={currentUser}
-              entities={entities}
-              topics={topics}
-              sources={sources}
-              subscription={subscription}
-              savedCount={events.filter((e) => e.isSaved).length}
-              onNavigateFollowing={(tab) => {
-                setCurrentNav('following');
-              }}
-              onNavigateSaved={() => setCurrentNav('saved')}
-              onOpenBilling={() => setIsBillingModalOpen(true)}
-              onOpenLanding={() => setCurrentNav('landing')}
-              onOpenAuth={() => setCurrentNav('login')}
-              onOpenAdmin={() => setCurrentNav('admin')}
-              onOpenOnboarding={() => setIsRecalibrateModalOpen(true)}
-              isSuperAdmin={isSuperAdmin}
-              onOpenLegal={handleOpenLegal}
-              onProfileUpdated={(updated) => setCurrentUserAvatar(updated.avatarUrl)}
-              onClearCacheAndSync={async () => {
-                rateLimitService.clearCache();
-                await loadRealTimeNews(true);
-              }}
-              onLogout={async () => {
-                const loggedOutId = currentUser?.id;
-                await authService.signOut();
-                if (loggedOutId) {
-                  notificationService.clearUserCache(loggedOutId);
-                  briefingService.clearUserCache(loggedOutId);
-                  try {
-                    localStorage.removeItem(`fatosbr_briefing_prefs_${loggedOutId}`);
-                  } catch {}
-                }
-                handleUserSession(null);
-                setCurrentNav('landing');
-                if (typeof window !== 'undefined') {
-                  window.scrollTo({ top: 0, behavior: 'smooth' });
-                  window.history.replaceState(null, '', '/');
-                }
-              }}
-            />
+            <Suspense fallback={<FeedSkeleton count={3} />}>
+              <ProfileView
+                currentUser={currentUser}
+                entities={entities}
+                topics={topics}
+                sources={sources}
+                subscription={subscription}
+                savedCount={events.filter((e) => e.isSaved).length}
+                onNavigateFollowing={(tab) => {
+                  setCurrentNav('following');
+                }}
+                onNavigateSaved={() => setCurrentNav('saved')}
+                onOpenBilling={() => setIsBillingModalOpen(true)}
+                onOpenLanding={() => setCurrentNav('landing')}
+                onOpenAuth={() => setCurrentNav('login')}
+                onOpenAdmin={() => setCurrentNav('admin')}
+                onOpenOnboarding={() => setIsRecalibrateModalOpen(true)}
+                isSuperAdmin={isSuperAdmin}
+                onOpenLegal={handleOpenLegal}
+                onProfileUpdated={(updated) => setCurrentUserAvatar(updated.avatarUrl)}
+                onClearCacheAndSync={async () => {
+                  rateLimitService.clearCache();
+                  await loadRealTimeNews(true);
+                }}
+                onLogout={async () => {
+                  const loggedOutId = currentUser?.id;
+                  await authService.signOut();
+                  if (loggedOutId) {
+                    notificationService.clearUserCache(loggedOutId);
+                    briefingService.clearUserCache(loggedOutId);
+                    try {
+                      localStorage.removeItem(`fatosbr_briefing_prefs_${loggedOutId}`);
+                    } catch {}
+                  }
+                  handleUserSession(null);
+                  setCurrentNav('landing');
+                  if (typeof window !== 'undefined') {
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                    window.history.replaceState(null, '', '/');
+                  }
+                }}
+              />
+            </Suspense>
           </div>
         ) : (
           /* ================= HOME / FEED PRINCIPAL ================= */
@@ -2156,6 +2295,10 @@ export default function App() {
                     <img
                       src={currentUserAvatar || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=120&q=80"}
                       alt="Perfil"
+                      width={32}
+                      height={32}
+                      loading="lazy"
+                      decoding="async"
                       className="w-full h-full object-cover"
                     />
                   </button>
@@ -2358,45 +2501,31 @@ export default function App() {
                         />
                       )}
 
-                      <motion.div
-                        variants={{
-                          hidden: { opacity: 0 },
-                          show: {
-                            opacity: 1,
-                            transition: {
-                              staggerChildren: 0.035,
-                              delayChildren: 0.01
-                            }
-                          }
-                        }}
-                        initial="hidden"
-                        animate="show"
-                        className="space-y-4"
-                      >
-                        {verticalFeedEvents.map((event, index) => (
-                          <motion.div
-                            key={`${event.id}-${activeTab}-${homeCategoryFilter}`}
-                            variants={{
-                              hidden: { opacity: 0, y: 8 },
-                              show: {
-                                opacity: 1,
-                                y: 0,
-                                transition: { duration: 0.22, ease: [0.16, 1, 0.3, 1] }
-                              }
-                            }}
-                            style={{ willChange: 'transform, opacity' }}
-                          >
+                      <div className="space-y-4">
+                        {renderedFeedEvents.map((event, index) => (
+                          <div key={`${event.id}-${activeTab}-${homeCategoryFilter}`}>
                             <EventCard
                               event={event}
                               index={index}
-                              onOpenDetail={(ev) => handleOpenEventDetail(ev)}
+                              onOpenDetail={handleOpenEventDetail}
                               onToggleSave={handleToggleSave}
                               onHideEvent={handleHideEvent}
-                              onOpenEntity={(entity) => setActiveEntityModal(entity)}
+                              onOpenEntity={setActiveEntityModal}
                             />
-                          </motion.div>
+                          </div>
                         ))}
-                      </motion.div>
+                        {visibleFeedLimit < verticalFeedEvents.length && (
+                          <div ref={feedLoadMoreRef} className="pt-2 flex justify-center">
+                            <button
+                              type="button"
+                              onClick={() => setVisibleFeedLimit((prev) => Math.min(prev + 12, verticalFeedEvents.length))}
+                              className="px-4 py-2 rounded-xl border border-zinc-800 bg-[#111216] hover:bg-zinc-900 text-xs font-semibold text-zinc-300 hover:text-white transition cursor-pointer"
+                            >
+                              Carregar mais acontecimentos ({verticalFeedEvents.length - visibleFeedLimit} restantes)
+                            </button>
+                          </div>
+                        )}
+                      </div>
 
                       {/* Status em Tempo Real & Botão de Atualização com Rate Limit (5/5) ao final das matérias */}
                       <div className="pt-8 pb-24 sm:pb-12 flex flex-col items-center justify-center gap-2.5 text-center">
@@ -2713,51 +2842,59 @@ export default function App() {
         </button>
       </nav>
 
-      {/* ================= 6. MODAIS CENTRAIS COM TRANSIÇÕES SPRING E LAYOUT SHIFT ================= */}
+      {/* ================= 6. MODAIS CENTRAIS COM TRANSIÇÕES SPRING E LAZY SUSPENSE ================= */}
       <AnimatePresence mode="wait">
         {activeEventModal && (
-          <EventDetailModal
-            key={`event-modal-${activeEventModal.id}`}
-            event={activeEventModal}
-            onClose={() => setActiveEventModal(null)}
-            onToggleSave={handleToggleSave}
-          />
+          <Suspense fallback={<EventDetailSkeleton />}>
+            <EventDetailModal
+              key={`event-modal-${activeEventModal.id}`}
+              event={activeEventModal}
+              onClose={() => setActiveEventModal(null)}
+              onToggleSave={handleToggleSave}
+            />
+          </Suspense>
         )}
       </AnimatePresence>
 
       <AnimatePresence mode="wait">
         {activeEntityModal && (
-          <EntityDetailModal
-            key={`entity-modal-${activeEntityModal.id}`}
-            entity={activeEntityModal}
-            onClose={() => setActiveEntityModal(null)}
-            allEvents={events}
-            onOpenEventDetail={(ev) => setActiveEventModal(ev)}
-            onToggleSaveEvent={handleToggleSave}
-            onToggleFollow={handleToggleFollowEntity}
-          />
+          <Suspense fallback={null}>
+            <EntityDetailModal
+              key={`entity-modal-${activeEntityModal.id}`}
+              entity={activeEntityModal}
+              onClose={() => setActiveEntityModal(null)}
+              allEvents={events}
+              onOpenEventDetail={(ev) => setActiveEventModal(ev)}
+              onToggleSaveEvent={handleToggleSave}
+              onToggleFollow={handleToggleFollowEntity}
+            />
+          </Suspense>
         )}
       </AnimatePresence>
 
-      <AuthModal
-        isOpen={isAuthModalOpen}
-        onClose={() => {
-          recoverySessionActiveRef.current = false;
-          setIsAuthModalOpen(false);
-        }}
-        onRecoveryModeChange={(active) => {
-          recoverySessionActiveRef.current = active;
-        }}
-        onAuthSuccess={async () => {
-          recoverySessionActiveRef.current = false;
-          setIsAuthModalOpen(false);
-          const user = await authService.getCurrentUser();
-          if (user) {
-            handleUserSession(user);
-            await hydrateAndResolveOnboarding(user, 'home');
-          }
-        }}
-      />
+      {isAuthModalOpen && (
+        <Suspense fallback={null}>
+          <AuthModal
+            isOpen={isAuthModalOpen}
+            onClose={() => {
+              recoverySessionActiveRef.current = false;
+              setIsAuthModalOpen(false);
+            }}
+            onRecoveryModeChange={(active) => {
+              recoverySessionActiveRef.current = active;
+            }}
+            onAuthSuccess={async () => {
+              recoverySessionActiveRef.current = false;
+              setIsAuthModalOpen(false);
+              const user = await authService.getCurrentUser();
+              if (user) {
+                handleUserSession(user);
+                await hydrateAndResolveOnboarding(user, 'home');
+              }
+            }}
+          />
+        </Suspense>
+      )}
 
       {/* ================= 7. CATÁLOGO DE ESTADOS GERAIS DO SISTEMA ================= */}
       <GeneralStatesShowcaseModal
@@ -2771,80 +2908,96 @@ export default function App() {
       />
 
       {/* ================= 8. ONBOARDING & CALIBRAGEM INICIAL DO FEED ================= */}
-      <OnboardingModal
-        isOpen={isOnboardingOpen}
-        onClose={() => {
-          setIsOnboardingOpen(false);
-        }}
-        entities={entities}
-        topics={topics}
-        sources={sources}
-        onToggleEntity={handleToggleFollowEntity}
-        onToggleTopic={handleToggleFollowTopic}
-        onToggleSource={handleToggleFollowSource}
-        onComplete={async () => {
-          if (currentUser?.id) {
-            await userService.completeOnboarding(
-              currentUser.id,
-              {
-                themes: userInterests,
-                followedEntityIds: entities.filter((e) => e.isFollowed).map((e) => e.id),
-                followedTopicIds: topics.filter((t) => t.isFollowed).map((t) => t.id),
-                followedSourceIds: sources.filter((s) => s.isFollowed).map((s) => s.id),
-              },
-              currentUser.email
-            );
-          }
-          setIsOnboardingOpen(false);
-          setCurrentNav('home');
-        }}
-      />
+      {isOnboardingOpen && (
+        <Suspense fallback={null}>
+          <OnboardingModal
+            isOpen={isOnboardingOpen}
+            onClose={() => {
+              setIsOnboardingOpen(false);
+            }}
+            entities={entities}
+            topics={topics}
+            sources={sources}
+            onToggleEntity={handleToggleFollowEntity}
+            onToggleTopic={handleToggleFollowTopic}
+            onToggleSource={handleToggleFollowSource}
+            onComplete={async () => {
+              if (currentUser?.id) {
+                await userService.completeOnboarding(
+                  currentUser.id,
+                  {
+                    themes: userInterests,
+                    followedEntityIds: entities.filter((e) => e.isFollowed).map((e) => e.id),
+                    followedTopicIds: topics.filter((t) => t.isFollowed).map((t) => t.id),
+                    followedSourceIds: sources.filter((s) => s.isFollowed).map((s) => s.id),
+                  },
+                  currentUser.email
+                );
+              }
+              setIsOnboardingOpen(false);
+              setCurrentNav('home');
+            }}
+          />
+        </Suspense>
+      )}
 
-      <KeyboardShortcutsModal
-        isOpen={isShortcutsModalOpen}
-        onClose={() => setIsShortcutsModalOpen(false)}
-      />
+      {isShortcutsModalOpen && (
+        <Suspense fallback={null}>
+          <KeyboardShortcutsModal
+            isOpen={isShortcutsModalOpen}
+            onClose={() => setIsShortcutsModalOpen(false)}
+          />
+        </Suspense>
+      )}
 
       {/* ================= 8.1 MODAL DE BUSCA RÁPIDA UNIFICADA (V2.2) ================= */}
-      <QuickSearchModal
-        isOpen={isQuickSearchOpen}
-        onClose={() => setIsQuickSearchOpen(false)}
-        events={events}
-        entities={entities}
-        onSelectEvent={(ev) => setActiveEventModal(ev)}
-        onSelectEntity={(ent) => setActiveEntityModal(ent)}
-        onSelectCategory={(cat) => {
-          setHomeCategoryFilter(cat.toLowerCase());
-          setCurrentNav('home');
-        }}
-      />
+      {isQuickSearchOpen && (
+        <Suspense fallback={null}>
+          <QuickSearchModal
+            isOpen={isQuickSearchOpen}
+            onClose={() => setIsQuickSearchOpen(false)}
+            events={events}
+            entities={entities}
+            onSelectEvent={(ev) => setActiveEventModal(ev)}
+            onSelectEntity={(ent) => setActiveEntityModal(ent)}
+            onSelectCategory={(cat) => {
+              setHomeCategoryFilter(cat.toLowerCase());
+              setCurrentNav('home');
+            }}
+          />
+        </Suspense>
+      )}
 
       {/* ================= 9.1 MODAL DE RECALIBRAÇÃO DE INTERESSES DO LEITOR ================= */}
-      <RecalibrateInterestsModal
-        isOpen={isRecalibrateModalOpen}
-        currentInterests={userInterests}
-        onClose={() => setIsRecalibrateModalOpen(false)}
-        onSave={(newInterests) => {
-          setUserInterests(newInterests);
-          if (currentUser?.id) {
-            void userService.updateUserInterests(currentUser.id, newInterests);
-          }
-        }}
-        onFullOnboarding={() => {
-          setIsRecalibrateModalOpen(false);
-          setOnboardingResumeState({
-            step: 2,
-            data: {
-              themes: userInterests,
-              followedEntityIds: entities.filter((e) => e.isFollowed).map((e) => e.id),
-              followedSourceIds: sources.filter((s) => s.isFollowed).map((s) => s.id),
-            },
-          });
-          setCurrentNav('onboarding');
-        }}
-      />
+      {isRecalibrateModalOpen && (
+        <Suspense fallback={null}>
+          <RecalibrateInterestsModal
+            isOpen={isRecalibrateModalOpen}
+            currentInterests={userInterests}
+            onClose={() => setIsRecalibrateModalOpen(false)}
+            onSave={(newInterests) => {
+              setUserInterests(newInterests);
+              if (currentUser?.id) {
+                void userService.updateUserInterests(currentUser.id, newInterests);
+              }
+            }}
+            onFullOnboarding={() => {
+              setIsRecalibrateModalOpen(false);
+              setOnboardingResumeState({
+                step: 2,
+                data: {
+                  themes: userInterests,
+                  followedEntityIds: entities.filter((e) => e.isFollowed).map((e) => e.id),
+                  followedSourceIds: sources.filter((s) => s.isFollowed).map((s) => s.id),
+                },
+              });
+              setCurrentNav('onboarding');
+            }}
+          />
+        </Suspense>
+      )}
 
-      {/* ================= 10. TOAST FLUTUANTE DE RATE LIMIT ================= */}
+      {/* ================= 10. TOAST FLUTUANTE DE RATE LIMIT & ERRO OTIMISTA ================= */}
       {rateLimitToast && (
         <div className="fixed top-5 left-1/2 -translate-x-1/2 z-50 max-w-md w-[92%] p-3.5 rounded-2xl bg-amber-500/15 border border-amber-500/30 text-amber-300 shadow-2xl backdrop-blur-md flex items-start space-x-3 animate-fadeIn">
           <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
@@ -2858,6 +3011,16 @@ export default function App() {
         </div>
       )}
 
+      {actionErrorToast && (
+        <div className="fixed bottom-24 md:bottom-6 right-4 z-50 max-w-sm p-3.5 rounded-2xl bg-red-500/15 border border-red-500/30 text-red-200 shadow-2xl backdrop-blur-md flex items-center space-x-3 animate-fadeIn">
+          <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+          <span className="text-xs flex-1">{actionErrorToast}</span>
+          <button onClick={() => setActionErrorToast(null)} className="text-zinc-400 hover:text-white p-1">
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
       {/* ================= 11. INDICADOR VISUAL DO ATALHO G ================= */}
       {pendingGSequence && (
         <div className="fixed bottom-20 sm:bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-full bg-zinc-900/95 border border-zinc-700 text-white text-xs font-medium shadow-2xl backdrop-blur-md flex items-center space-x-2 animate-pulse">
@@ -2867,11 +3030,15 @@ export default function App() {
       )}
 
       {/* ================= 12. CENTRAL DE CONFORMIDADE LEGAL & BANNER LGPD ================= */}
-      <LegalCenterModal
-        isOpen={isLegalModalOpen}
-        onClose={() => setIsLegalModalOpen(false)}
-        initialTab={legalModalTab}
-      />
+      {isLegalModalOpen && (
+        <Suspense fallback={null}>
+          <LegalCenterModal
+            isOpen={isLegalModalOpen}
+            onClose={() => setIsLegalModalOpen(false)}
+            initialTab={legalModalTab}
+          />
+        </Suspense>
+      )}
 
       <CookieConsentBanner
         onOpenLegal={handleOpenLegal}
@@ -2989,22 +3156,26 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      <BillingModal
-        isOpen={isBillingModalOpen}
-        onClose={() => setIsBillingModalOpen(false)}
-        subscription={subscription}
-        onUpgradeApproved={(updatedSub) => {
-          if (updatedSub) {
-            setSubscription(updatedSub);
-          } else {
-            void paymentsService.getStatus().then((res) => {
-              if (res.success && res.subscription) {
-                setSubscription(res.subscription);
+      {isBillingModalOpen && (
+        <Suspense fallback={null}>
+          <BillingModal
+            isOpen={isBillingModalOpen}
+            onClose={() => setIsBillingModalOpen(false)}
+            subscription={subscription}
+            onUpgradeApproved={(updatedSub) => {
+              if (updatedSub) {
+                setSubscription(updatedSub);
+              } else {
+                void paymentsService.getStatus().then((res) => {
+                  if (res.success && res.subscription) {
+                    setSubscription(res.subscription);
+                  }
+                });
               }
-            });
-          }
-        }}
-      />
+            }}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }

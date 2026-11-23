@@ -64,7 +64,7 @@ interface EventCardProps {
   onOpenEntity?: (entity: Entity) => void;
 }
 
-export const EventCard: React.FC<EventCardProps> = ({
+export const EventCard: React.FC<EventCardProps> = React.memo(({
   event,
   index = 0,
   onOpenDetail,
@@ -169,6 +169,11 @@ export const EventCard: React.FC<EventCardProps> = ({
           <img
             src={event.imageUrl}
             alt={event.title}
+            width={800}
+            height={420}
+            loading={index < 2 ? 'eager' : 'lazy'}
+            fetchPriority={index === 0 ? 'high' : undefined}
+            decoding="async"
             onError={() => setImgError(true)}
             referrerPolicy="no-referrer"
             className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
@@ -362,7 +367,7 @@ export const EventCard: React.FC<EventCardProps> = ({
                         title={src.sourceName}
                         className="w-5 h-5 rounded-full flex items-center justify-center shrink-0 shadow-sm border border-zinc-700 bg-zinc-900 overflow-hidden p-0.5"
                       >
-                        <img src={src.logoUrl} alt={src.sourceName} className="w-full h-full object-contain" />
+                        <img src={src.logoUrl} alt={src.sourceName} width={20} height={20} loading="lazy" decoding="async" className="w-full h-full object-contain" />
                       </div>
                     ) : (
                       renderSourceBadge(
@@ -404,4 +409,4 @@ export const EventCard: React.FC<EventCardProps> = ({
       </div>
     </motion.article>
   );
-};
+});

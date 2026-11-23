@@ -7,6 +7,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Search, X, ChevronRight, Hash, Building2, User, Globe2, FileText } from 'lucide-react';
 import { Event, Entity } from '../types/sinal';
 import { EntityAvatar } from './EntityAvatar';
+import { useDebounce } from '../hooks/useDebounce';
 
 interface QuickSearchModalProps {
   isOpen: boolean;
@@ -28,6 +29,7 @@ export const QuickSearchModal: React.FC<QuickSearchModalProps> = ({
   onSelectCategory
 }) => {
   const [query, setQuery] = useState('');
+  const debouncedQuery = useDebounce(query, 180);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Auto-focus no input ao abrir
@@ -52,9 +54,9 @@ export const QuickSearchModal: React.FC<QuickSearchModalProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, onClose]);
 
-  // Resultados filtrados
+  // Resultados filtrados com debounce
   const results = useMemo(() => {
-    const q = query.trim().toLowerCase();
+    const q = debouncedQuery.trim().toLowerCase();
     if (!q) {
       return {
         matchedEvents: events.slice(0, 4),
@@ -84,7 +86,7 @@ export const QuickSearchModal: React.FC<QuickSearchModalProps> = ({
       matchedEntities,
       matchedCategories
     };
-  }, [query, events, entities]);
+  }, [debouncedQuery, events, entities]);
 
   if (!isOpen) return null;
 

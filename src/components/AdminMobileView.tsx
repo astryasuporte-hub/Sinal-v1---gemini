@@ -670,11 +670,18 @@ export const AdminMobileView: React.FC<AdminMobileViewProps> = ({
           <div className="relative rounded-2xl overflow-hidden border border-[#183047] bg-[#07111D] p-5 shadow-xl">
             {/* Imagem da Terra como elemento de fundo à direita */}
             <div className="absolute right-0 top-0 bottom-0 w-1/2 pointer-events-none opacity-40">
-              <img
-                src="/assets/aistudio/fatosbr_admin_banner_terra_b31996ff.png"
-                alt="Terra"
-                className="w-full h-full object-cover object-right"
-              />
+              <picture>
+                <source srcSet="/assets/aistudio/fatosbr_admin_banner_terra_b31996ff.webp" type="image/webp" />
+                <img
+                  src="/assets/aistudio/fatosbr_admin_banner_terra_b31996ff.png"
+                  alt="Terra"
+                  width={930}
+                  height={125}
+                  loading="lazy"
+                  decoding="async"
+                  className="w-full h-full object-cover object-right"
+                />
+              </picture>
               <div className="absolute inset-0 bg-gradient-to-r from-[#07111D] via-[#07111D]/80 to-transparent" />
             </div>
 
@@ -2919,11 +2926,18 @@ export const AdminMobileView: React.FC<AdminMobileViewProps> = ({
               {/* Card Institucional da Terra (Visual Exato do Mockup) */}
               <div className="relative rounded-2xl overflow-hidden border border-[#183047] bg-[#07111D] p-3.5 shadow-lg">
                 <div className="absolute right-0 top-0 bottom-0 w-2/5 pointer-events-none opacity-40">
-                  <img
-                    src="/assets/aistudio/fatosbr_admin_banner_terra_b31996ff.png"
-                    alt="Terra FatosBR"
-                    className="w-full h-full object-cover object-right"
-                  />
+                  <picture>
+                    <source srcSet="/assets/aistudio/fatosbr_admin_banner_terra_b31996ff.webp" type="image/webp" />
+                    <img
+                      src="/assets/aistudio/fatosbr_admin_banner_terra_b31996ff.png"
+                      alt="Terra FatosBR"
+                      width={930}
+                      height={125}
+                      loading="lazy"
+                      decoding="async"
+                      className="w-full h-full object-cover object-right"
+                    />
+                  </picture>
                   <div className="absolute inset-0 bg-gradient-to-r from-[#07111D] to-transparent" />
                 </div>
                 <div className="relative z-10 space-y-1">

@@ -43,11 +43,28 @@ export default async function handler(req: any, res: any) {
       return sendJson(res, 400, { error: 'Domínio de destino inválido.' });
     }
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
+    const attemptFetch = async () => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 8000);
+      try {
+        return await fetch(targetUrl, { signal: controller.signal });
+      } finally {
+        clearTimeout(timeout);
+      }
+    };
 
-    const apiRes = await fetch(targetUrl, { signal: controller.signal });
-    clearTimeout(timeout);
+    let apiRes: Response;
+    try {
+      apiRes = await attemptFetch();
+      if (apiRes.status === 502 || apiRes.status === 503 || apiRes.status === 504) {
+        await new Promise((r) => setTimeout(r, 180 + Math.floor(Math.random() * 120)));
+        apiRes = await attemptFetch();
+      }
+    } catch (firstErr: any) {
+      if (firstErr?.name === 'AbortError') throw firstErr;
+      await new Promise((r) => setTimeout(r, 180 + Math.floor(Math.random() * 120)));
+      apiRes = await attemptFetch();
+    }
 
     const data = await apiRes.json().catch(() => ({}));
 

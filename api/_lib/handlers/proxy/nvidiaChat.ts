@@ -47,6 +47,7 @@ export default async function handler(req: any, res: any) {
       body.messages = body.messages.slice(-10); // keep last 10 messages max
     }
 
+    const wantsStream = body?.stream === true;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 20000); // 20s for LLM inference
 
@@ -55,10 +56,35 @@ export default async function handler(req: any, res: any) {
       signal: controller.signal,
       headers: {
         'Content-Type': 'application/json',
+        ...(wantsStream ? { Accept: 'text/event-stream' } : {}),
         Authorization: `Bearer ${keys.NVIDIA_NIM}`
       },
       body: JSON.stringify(body)
     });
+
+    if (wantsStream && apiRes.ok && apiRes.body) {
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache, no-transform');
+      res.setHeader('Connection', 'keep-alive');
+
+      const reader = apiRes.body.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value && value.byteLength > 0) {
+            res.write(Buffer.from(value));
+          }
+        }
+      } finally {
+        clearTimeout(timeout);
+        reader.releaseLock();
+        res.end();
+      }
+      return;
+    }
+
     clearTimeout(timeout);
 
     const data = await apiRes.json().catch(() => ({}));
