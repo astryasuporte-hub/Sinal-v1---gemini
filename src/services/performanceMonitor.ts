@@ -12,6 +12,9 @@ export interface PerfMetricSnapshot {
   inpMs?: number;
   cls?: number;
   ttfbMs?: number;
+  feedLoadMs?: number;
+  deviceTier?: 'low' | 'mid' | 'high' | 'unknown';
+  effectiveType?: string;
   apiTimings: Array<{ route: string; durationMs: number; status: number }>;
   jsErrors: number;
   path: string;
@@ -24,6 +27,8 @@ class PerformanceMonitor {
     apiTimings: [],
     jsErrors: 0,
     path: '/',
+    deviceTier: 'unknown',
+    effectiveType: 'unknown',
   };
   private observers: PerformanceObserver[] = [];
   private maxInp = 0;
@@ -35,6 +40,18 @@ class PerformanceMonitor {
     }
     this.started = true;
     this.snapshot.path = window.location?.pathname || '/';
+
+    // Classificação anônima de capacidade do dispositivo e rede (zero PII)
+    try {
+      const mem = Number((navigator as any).deviceMemory || 0);
+      const cores = Number(navigator.hardwareConcurrency || 0);
+      if (mem > 0 && mem <= 2) this.snapshot.deviceTier = 'low';
+      else if (mem >= 8 || cores >= 8) this.snapshot.deviceTier = 'high';
+      else if (mem > 0 || cores > 0) this.snapshot.deviceTier = 'mid';
+
+      const eff = String((navigator as any).connection?.effectiveType || '').toLowerCase();
+      if (eff) this.snapshot.effectiveType = eff;
+    } catch {}
 
     // TTFB via Navigation Timing
     try {
@@ -105,6 +122,17 @@ class PerformanceMonitor {
     }
   };
 
+  public markFeedLoaded(durationMs?: number): void {
+    if (typeof durationMs === 'number' && Number.isFinite(durationMs) && durationMs >= 0) {
+      this.snapshot.feedLoadMs = Math.round(durationMs);
+      return;
+    }
+    if (typeof window === 'undefined') return;
+    if (typeof performance !== 'undefined' && this.snapshot.feedLoadMs === undefined) {
+      this.snapshot.feedLoadMs = Math.round(performance.now());
+    }
+  }
+
   public trackApiCall(route: string, durationMs: number, status: number): void {
     const cleanRoute = String(route || '').split('?')[0].slice(0, 80);
     if (!cleanRoute) return;
@@ -130,6 +158,7 @@ class PerformanceMonitor {
     if (
       this.snapshot.lcpMs === undefined &&
       this.snapshot.ttfbMs === undefined &&
+      this.snapshot.feedLoadMs === undefined &&
       this.snapshot.apiTimings.length === 0
     ) {
       return;
@@ -141,6 +170,9 @@ class PerformanceMonitor {
       inpMs: this.snapshot.inpMs,
       cls: this.snapshot.cls,
       ttfbMs: this.snapshot.ttfbMs,
+      feedLoadMs: this.snapshot.feedLoadMs,
+      deviceTier: this.snapshot.deviceTier,
+      effectiveType: this.snapshot.effectiveType,
       jsErrors: this.snapshot.jsErrors,
       path: this.snapshot.path,
       apiCount: this.snapshot.apiTimings.length,

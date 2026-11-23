@@ -2,7 +2,7 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * FatosBR Payments V1 — Cliente Frontend para /api/payments/*
+ * FatosBR Payments V2 — Cliente Frontend para /api/payments/* e /api/admin/financial-ops
  *
  * Princípios:
  * - Nunca define preço no cliente; toda lógica financeira é resolvida no servidor.
@@ -11,9 +11,9 @@
  */
 
 import { supabase } from '../lib/supabase';
-import type { UserSubscription } from '../types/sinal';
+import type { PendingPixCharge, RecurrenceMode, UserSubscription } from '../types/sinal';
 
-export type AllowedPaymentMethod = 'credit_card' | 'pix_auto';
+export type AllowedPaymentMethod = 'credit_card' | 'pix_auto' | 'pix';
 
 export interface BillingHistoryItem {
   id: string;
@@ -21,7 +21,7 @@ export interface BillingHistoryItem {
   amountCents: number;
   amount: number;
   currency: 'BRL';
-  status: 'PAID' | 'PENDING' | 'REFUSED' | 'CANCELED' | 'EXPIRED' | 'BLOCKED' | 'REFUNDED';
+  status: 'PAID' | 'PENDING' | 'REFUSED' | 'CANCELED' | 'EXPIRED' | 'BLOCKED' | 'REFUNDED' | 'REFUND_FAILED';
   paymentMethod: string;
   provider: string;
   referenceId: string;
@@ -61,6 +61,8 @@ export interface CheckoutResponse {
   amountCents?: number;
   currency?: string;
   allowedMethods?: AllowedPaymentMethod[];
+  recurrenceMode?: RecurrenceMode;
+  pixCharge?: PendingPixCharge | null;
 }
 
 export interface ReconcileResponse {
@@ -69,6 +71,57 @@ export interface ReconcileResponse {
   rejectedProhibitedCount?: number;
   checkedAttempts?: number;
   subscription?: UserSubscription;
+  error?: string;
+}
+
+export interface AdminFinancialSnapshot {
+  success: boolean;
+  generatedAt?: string;
+  provider?: string;
+  allowedMethods?: string[];
+  traditionalPixEnabled?: boolean;
+  readiness?: {
+    commercial: any;
+    dunning: {
+      emailSendingEnabled: boolean;
+      homologationLockActive: boolean;
+      resendApiKeyConfigured: boolean;
+      fromEmail: string;
+    };
+    fiscal: {
+      autoEmitEnabled: boolean;
+      provider: string;
+      ready: boolean;
+      missingConfig: string[];
+      summary: string;
+    };
+  };
+  metrics?: {
+    receivedAmountCents: number;
+    approvedCount: number;
+    pendingAmountCents: number;
+    pendingCount: number;
+    refundedAmountCents: number;
+    refundedCount: number;
+    activeProCount: number;
+    activeTrialCount: number;
+    pastDueCount: number;
+    canceledCount: number;
+    expiredOrSuspendedCount: number;
+    courtesyCount: number;
+    adminExemptCount: number;
+    webhookErrorsCount: number;
+    pendingPixCount: number;
+  };
+  subscriptions?: any[];
+  payments?: any[];
+  attempts?: any[];
+  webhookEvents?: any[];
+  processingErrors?: any[];
+  pixCharges?: any[];
+  refunds?: any[];
+  dunningLogs?: any[];
+  fiscalDocuments?: any[];
   error?: string;
 }
 
@@ -196,6 +249,27 @@ export const paymentsService = {
     }
   },
 
+  async getUserFiscalDocuments(): Promise<{ success: boolean; documents: any[]; readiness?: any; error?: string }> {
+    try {
+      const headers = await getAuthHeaders();
+      if (!headers.Authorization) {
+        return { success: false, documents: [], error: 'Sessão não autenticada.' };
+      }
+      const res = await fetch('/api/payments/nfse', { method: 'GET', headers });
+      const data = await res.json();
+      if (!res.ok) {
+        return { success: false, documents: [], error: data?.error || `HTTP ${res.status}` };
+      }
+      return {
+        success: true,
+        documents: Array.isArray(data?.documents) ? data.documents : [],
+        readiness: data?.readiness,
+      };
+    } catch (err: any) {
+      return { success: false, documents: [], error: err?.message || 'Erro ao consultar documentos fiscais.' };
+    }
+  },
+
   async getAdminWebhookEvents(): Promise<{ success: boolean; events: any[]; error?: string }> {
     try {
       const headers = await getAuthHeaders();
@@ -210,6 +284,46 @@ export const paymentsService = {
       return { success: true, events: Array.isArray(data?.events) ? data.events : [] };
     } catch (err: any) {
       return { success: false, events: [], error: err?.message || 'Erro ao consultar webhooks.' };
+    }
+  },
+
+  async getAdminFinancialOps(): Promise<AdminFinancialSnapshot> {
+    try {
+      const headers = await getAuthHeaders();
+      if (!headers.Authorization) {
+        return { success: false, error: 'Sessão não autenticada.' };
+      }
+      const res = await fetch('/api/admin/financial-ops', { method: 'GET', headers });
+      const data = await res.json();
+      if (!res.ok) {
+        return { success: false, error: data?.error || `HTTP ${res.status}` };
+      }
+      return data;
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Erro ao carregar centro financeiro.' };
+    }
+  },
+
+  async triggerAdminFinancialAction(payload: {
+    action: 'reconcile_user' | 'run_dunning_cycle' | 'prepare_nfse';
+    userId?: string;
+    userEmail?: string;
+    providerPaymentId?: string;
+    amountCents?: number;
+  }): Promise<any> {
+    try {
+      const headers = await getAuthHeaders();
+      if (!headers.Authorization) {
+        return { success: false, error: 'Sessão não autenticada.' };
+      }
+      const res = await fetch('/api/admin/financial-ops', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload),
+      });
+      return await res.json();
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Erro ao executar ação financeira.' };
     }
   },
 };

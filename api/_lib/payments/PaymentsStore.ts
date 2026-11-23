@@ -17,7 +17,7 @@
 
 import crypto from 'crypto';
 import { executeSql, isPostgresConfigured, withTransaction } from '../postgres.js';
-import { resolvePlanPrice } from '../plans.js';
+import { isTraditionalPixCommercialEnabled, resolvePlanPrice, resolveRecurrenceMode } from '../plans.js';
 import {
   toBillingHistoryStatus,
   toDbPaymentProvider,
@@ -27,7 +27,12 @@ import {
   toDbSubscriptionPlan,
   toDbSubscriptionStatus,
 } from './DbContractMapper.js';
-import type { BillingHistoryEntry, NormalizedPaymentWebhookEvent } from './types.js';
+import type {
+  BillingHistoryEntry,
+  NormalizedPaymentWebhookEvent,
+  PendingPixChargeView,
+  PixChargePayload,
+} from './types.js';
 
 export interface DbSubscriptionRow {
   id: string;
@@ -201,6 +206,38 @@ export interface PaymentsPersistenceAdapter {
   runAtomicEventTransition?(input: AtomicBillingTransitionInput): Promise<AtomicBillingTransitionOutcome>;
   listUserBillingHistory(userId: string): Promise<BillingHistoryEntry[]>;
   listRecentWebhookEvents(limit?: number): Promise<any[]>;
+  upsertPixCharge?(params: {
+    userId: string;
+    attemptId?: string | null;
+    provider: string;
+    providerOrderId: string;
+    providerSubscriptionId?: string | null;
+    amountCents: number;
+    currency?: string;
+    pixData: PixChargePayload;
+  }): Promise<void>;
+  getActivePendingPixChargeForUser?(userId: string): Promise<PendingPixChargeView | null>;
+  findRemainingValidPaidPeriod?(params: {
+    userId: string;
+    excludeProviderPaymentId?: string | null;
+    periodDays?: number;
+  }): Promise<string | null>;
+  recordRefundLifecycle?(params: {
+    userId: string;
+    provider: string;
+    providerPaymentId: string;
+    providerSubscriptionId?: string | null;
+    providerEventId: string;
+    disputeType: 'REFUND' | 'CHARGEBACK';
+    status: 'REQUESTED' | 'PROCESSING' | 'CONFIRMED' | 'FAILED' | 'CHARGEBACK_OPEN' | 'CHARGEBACK_WON' | 'CHARGEBACK_LOST';
+    amountCents: number;
+    currency: string;
+    reason?: string | null;
+    accessRevoked: boolean;
+    remainingValidCycleUntil?: string | null;
+    occurredAt: string;
+  }): Promise<void>;
+  getAdminFinancialSnapshot?(limit?: number): Promise<any>;
 }
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -212,13 +249,17 @@ export function isUuid(val?: string | null): val is string {
 export function computeTransitionState(params: {
   event: NormalizedPaymentWebhookEvent;
   existingSub: DbSubscriptionRow | null;
+  remainingValidCycleUntil?: string | null;
 }) {
-  const { event, existingSub } = params;
+  const { event, existingSub, remainingValidCycleUntil } = params;
   const plan = resolvePlanPrice('pro');
   const now = new Date();
   const parsedEventMs = Date.parse(event.paidAt || event.occurredAt);
   const eventTime = Number.isFinite(parsedEventMs) ? new Date(parsedEventMs) : now;
   const periodMs = plan.periodDays * 24 * 60 * 60 * 1000;
+  const recurrenceMode = resolveRecurrenceMode({
+    paymentMethod: event.paymentMethod !== 'unknown' ? event.paymentMethod : existingSub?.payment_method,
+  });
 
   let nextSubPlan: 'TRIAL' | 'PRO' | null = null;
   let nextSubStatus: string | null = null;
@@ -251,7 +292,7 @@ export function computeTransitionState(params: {
       periodStart = event.periodStart || eventTime.toISOString();
       const startMs = Date.parse(periodStart) || eventTime.getTime();
       periodEnd = event.periodEnd || event.nextBillingAt || new Date(startMs + periodMs).toISOString();
-      nextBillingAt = event.nextBillingAt || periodEnd;
+      nextBillingAt = recurrenceMode === 'PIX_MANUAL_CYCLE' ? null : (event.nextBillingAt || periodEnd);
       cancelAtPeriodEnd = false;
       canceledAt = null;
       graceUntil = null;
@@ -261,6 +302,9 @@ export function computeTransitionState(params: {
       metadataPatch.chargeback = false;
       metadataPatch.expired = false;
       metadataPatch.refused = false;
+      metadataPatch.paused = false;
+      metadataPatch.recurrence_mode = recurrenceMode;
+      metadataPatch.auto_renew = recurrenceMode !== 'PIX_MANUAL_CYCLE';
       break;
     }
 
@@ -275,7 +319,7 @@ export function computeTransitionState(params: {
       const anchorMs = Math.max(Number.isFinite(existingEndMs) ? existingEndMs : 0, eventTime.getTime());
       periodStart = event.periodStart || eventTime.toISOString();
       periodEnd = event.periodEnd || event.nextBillingAt || new Date(anchorMs + periodMs).toISOString();
-      nextBillingAt = event.nextBillingAt || periodEnd;
+      nextBillingAt = recurrenceMode === 'PIX_MANUAL_CYCLE' ? null : (event.nextBillingAt || periodEnd);
       cancelAtPeriodEnd = false;
       canceledAt = null;
       graceUntil = null;
@@ -285,12 +329,16 @@ export function computeTransitionState(params: {
       metadataPatch.chargeback = false;
       metadataPatch.expired = false;
       metadataPatch.refused = false;
+      metadataPatch.paused = false;
+      metadataPatch.recurrence_mode = recurrenceMode;
+      metadataPatch.auto_renew = recurrenceMode !== 'PIX_MANUAL_CYCLE';
       break;
     }
 
     case 'SUBSCRIPTION_CREATED': {
       // NUNCA libera PRO por subscription_created; apenas vincula provider_subscription_id sem conceder acesso pago
       metadataPatch.subscription_created_at = event.occurredAt;
+      metadataPatch.recurrence_mode = recurrenceMode;
       if (existingSub) {
         nextSubPlan = toDbSubscriptionPlan(existingSub.plan || 'TRIAL');
         nextSubStatus = toDbSubscriptionStatus(existingSub.status);
@@ -316,9 +364,12 @@ export function computeTransitionState(params: {
       attemptStatus = 'REFUSED';
       metadataPatch.refused = true;
       metadataPatch.refused_at = event.occurredAt;
+      metadataPatch.raw_status = 'REFUSED';
       const isRenewalRefusal =
         event.eventType === 'subscription_renewal_refused' ||
-        (existingSub && (String(existingSub.status).toUpperCase() === 'ACTIVE' || String(existingSub.status).toUpperCase() === 'PAST_DUE'));
+        (existingSub &&
+          (String(existingSub.status).toUpperCase() === 'ACTIVE' ||
+            String(existingSub.status).toUpperCase() === 'PAST_DUE'));
       nextSubPlan = 'PRO';
       nextSubStatus = isRenewalRefusal ? 'PAST_DUE' : 'INCOMPLETE';
       if (isRenewalRefusal) {
@@ -337,6 +388,10 @@ export function computeTransitionState(params: {
       nextBillingAt = null;
       attemptStatus = 'CANCELED';
       metadataPatch.canceled_at_event = event.occurredAt;
+      if (event.subscriptionPaused) {
+        metadataPatch.paused = true;
+        metadataPatch.paused_at = event.occurredAt;
+      }
       break;
     }
 
@@ -357,10 +412,67 @@ export function computeTransitionState(params: {
       break;
     }
 
+    case 'PIX_EXPIRED': {
+      ledgerStatus = 'CANCELLED';
+      ledgerType = 'INITIAL';
+      ledgerRequestState = 'FAILED';
+      attemptStatus = 'EXPIRED';
+      metadataPatch.raw_status = 'EXPIRED';
+      metadataPatch.pix_expired_at = event.occurredAt;
+      const existingPeriodEndMs = existingSub?.current_period_end ? Date.parse(existingSub.current_period_end) : 0;
+      const hasStillActivePaidCycle =
+        existingSub &&
+        String(existingSub.status).toUpperCase() === 'ACTIVE' &&
+        Number.isFinite(existingPeriodEndMs) &&
+        existingPeriodEndMs > now.getTime();
+      if (!hasStillActivePaidCycle) {
+        if (!existingSub || String(existingSub.status).toUpperCase() === 'RENEWAL_PENDING') {
+          nextSubPlan = 'PRO';
+          nextSubStatus = 'SUSPENDED';
+          nextBillingAt = null;
+          metadataPatch.expired = true;
+          metadataPatch.expired_at = event.occurredAt;
+        } else {
+          nextSubPlan = toDbSubscriptionPlan(existingSub.plan || 'TRIAL');
+          nextSubStatus = toDbSubscriptionStatus(existingSub.status);
+        }
+      }
+      break;
+    }
+
     case 'REFUND_REQUESTED': {
       // Apenas registra solicitação sem revogar acesso nem marcar REFUNDED antes da efetivação
       metadataPatch.refund_requested_at = event.occurredAt;
       metadataPatch.refund_requested_event_id = event.providerEventId;
+      metadataPatch.refund_status = 'REQUESTED';
+      if (event.refundReason) metadataPatch.refund_reason = event.refundReason;
+      if (existingSub) {
+        nextSubPlan = toDbSubscriptionPlan(existingSub.plan || 'PRO');
+        nextSubStatus = toDbSubscriptionStatus(existingSub.status);
+      }
+      break;
+    }
+
+    case 'REFUND_PROCESSING': {
+      metadataPatch.refund_processing_at = event.occurredAt;
+      metadataPatch.refund_processing_event_id = event.providerEventId;
+      metadataPatch.refund_status = 'PROCESSING';
+      if (event.refundReason) metadataPatch.refund_reason = event.refundReason;
+      if (existingSub) {
+        nextSubPlan = toDbSubscriptionPlan(existingSub.plan || 'PRO');
+        nextSubStatus = toDbSubscriptionStatus(existingSub.status);
+      }
+      break;
+    }
+
+    case 'REFUND_FAILED': {
+      ledgerStatus = 'REFUND_FAILED';
+      ledgerType = existingSub?.plan === 'PRO' ? 'RENEWAL' : 'INITIAL';
+      ledgerRequestState = 'FAILED';
+      metadataPatch.refund_failed_at = event.occurredAt;
+      metadataPatch.refund_failed_event_id = event.providerEventId;
+      metadataPatch.refund_status = 'FAILED';
+      if (event.refundReason) metadataPatch.refund_reason = event.refundReason;
       if (existingSub) {
         nextSubPlan = toDbSubscriptionPlan(existingSub.plan || 'PRO');
         nextSubStatus = toDbSubscriptionStatus(existingSub.status);
@@ -369,18 +481,35 @@ export function computeTransitionState(params: {
     }
 
     case 'REFUND': {
-      nextSubPlan = 'PRO';
-      nextSubStatus = 'CANCELED';
       ledgerStatus = 'REFUNDED';
       ledgerType = existingSub?.plan === 'PRO' ? 'RENEWAL' : 'INITIAL';
       ledgerRequestState = 'READY';
-      canceledAt = now.toISOString();
-      periodEnd = now.toISOString();
-      nextBillingAt = null;
-      cancelAtPeriodEnd = true;
-      graceUntil = null;
-      metadataPatch.refunded = true;
+      metadataPatch.refund_status = 'CONFIRMED';
       metadataPatch.refunded_at = event.occurredAt;
+      if (event.refundReason) metadataPatch.refund_reason = event.refundReason;
+
+      const remainingMs = remainingValidCycleUntil ? Date.parse(remainingValidCycleUntil) : NaN;
+      if (Number.isFinite(remainingMs) && remainingMs > now.getTime()) {
+        // Recálculo contratual: preserva acesso caso exista outro pagamento aprovado vigente
+        nextSubPlan = 'PRO';
+        nextSubStatus = 'ACTIVE';
+        periodEnd = new Date(remainingMs).toISOString();
+        cancelAtPeriodEnd = false;
+        canceledAt = null;
+        graceUntil = null;
+        metadataPatch.refunded = false;
+        metadataPatch.partial_refund_preserved_cycle = true;
+      } else {
+        nextSubPlan = 'PRO';
+        nextSubStatus = 'CANCELED';
+        canceledAt = now.toISOString();
+        periodEnd = now.toISOString();
+        nextBillingAt = null;
+        cancelAtPeriodEnd = true;
+        graceUntil = null;
+        metadataPatch.refunded = true;
+        metadataPatch.partial_refund_preserved_cycle = false;
+      }
       break;
     }
 
@@ -397,6 +526,8 @@ export function computeTransitionState(params: {
       graceUntil = null;
       metadataPatch.chargeback = true;
       metadataPatch.chargeback_at = event.occurredAt;
+      metadataPatch.raw_status = 'CHARGEBACK';
+      if (event.refundReason) metadataPatch.refund_reason = event.refundReason;
       break;
     }
 
@@ -1219,8 +1350,26 @@ class PostgresPaymentsAdapter implements PaymentsPersistenceAdapter {
         }
       }
 
-      // 6. Calcular transição canônica e validar estritamente com DbContractMapper
-      const transition = computeTransitionState({ event, existingSub });
+      // 6. Em reembolso confirmado, recalcular se há outro pagamento aprovado vigente para o usuário
+      let remainingValidCycleUntil: string | null = null;
+      if (event.canonicalAction === 'REFUND') {
+        const remRes = await client.query(
+          `SELECT MAX(COALESCE(approved_at, created_at) + ($3::int * INTERVAL '1 day')) AS valid_until
+           FROM internal.billing_payments
+           WHERE user_id = $1::uuid
+             AND status = 'APPROVED'
+             AND provider_payment_id <> $2
+             AND COALESCE(approved_at, created_at) + ($3::int * INTERVAL '1 day') > NOW()`,
+          [resolvedUserId, paymentId, plan.periodDays]
+        );
+        const remVal = remRes.rows[0]?.valid_until;
+        if (remVal) {
+          remainingValidCycleUntil = new Date(remVal).toISOString();
+        }
+      }
+
+      // 7. Calcular transição canônica e validar estritamente com DbContractMapper
+      const transition = computeTransitionState({ event, existingSub, remainingValidCycleUntil });
       const dbProvider = toDbPaymentProvider(event.provider);
 
       if (transition.ledgerStatus) {
@@ -1478,7 +1627,118 @@ class PostgresPaymentsAdapter implements PaymentsPersistenceAdapter {
         }
       }
 
-      // 7. Finaliza registro do webhook dentro da mesma transação atômica
+      // 8. Persistência V2 aditiva e retrocompatível (Pix charges e trilha de reembolsos/chargebacks)
+      const v2Reg = await client.query(
+        `SELECT
+           to_regclass('internal.billing_pix_charges') IS NOT NULL AS has_pix_table,
+           to_regclass('internal.billing_refunds') IS NOT NULL AS has_refunds_table`
+      );
+      const hasPixTable = Boolean(v2Reg.rows[0]?.has_pix_table);
+      const hasRefundsTable = Boolean(v2Reg.rows[0]?.has_refunds_table);
+
+      if (hasPixTable && event.providerOrderId) {
+        if (event.canonicalAction === 'PENDING_PAYMENT' && event.pixData?.qrCode) {
+          await client.query(
+            `INSERT INTO internal.billing_pix_charges (
+              id, user_id, attempt_id, provider, provider_order_id, provider_subscription_id,
+              amount_cents, currency, status, qr_code, qr_code_image_url, copia_e_cola,
+              expires_at, metadata, created_at, updated_at
+            ) VALUES (
+              gen_random_uuid(), $1::uuid, $2::uuid, $3, $4, $5,
+              $6, $7, 'PENDING', $8, $9, $10,
+              COALESCE($11::timestamptz, NOW() + INTERVAL '30 minutes'), $12::jsonb, NOW(), NOW()
+            )
+            ON CONFLICT (provider, provider_order_id) DO UPDATE SET
+              qr_code = COALESCE(EXCLUDED.qr_code, internal.billing_pix_charges.qr_code),
+              qr_code_image_url = COALESCE(EXCLUDED.qr_code_image_url, internal.billing_pix_charges.qr_code_image_url),
+              copia_e_cola = COALESCE(EXCLUDED.copia_e_cola, internal.billing_pix_charges.copia_e_cola),
+              expires_at = COALESCE(EXCLUDED.expires_at, internal.billing_pix_charges.expires_at),
+              updated_at = NOW()`,
+            [
+              resolvedUserId,
+              attemptUuid,
+              dbProvider,
+              event.providerOrderId,
+              event.providerSubscriptionId ?? null,
+              event.amountCents || plan.amountCents,
+              event.currency || plan.currency,
+              event.pixData.qrCode,
+              event.pixData.qrCodeImageUrl || null,
+              event.pixData.copiaECola || event.pixData.qrCode,
+              event.pixData.expiresAt || null,
+              JSON.stringify({ event_id: event.providerEventId }),
+            ]
+          );
+        } else if (isSettleAction) {
+          await client.query(
+            `UPDATE internal.billing_pix_charges
+             SET status = 'PAID', paid_at = COALESCE(paid_at, $2::timestamptz, NOW()), updated_at = NOW()
+             WHERE provider_order_id = $1 AND status <> 'PAID'`,
+            [event.providerOrderId, transition.approvedAt ?? null]
+          );
+        } else if (event.canonicalAction === 'PIX_EXPIRED') {
+          await client.query(
+            `UPDATE internal.billing_pix_charges
+             SET status = 'EXPIRED', updated_at = NOW()
+             WHERE provider_order_id = $1 AND status = 'PENDING'`,
+            [event.providerOrderId]
+          );
+        }
+      }
+
+      if (
+        hasRefundsTable &&
+        (event.canonicalAction === 'REFUND_REQUESTED' ||
+          event.canonicalAction === 'REFUND_PROCESSING' ||
+          event.canonicalAction === 'REFUND_FAILED' ||
+          event.canonicalAction === 'REFUND' ||
+          event.canonicalAction === 'CHARGEBACK')
+      ) {
+        const refundDbStatus =
+          event.canonicalAction === 'REFUND_REQUESTED'
+            ? 'REQUESTED'
+            : event.canonicalAction === 'REFUND_PROCESSING'
+            ? 'PROCESSING'
+            : event.canonicalAction === 'REFUND_FAILED'
+            ? 'FAILED'
+            : event.canonicalAction === 'CHARGEBACK'
+            ? 'CHARGEBACK_OPEN'
+            : 'CONFIRMED';
+        const disputeType = event.canonicalAction === 'CHARGEBACK' ? 'CHARGEBACK' : 'REFUND';
+        const accessRevoked =
+          event.canonicalAction === 'CHARGEBACK' ||
+          (event.canonicalAction === 'REFUND' && !transition.metadataPatch.partial_refund_preserved_cycle);
+
+        await client.query(
+          `INSERT INTO internal.billing_refunds (
+            id, user_id, provider, provider_payment_id, provider_subscription_id, provider_event_id,
+            dispute_type, status, amount_cents, currency, reason, access_revoked,
+            remaining_valid_cycle_until, occurred_at, created_at, updated_at
+          ) VALUES (
+            gen_random_uuid(), $1::uuid, $2, $3, $4, $5,
+            $6, $7, $8, $9, $10, $11,
+            $12::timestamptz, COALESCE($13::timestamptz, NOW()), NOW(), NOW()
+          )
+          ON CONFLICT (provider, provider_event_id) DO NOTHING`,
+          [
+            resolvedUserId,
+            dbProvider,
+            paymentId,
+            event.providerSubscriptionId ?? null,
+            event.providerEventId,
+            disputeType,
+            refundDbStatus,
+            event.amountCents || plan.amountCents,
+            event.currency || plan.currency,
+            event.refundReason || null,
+            accessRevoked,
+            remainingValidCycleUntil,
+            event.occurredAt || null,
+          ]
+        );
+      }
+
+      // 9. Finaliza registro do webhook dentro da mesma transação atômica
       await client.query(
         `UPDATE internal.billing_events
          SET processed = true, processing_error = NULL, processed_at = NOW()
@@ -1557,13 +1817,335 @@ class PostgresPaymentsAdapter implements PaymentsPersistenceAdapter {
     );
     return res.rows;
   }
+
+  async upsertPixCharge(params: {
+    userId: string;
+    attemptId?: string | null;
+    provider: string;
+    providerOrderId: string;
+    providerSubscriptionId?: string | null;
+    amountCents: number;
+    currency?: string;
+    pixData: PixChargePayload;
+  }): Promise<void> {
+    this.ensurePg();
+    if (!isUuid(params.userId) || !params.pixData?.qrCode) return;
+    const reg = await executeSql(`SELECT to_regclass('internal.billing_pix_charges') IS NOT NULL AS ok`);
+    if (!reg.rows[0]?.ok) return;
+
+    await executeSql(
+      `INSERT INTO internal.billing_pix_charges (
+        id, user_id, attempt_id, provider, provider_order_id, provider_subscription_id,
+        amount_cents, currency, status, qr_code, qr_code_image_url, copia_e_cola,
+        expires_at, created_at, updated_at
+      ) VALUES (
+        gen_random_uuid(), $1::uuid, $2::uuid, $3, $4, $5,
+        $6, $7, 'PENDING', $8, $9, $10,
+        COALESCE($11::timestamptz, NOW() + INTERVAL '30 minutes'), NOW(), NOW()
+      )
+      ON CONFLICT (provider, provider_order_id) DO UPDATE SET
+        qr_code = COALESCE(EXCLUDED.qr_code, internal.billing_pix_charges.qr_code),
+        qr_code_image_url = COALESCE(EXCLUDED.qr_code_image_url, internal.billing_pix_charges.qr_code_image_url),
+        copia_e_cola = COALESCE(EXCLUDED.copia_e_cola, internal.billing_pix_charges.copia_e_cola),
+        expires_at = COALESCE(EXCLUDED.expires_at, internal.billing_pix_charges.expires_at),
+        updated_at = NOW()`,
+      [
+        params.userId,
+        isUuid(params.attemptId) ? params.attemptId : null,
+        toDbPaymentProvider(params.provider),
+        params.providerOrderId,
+        params.providerSubscriptionId ?? null,
+        params.amountCents,
+        params.currency || 'BRL',
+        params.pixData.qrCode,
+        params.pixData.qrCodeImageUrl || null,
+        params.pixData.copiaECola || params.pixData.qrCode,
+        params.pixData.expiresAt || null,
+      ]
+    );
+  }
+
+  async getActivePendingPixChargeForUser(userId: string): Promise<PendingPixChargeView | null> {
+    this.ensurePg();
+    if (!isUuid(userId)) return null;
+    const reg = await executeSql(`SELECT to_regclass('internal.billing_pix_charges') IS NOT NULL AS ok`);
+    if (!reg.rows[0]?.ok) return null;
+
+    const res = await executeSql(
+      `SELECT id, provider_order_id, pix_type, qr_code, qr_code_image_url, copia_e_cola, amount_cents, currency, expires_at, status, created_at
+       FROM internal.billing_pix_charges
+       WHERE user_id = $1::uuid
+         AND status = 'PENDING'
+         AND (expires_at IS NULL OR expires_at > NOW())
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [userId]
+    );
+    const row = res.rows[0];
+    if (!row) return null;
+    return {
+      chargeId: String(row.id),
+      providerOrderId: String(row.provider_order_id),
+      pixType: (String(row.pix_type || 'PIX_AUTOMATIC') === 'PIX_TRADITIONAL'
+        ? 'PIX_TRADITIONAL'
+        : 'PIX_AUTOMATIC') as PendingPixChargeView['pixType'],
+      amountCents: Number(row.amount_cents || 3490),
+      currency: 'BRL',
+      status: String(row.status) as PendingPixChargeView['status'],
+      qrCode: String(row.qr_code || ''),
+      qrCodeImageUrl: row.qr_code_image_url ? String(row.qr_code_image_url) : undefined,
+      copiaECola: String(row.copia_e_cola || row.qr_code || ''),
+      expiresAt: row.expires_at ? new Date(row.expires_at).toISOString() : null,
+      createdAt: row.created_at ? new Date(row.created_at).toISOString() : null,
+    };
+  }
+
+  async findRemainingValidPaidPeriod(params: {
+    userId: string;
+    excludeProviderPaymentId?: string | null;
+    periodDays?: number;
+  }): Promise<string | null> {
+    this.ensurePg();
+    if (!isUuid(params.userId)) return null;
+    const periodDays = params.periodDays ?? resolvePlanPrice('pro').periodDays;
+    const res = await executeSql(
+      `SELECT MAX(COALESCE(approved_at, created_at) + ($3::int * INTERVAL '1 day')) AS valid_until
+       FROM internal.billing_payments
+       WHERE user_id = $1::uuid
+         AND status = 'APPROVED'
+         AND ($2::text IS NULL OR provider_payment_id <> $2::text)
+         AND COALESCE(approved_at, created_at) + ($3::int * INTERVAL '1 day') > NOW()`,
+      [params.userId, params.excludeProviderPaymentId ?? null, periodDays]
+    );
+    const val = res.rows[0]?.valid_until;
+    return val ? new Date(val).toISOString() : null;
+  }
+
+  async recordRefundLifecycle(params: {
+    userId: string;
+    provider: string;
+    providerPaymentId: string;
+    providerSubscriptionId?: string | null;
+    providerEventId: string;
+    disputeType: 'REFUND' | 'CHARGEBACK';
+    status: 'REQUESTED' | 'PROCESSING' | 'CONFIRMED' | 'FAILED' | 'CHARGEBACK_OPEN' | 'CHARGEBACK_WON' | 'CHARGEBACK_LOST';
+    amountCents: number;
+    currency: string;
+    reason?: string | null;
+    accessRevoked: boolean;
+    remainingValidCycleUntil?: string | null;
+    occurredAt: string;
+  }): Promise<void> {
+    this.ensurePg();
+    const reg = await executeSql(`SELECT to_regclass('internal.billing_refunds') IS NOT NULL AS ok`);
+    if (!reg.rows[0]?.ok) return;
+
+    await executeSql(
+      `INSERT INTO internal.billing_refunds (
+        id, user_id, provider, provider_payment_id, provider_subscription_id, provider_event_id,
+        dispute_type, status, amount_cents, currency, reason, access_revoked,
+        remaining_valid_cycle_until, occurred_at, created_at, updated_at
+      ) VALUES (
+        gen_random_uuid(), $1::uuid, $2, $3, $4, $5,
+        $6, $7, $8, $9, $10, $11,
+        $12::timestamptz, COALESCE($13::timestamptz, NOW()), NOW(), NOW()
+      )
+      ON CONFLICT (provider, provider_event_id) DO NOTHING`,
+      [
+        params.userId,
+        toDbPaymentProvider(params.provider),
+        params.providerPaymentId,
+        params.providerSubscriptionId ?? null,
+        params.providerEventId,
+        params.disputeType,
+        params.status,
+        params.amountCents,
+        params.currency,
+        params.reason ?? null,
+        params.accessRevoked,
+        params.remainingValidCycleUntil ?? null,
+        params.occurredAt,
+      ]
+    );
+  }
+
+  async getAdminFinancialSnapshot(limit = 40): Promise<any> {
+    this.ensurePg();
+    const safeLimit = Math.min(Math.max(5, limit), 100);
+    const v2Check = await executeSql(
+      `SELECT
+         to_regclass('internal.billing_pix_charges') IS NOT NULL AS has_pix,
+         to_regclass('internal.billing_refunds') IS NOT NULL AS has_refunds,
+         to_regclass('internal.billing_dunning_logs') IS NOT NULL AS has_dunning,
+         to_regclass('internal.billing_fiscal_documents') IS NOT NULL AS has_fiscal,
+         to_regclass('internal.user_roles') IS NOT NULL AS has_roles`
+    );
+    const flags = v2Check.rows[0] || {};
+
+    const subMetricsRes = await executeSql(`
+      SELECT
+        COUNT(*) FILTER (WHERE UPPER(status) = 'ACTIVE' AND COALESCE((billing_metadata->>'admin_courtesy')::boolean, false) = false) AS active_pro_count,
+        COUNT(*) FILTER (WHERE UPPER(status) IN ('TRIAL_ACTIVE', 'TRIALING')) AS active_trial_count,
+        COUNT(*) FILTER (WHERE UPPER(status) = 'PAST_DUE') AS past_due_count,
+        COUNT(*) FILTER (WHERE UPPER(status) IN ('CANCELED', 'CANCELLED')) AS canceled_count,
+        COUNT(*) FILTER (WHERE UPPER(status) IN ('SUSPENDED', 'EXPIRED', 'TRIAL_EXPIRED')) AS expired_or_suspended_count,
+        COUNT(*) FILTER (WHERE COALESCE((billing_metadata->>'admin_courtesy')::boolean, false) = true) AS courtesy_count
+      FROM public.subscriptions
+    `);
+
+    const payMetricsRes = await executeSql(`
+      SELECT
+        COALESCE(SUM(amount) FILTER (WHERE status = 'APPROVED'), 0) AS received_amount_cents,
+        COUNT(*) FILTER (WHERE status = 'APPROVED') AS approved_count,
+        COALESCE(SUM(amount) FILTER (WHERE status = 'PENDING'), 0) AS pending_amount_cents,
+        COUNT(*) FILTER (WHERE status = 'PENDING') AS pending_count,
+        COALESCE(SUM(amount) FILTER (WHERE status = 'REFUNDED'), 0) AS refunded_amount_cents,
+        COUNT(*) FILTER (WHERE status = 'REFUNDED') AS refunded_count
+      FROM internal.billing_payments
+    `);
+
+    let adminExemptCount = 0;
+    if (flags.has_roles) {
+      const roleRes = await executeSql(
+        `SELECT COUNT(DISTINCT user_id) AS cnt FROM internal.user_roles WHERE role IN ('admin', 'super_admin')`
+      );
+      adminExemptCount = Number(roleRes.rows[0]?.cnt || 0);
+    }
+
+    const recentPaymentsRes = await executeSql(
+      `SELECT bp.id, bp.user_id, u.email AS user_email, bp.provider, bp.provider_payment_id, bp.provider_subscription_id,
+              bp.payment_method, bp.amount, bp.currency, bp.status, bp.type, bp.request_state,
+              bp.checkout_data, bp.approved_at, bp.created_at
+       FROM internal.billing_payments bp
+       LEFT JOIN auth.users u ON u.id = bp.user_id
+       ORDER BY bp.created_at DESC
+       LIMIT $1`,
+      [safeLimit]
+    );
+
+    const recentAttemptsRes = await executeSql(
+      `SELECT ba.id, ba.user_id, u.email AS user_email, ba.provider, ba.status, ba.amount_cents,
+              ba.provider_order_id, ba.provider_subscription_id, ba.idempotency_key, ba.metadata, ba.expires_at, ba.created_at
+       FROM internal.billing_attempts ba
+       LEFT JOIN auth.users u ON u.id = ba.user_id
+       ORDER BY ba.created_at DESC
+       LIMIT $1`,
+      [safeLimit]
+    );
+
+    const recentEventsRes = await executeSql(
+      `SELECT id, provider, provider_event_id, event_type, signature_valid, processed, processing_error,
+              event_timestamp, processed_at, created_at
+       FROM internal.billing_events
+       ORDER BY created_at DESC
+       LIMIT $1`,
+      [safeLimit]
+    );
+
+    const pendingPixRes = flags.has_pix
+      ? await executeSql(
+          `SELECT p.id, p.user_id, u.email AS user_email, p.provider_order_id, p.amount_cents, p.status, p.expires_at, p.created_at
+           FROM internal.billing_pix_charges p
+           LEFT JOIN auth.users u ON u.id = p.user_id
+           ORDER BY p.created_at DESC
+           LIMIT $1`,
+          [safeLimit]
+        )
+      : { rows: [] };
+
+    const refundsRes = flags.has_refunds
+      ? await executeSql(
+          `SELECT r.id, r.user_id, u.email AS user_email, r.provider_payment_id, r.provider_event_id, r.dispute_type,
+                  r.status, r.amount_cents, r.reason, r.access_revoked, r.remaining_valid_cycle_until, r.occurred_at
+           FROM internal.billing_refunds r
+           LEFT JOIN auth.users u ON u.id = r.user_id
+           ORDER BY r.occurred_at DESC
+           LIMIT $1`,
+          [safeLimit]
+        )
+      : { rows: [] };
+
+    const dunningRes = flags.has_dunning
+      ? await executeSql(
+          `SELECT d.id, d.user_id, u.email AS user_email, d.trigger_type AS stage, d.channel, d.status,
+                  d.attempt_count AS attempt_number, d.dedup_key, d.recipient_masked, d.subject,
+                  d.resend_message_id, d.last_error AS error_message, d.created_at, d.sent_at
+           FROM internal.billing_dunning_logs d
+           LEFT JOIN auth.users u ON u.id = d.user_id
+           ORDER BY d.created_at DESC
+           LIMIT $1`,
+          [safeLimit]
+        )
+      : { rows: [] };
+
+    const fiscalRes = flags.has_fiscal
+      ? await executeSql(
+          `SELECT f.id, f.user_id, u.email AS user_email, f.fiscal_provider AS provider, f.provider_payment_id,
+                  f.status, f.service_amount_cents AS amount_cents, f.nfse_number, f.verification_code,
+                  f.rps_number, f.error_history,
+                  COALESCE(f.error_history->-1->>'message', NULL) AS error_message,
+                  f.issued_at, f.created_at
+           FROM internal.billing_fiscal_documents f
+           LEFT JOIN auth.users u ON u.id = f.user_id
+           ORDER BY f.created_at DESC
+           LIMIT $1`,
+          [safeLimit]
+        )
+      : { rows: [] };
+
+    const subscriptionsRes = await executeSql(
+      `SELECT s.id, s.user_id, u.email AS user_email, s.plan, s.status, s.payment_method,
+              s.amount_cents, s.provider_subscription_id, s.current_period_start, s.current_period_end,
+              s.next_billing_at, s.cancel_at_period_end, s.grace_until, s.billing_metadata, s.updated_at
+       FROM public.subscriptions s
+       LEFT JOIN auth.users u ON u.id = s.user_id
+       ORDER BY s.updated_at DESC
+       LIMIT $1`,
+      [safeLimit]
+    );
+
+    const subM = subMetricsRes.rows[0] || {};
+    const payM = payMetricsRes.rows[0] || {};
+    const processingErrors = recentEventsRes.rows.filter((e: any) => !e.processed || e.processing_error);
+
+    return {
+      metrics: {
+        receivedAmountCents: Number(payM.received_amount_cents || 0),
+        approvedCount: Number(payM.approved_count || 0),
+        pendingAmountCents: Number(payM.pending_amount_cents || 0),
+        pendingCount: Number(payM.pending_count || 0),
+        refundedAmountCents: Number(payM.refunded_amount_cents || 0),
+        refundedCount: Number(payM.refunded_count || 0),
+        activeProCount: Number(subM.active_pro_count || 0),
+        activeTrialCount: Number(subM.active_trial_count || 0),
+        pastDueCount: Number(subM.past_due_count || 0),
+        canceledCount: Number(subM.canceled_count || 0),
+        expiredOrSuspendedCount: Number(subM.expired_or_suspended_count || 0),
+        courtesyCount: Number(subM.courtesy_count || 0),
+        adminExemptCount,
+        webhookErrorsCount: processingErrors.length,
+        pendingPixCount: pendingPixRes.rows.filter((p: any) => p.status === 'PENDING').length,
+      },
+      subscriptions: subscriptionsRes.rows,
+      payments: recentPaymentsRes.rows,
+      attempts: recentAttemptsRes.rows,
+      webhookEvents: recentEventsRes.rows,
+      processingErrors,
+      pixCharges: pendingPixRes.rows,
+      refunds: refundsRes.rows,
+      dunningLogs: dunningRes.rows,
+      fiscalDocuments: fiscalRes.rows,
+    };
+  }
 }
 
 export function formatMethodLabel(raw?: string | null): string {
   const m = String(raw || '').toLowerCase().trim();
   if (m === 'credit_card') return 'Cartão de Crédito';
   if (m === 'pix_auto') return 'Pix Automático';
-  if (m === 'pix') return 'Pix (Bloqueado)';
+  if (m === 'pix' || m === 'pix_tradicional' || m === 'pix_comum') {
+    return isTraditionalPixCommercialEnabled() ? 'Pix (Ciclo 30 dias)' : 'Pix (Bloqueado)';
+  }
   return 'Cartão / Pix Automático';
 }
 

@@ -24,8 +24,34 @@ import { enforceRateLimit } from '../../rateLimiter.js';
 import { safeCompare } from '../../crypto.js';
 import { runServerSideIngestion } from '../../ingestionEngine.js';
 import { verifyAdminRequest } from '../../adminAuth.js';
+import {
+  attachTelemetryHeaders,
+  computeWeakEtag,
+  createTraceContext,
+  withSpan,
+} from '../../telemetry.js';
+
+export function encodeEventCursor(publishedAt: string | Date, id: string): string {
+  const iso = publishedAt instanceof Date ? publishedAt.toISOString() : String(publishedAt || '');
+  return Buffer.from(JSON.stringify({ p: iso, i: String(id) }), 'utf8').toString('base64url');
+}
+
+export function decodeEventCursor(raw: string | null): { publishedAt: string; id: string } | null {
+  if (!raw || typeof raw !== 'string' || raw.length > 512) return null;
+  try {
+    const decoded = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
+    if (!decoded || typeof decoded.p !== 'string' || typeof decoded.i !== 'string') return null;
+    const ms = Date.parse(decoded.p);
+    const id = decoded.i.trim().slice(0, 128);
+    if (!Number.isFinite(ms) || !id) return null;
+    return { publishedAt: new Date(ms).toISOString(), id };
+  } catch {
+    return null;
+  }
+}
 
 export default async function handler(req: any, res: any) {
+  const traceCtx = createTraceContext(req);
   setCorsHeaders(res);
 
   if (req.method === 'OPTIONS') {
@@ -147,18 +173,20 @@ export default async function handler(req: any, res: any) {
 
       if (isPostgresConfigured()) {
         try {
-          const [entRes, srcRes] = await Promise.all([
-            executeSql(
-              `SELECT id, name, slug, type, description, sector, role, organization, website, image_url, logo_url, avatar_url, brand_color
-               FROM public.entities
-               ORDER BY name ASC`
-            ),
-            executeSql(
-              `SELECT id, name, slug, domain, category, logo_url, brand_color
-               FROM public.news_sources
-               ORDER BY name ASC`
-            )
-          ]);
+          const [entRes, srcRes] = await withSpan(traceCtx, 'db_catalog', () =>
+            Promise.all([
+              executeSql(
+                `SELECT id, name, slug, type, description, sector, role, organization, website, image_url, logo_url, avatar_url, brand_color
+                 FROM public.entities
+                 ORDER BY name ASC`
+              ),
+              executeSql(
+                `SELECT id, name, slug, domain, category, logo_url, brand_color
+                 FROM public.news_sources
+                 ORDER BY name ASC`
+              )
+            ])
+          );
           entities = (entRes.rows || []).map((e: any) => {
             const normType = String(e.type || 'company').trim().toLowerCase();
             const imageUrl = e.image_url || e.logo_url || e.avatar_url || undefined;
@@ -197,16 +225,18 @@ export default async function handler(req: any, res: any) {
       if (entities.length === 0 && sources.length === 0) {
         try {
           const client = getServerSupabase();
-          const [entRes, srcRes] = await Promise.all([
-            client
-              .from('entities')
-              .select('id, name, slug, type, description, sector, role, organization, website, image_url, logo_url, avatar_url, brand_color')
-              .order('name'),
-            client
-              .from('news_sources')
-              .select('id, name, slug, domain, category, logo_url, brand_color')
-              .order('name')
-          ]);
+          const [entRes, srcRes] = await withSpan(traceCtx, 'sb_catalog', () =>
+            Promise.all([
+              client
+                .from('entities')
+                .select('id, name, slug, type, description, sector, role, organization, website, image_url, logo_url, avatar_url, brand_color')
+                .order('name'),
+              client
+                .from('news_sources')
+                .select('id, name, slug, domain, category, logo_url, brand_color')
+                .order('name')
+            ])
+          );
           entities = (entRes.data || []).map((e: any) => {
             const normType = String(e.type || 'company').trim().toLowerCase();
             const imageUrl = e.image_url || e.logo_url || e.avatar_url || undefined;
@@ -240,12 +270,37 @@ export default async function handler(req: any, res: any) {
         } catch {}
       }
 
-      return sendJson(res, 200, {
-        success: true,
-        entities,
-        sources
-      });
+      const catalogEtag = computeWeakEtag(
+        JSON.stringify({
+          e: entities.map((x) => `${x.id}:${x.imageUrl || ''}`),
+          s: sources.map((x) => `${x.id}:${x.logoUrl || ''}`),
+        })
+      );
+      attachTelemetryHeaders(res, traceCtx);
+      const ifNoneMatch = String(req.headers?.['if-none-match'] || '').trim();
+      if (ifNoneMatch && ifNoneMatch === catalogEtag) {
+        res.setHeader('ETag', catalogEtag);
+        res.setHeader('Vary', 'Accept-Encoding');
+        res.statusCode = 304;
+        res.end();
+        return;
+      }
+
+      return sendJson(
+        res,
+        200,
+        {
+          success: true,
+          entities,
+          sources
+        },
+        {
+          ETag: catalogEtag,
+          Vary: 'Accept-Encoding',
+        }
+      );
     } catch (err: any) {
+      attachTelemetryHeaders(res, traceCtx);
       return sendJson(res, 200, {
         success: true,
         entities: [],
@@ -264,15 +319,42 @@ export default async function handler(req: any, res: any) {
 
     try {
       const limit = Math.min(50, Math.max(1, parseInt(urlObj.searchParams.get('limit') || '30', 10)));
-      const offset = Math.max(0, parseInt(urlObj.searchParams.get('offset') || '0', 10) || 0);
+      const decodedCursor = decodeEventCursor(urlObj.searchParams.get('cursor'));
+      const offset = decodedCursor ? 0 : Math.max(0, parseInt(urlObj.searchParams.get('offset') || '0', 10) || 0);
       const queryLimit = limit + 1;
       const categoryParam = urlObj.searchParams.get('category');
-      const categoryFilter = categoryParam && categoryParam !== 'Todos' ? categoryParam.toLowerCase() : null;
+      const categoryFilter = categoryParam && categoryParam !== 'Todos' ? categoryParam.toLowerCase().trim() : null;
 
-      // 1. Consulta ao PostgreSQL Nativo usando o Esquema Canônico Real
+      // 1. Consulta ao PostgreSQL Nativo com CTE-first + Paginação Keyset/Cursor e Filtro SQL
       if (isPostgresConfigured()) {
         try {
           const sql = `
+            WITH paged_events AS (
+              SELECT
+                e.id,
+                e.title,
+                e.slug,
+                e.summary,
+                e.why_it_matters,
+                e.relevance_score,
+                e.article_count,
+                e.published_at,
+                e.updated_at
+              FROM public.events e
+              WHERE
+                ($3::text IS NULL OR EXISTS (
+                  SELECT 1
+                  FROM public.event_topics et_f
+                  JOIN public.topics t_f ON t_f.id = et_f.topic_id
+                  WHERE et_f.event_id = e.id AND LOWER(t_f.name) LIKE ('%' || $3::text || '%')
+                ))
+                AND ($4::timestamptz IS NULL OR (
+                  e.published_at < $4::timestamptz
+                  OR (e.published_at = $4::timestamptz AND e.id::text < $5::text)
+                ))
+              ORDER BY e.published_at DESC, e.id DESC
+              LIMIT $1 OFFSET $2
+            )
             SELECT 
               e.id,
               e.title,
@@ -289,6 +371,7 @@ export default async function handler(req: any, res: any) {
                   FROM public.event_articles ea_img 
                   JOIN public.articles a ON a.id = ea_img.article_id 
                   WHERE ea_img.event_id = e.id AND a.image_url IS NOT NULL AND a.image_url != ''
+                  ORDER BY ea_img.is_primary DESC
                   LIMIT 1
                 ), 
                 NULL
@@ -332,31 +415,42 @@ export default async function handler(req: any, res: any) {
                 ),
                 e.summary
               ) as primary_description
-            FROM public.events e
+            FROM paged_events e
             LEFT JOIN public.event_articles ea ON e.id = ea.event_id
             LEFT JOIN public.articles a ON ea.article_id = a.id
             LEFT JOIN public.news_sources ns ON a.source_id = ns.id
-            GROUP BY e.id
-            ORDER BY e.published_at DESC
-            LIMIT $1 OFFSET $2
+            GROUP BY e.id, e.title, e.slug, e.summary, e.why_it_matters, e.relevance_score, e.article_count, e.published_at, e.updated_at
+            ORDER BY e.published_at DESC, e.id DESC
           `;
 
-          const dbRes = await executeSql(sql, [queryLimit, offset]);
+          const dbRes = await withSpan(traceCtx, 'db_events', () =>
+            executeSql(sql, [
+              queryLimit,
+              offset,
+              categoryFilter,
+              decodedCursor ? decodedCursor.publishedAt : null,
+              decodedCursor ? decodedCursor.id : null,
+            ])
+          );
           const rawRows = dbRes.rows || [];
           const hasMore = rawRows.length > limit;
           const pageRows = hasMore ? rawRows.slice(0, limit) : rawRows;
+          const lastRow = pageRows.length > 0 ? pageRows[pageRows.length - 1] : null;
+          const nextCursor = hasMore && lastRow ? encodeEventCursor(lastRow.published_at, String(lastRow.id)) : null;
 
           // Carregar event_entities separadamente para não falhar caso a tabela/colunas variem
           const entitiesByEventId = new Map<string, any[]>();
           try {
             const eventIds = pageRows.map((r: any) => String(r.id));
             if (eventIds.length > 0) {
-              const eeRes = await executeSql(
-                `SELECT ee.event_id, ent.id, ent.name, ent.slug, ent.type, ent.description, ent.sector, ent.role, ent.website, ent.image_url, ent.logo_url, ent.avatar_url, ent.brand_color
-                 FROM public.event_entities ee
-                 JOIN public.entities ent ON ent.id::text = ee.entity_id::text
-                 WHERE ee.event_id::text = ANY($1::text[])`,
-                [eventIds]
+              const eeRes = await withSpan(traceCtx, 'db_event_entities', () =>
+                executeSql(
+                  `SELECT ee.event_id, ent.id, ent.name, ent.slug, ent.type, ent.description, ent.sector, ent.role, ent.website, ent.image_url, ent.logo_url, ent.avatar_url, ent.brand_color
+                   FROM public.event_entities ee
+                   JOIN public.entities ent ON ent.id::text = ee.entity_id::text
+                   WHERE ee.event_id::text = ANY($1::text[])`,
+                  [eventIds]
+                )
               );
               for (const row of eeRes.rows || []) {
                 const evKey = String(row.event_id);
@@ -383,7 +477,7 @@ export default async function handler(req: any, res: any) {
             }
           } catch {}
 
-          let mapped = pageRows.map((row: any) => {
+          const mapped = pageRows.map((row: any) => {
             const sources = Array.isArray(row.sources) ? row.sources : [];
             const mainArticle = sources[0] || {};
             const itemCategory = row.category || 'Brasil';
@@ -416,21 +510,41 @@ export default async function handler(req: any, res: any) {
             };
           });
 
-          if (categoryFilter) {
-            mapped = mapped.filter((item: any) =>
-              item.category.toLowerCase().includes(categoryFilter)
-            );
+          const etag = computeWeakEtag(
+            JSON.stringify({
+              c: categoryFilter || '',
+              cur: decodedCursor ? `${decodedCursor.publishedAt}:${decodedCursor.id}` : offset,
+              items: pageRows.map((r: any) => `${r.id}:${r.updated_at || r.published_at}`),
+            })
+          );
+          attachTelemetryHeaders(res, traceCtx);
+          const ifNoneMatch = String(req.headers?.['if-none-match'] || '').trim();
+          if (ifNoneMatch && ifNoneMatch === etag) {
+            res.setHeader('ETag', etag);
+            res.setHeader('Vary', 'Accept-Encoding');
+            res.statusCode = 304;
+            res.end();
+            return;
           }
 
-          return sendJson(res, 200, {
-            success: true,
-            count: mapped.length,
-            limit,
-            offset,
-            hasMore,
-            events: mapped,
-            source: 'postgresql_canonical'
-          });
+          return sendJson(
+            res,
+            200,
+            {
+              success: true,
+              count: mapped.length,
+              limit,
+              offset,
+              hasMore,
+              nextCursor,
+              events: mapped,
+              source: 'postgresql_canonical'
+            },
+            {
+              ETag: etag,
+              Vary: 'Accept-Encoding',
+            }
+          );
         } catch (pgErr: any) {
           console.warn('[Events API] Erro na query PostgreSQL, tentando fallback:', pgErr?.message);
         }
@@ -439,15 +553,24 @@ export default async function handler(req: any, res: any) {
       // 2. Fallback via Supabase Client server-side
       try {
         const client = getServerSupabase();
-          const { data, error } = await client
+          let sbQuery = client
             .from('events')
             .select('id, title, slug, summary, why_it_matters, published_at, updated_at, relevance_score, article_count')
-            .order('published_at', { ascending: false })
-            .range(offset, offset + queryLimit - 1);
+            .order('published_at', { ascending: false });
+
+          if (decodedCursor) {
+            sbQuery = sbQuery.lt('published_at', decodedCursor.publishedAt).limit(queryLimit);
+          } else {
+            sbQuery = sbQuery.range(offset, offset + queryLimit - 1);
+          }
+
+          const { data, error } = await withSpan(traceCtx, 'sb_events', async () => sbQuery);
 
           if (!error && Array.isArray(data)) {
             const hasMore = data.length > limit;
             const pageData = hasMore ? data.slice(0, limit) : data;
+            const lastRow = pageData.length > 0 ? pageData[pageData.length - 1] : null;
+            const nextCursor = hasMore && lastRow ? encodeEventCursor(lastRow.published_at, String(lastRow.id)) : null;
             const events = pageData.map((row: any) => ({
               id: row.id,
               title: row.title,
@@ -466,12 +589,14 @@ export default async function handler(req: any, res: any) {
               sources: []
             }));
 
+            attachTelemetryHeaders(res, traceCtx);
             return sendJson(res, 200, {
               success: true,
               count: events.length,
               limit,
               offset,
               hasMore,
+              nextCursor,
               events,
               source: 'supabase_client'
             });
@@ -481,9 +606,11 @@ export default async function handler(req: any, res: any) {
         }
 
       // 3. Resposta segura HTTP 200 sem erro 500 para base em inicialização ou vazia
+      attachTelemetryHeaders(res, traceCtx);
       return sendJson(res, 200, {
         success: true,
         count: 0,
+        nextCursor: null,
         events: [],
         message: 'Nenhum acontecimento registrado até o momento.'
       });

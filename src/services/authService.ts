@@ -669,7 +669,7 @@ export const authService = {
     try {
       const { data, error } = await supabase
         .from('profiles')
-        .select('*')
+        .select('id, user_id, email, name, full_name, avatar_url, role, is_admin, plan_name, subscription_status, trial_ends_at, onboarding_status, onboarding_step, onboarding_completed_at, updated_at')
         .eq('user_id', userId)
         .maybeSingle();
 

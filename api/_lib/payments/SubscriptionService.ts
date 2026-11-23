@@ -12,7 +12,7 @@
  * 4. NUNCA ativa PRO no frontend; o status sempre deriva do servidor e webhooks validados.
  */
 
-import { SAAS_TRIAL_DAYS, resolvePlanPrice } from '../plans.js';
+import { SAAS_TRIAL_DAYS, getEffectiveAllowedPaymentMethods, resolvePlanPrice } from '../plans.js';
 import { toDbSubscriptionPlan, toDbSubscriptionStatus } from './DbContractMapper.js';
 import { getActivePaymentProviderId, getPaymentProvider } from './PaymentProviderRegistry.js';
 import { DbSubscriptionRow, formatMethodLabel, getPaymentsPersistence, PaymentsPersistenceAdapter } from './PaymentsStore.js';
@@ -59,6 +59,8 @@ export class SubscriptionService {
     const provider = getPaymentProvider(activeProviderId);
     const commercialReadiness = await provider.getCommercialReadiness();
 
+    const allowedMethods = getEffectiveAllowedPaymentMethods();
+
     if (params.isAdmin) {
       const adminDate = params.userCreatedAt || new Date().toISOString();
       return {
@@ -77,9 +79,11 @@ export class SubscriptionService {
         gateway: 'Cakto Assinaturas',
         provider: activeProviderId,
         paymentMethod: 'Cortesia Admin',
-        allowedMethods: plan.allowedMethods,
+        allowedMethods,
         isAdminExempt: true,
         hasProAccess: true,
+        autoRenew: false,
+        isPaused: false,
         commercialReadiness,
       };
     }
@@ -112,6 +116,11 @@ export class SubscriptionService {
       nowMs: Date.now(),
     });
 
+    const pendingPixCharge =
+      typeof store.getActivePendingPixChargeForUser === 'function'
+        ? await store.getActivePendingPixChargeForUser(params.userId).catch(() => null)
+        : null;
+
     if (row) {
       return {
         status: evaluation.canonicalStatus,
@@ -139,7 +148,11 @@ export class SubscriptionService {
         paymentMethod: evaluation.isAuthorizedCourtesy
           ? 'Cortesia Administrativa'
           : formatMethodLabel(row.payment_method),
-        allowedMethods: plan.allowedMethods,
+        allowedMethods,
+        recurrenceMode: evaluation.recurrenceMode,
+        autoRenew: evaluation.autoRenew,
+        isPaused: evaluation.isPaused,
+        pendingPixCharge,
         isAdminExempt: false,
         hasProAccess: evaluation.hasProAccess,
         reconciliationRequired: evaluation.reconciliationRequired,
@@ -166,7 +179,11 @@ export class SubscriptionService {
       gateway: 'Cakto Assinaturas',
       provider: activeProviderId,
       paymentMethod: formatMethodLabel(null),
-      allowedMethods: plan.allowedMethods,
+      allowedMethods,
+      recurrenceMode: evaluation.recurrenceMode,
+      autoRenew: false,
+      isPaused: false,
+      pendingPixCharge,
       isAdminExempt: false,
       hasProAccess: evaluation.hasProAccess,
       commercialReadiness,

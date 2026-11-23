@@ -130,22 +130,78 @@ export function normalizePaymentMethod(rawMethod?: string | null): string {
   if (normalized === 'cartao' || normalized === 'cartao_credito' || normalized === 'creditcard') {
     return 'credit_card';
   }
-  if (normalized === 'pix_automatico' || normalized === 'pixautomatico' || normalized === 'automatic_pix' || normalized === 'pix_recurring') {
+  if (
+    normalized === 'pix_automatico' ||
+    normalized === 'pixautomatico' ||
+    normalized === 'automatic_pix' ||
+    normalized === 'pix_recurring'
+  ) {
     return 'pix_auto';
+  }
+  if (normalized === 'pix_tradicional' || normalized === 'pix_comum' || normalized === 'pix_avulso') {
+    return 'pix';
   }
   return normalized || 'unknown';
 }
 
+export function isTraditionalPixCommercialEnabled(): boolean {
+  return String(process.env.PAYMENTS_ALLOW_PIX_TRADITIONAL || 'false').trim().toLowerCase() === 'true';
+}
+
+export function isDirectPixApiEnabled(): boolean {
+  return (
+    isTraditionalPixCommercialEnabled() &&
+    String(process.env.CAKTO_DIRECT_PIX_ENABLED || 'false').trim().toLowerCase() === 'true'
+  );
+}
+
+export function getEffectiveAllowedPaymentMethods(): readonly string[] {
+  return isTraditionalPixCommercialEnabled()
+    ? (['credit_card', 'pix_auto', 'pix'] as const)
+    : ALLOWED_CAKTO_METHODS;
+}
+
 export function isAllowedPaymentMethod(rawMethod?: string | null): boolean {
   const normalized = normalizePaymentMethod(rawMethod);
-  return (ALLOWED_CAKTO_METHODS as readonly string[]).includes(normalized);
+  return getEffectiveAllowedPaymentMethods().includes(normalized);
 }
 
 export function isProhibitedPaymentMethod(rawMethod?: string | null): boolean {
   const normalized = normalizePaymentMethod(rawMethod);
   if (isAllowedPaymentMethod(normalized)) return false;
-  return normalized !== 'unknown' && (
-    PROHIBITED_PAYMENT_METHODS.includes(normalized) ||
-    !isAllowedPaymentMethod(normalized)
+  return (
+    normalized !== 'unknown' &&
+    (PROHIBITED_PAYMENT_METHODS.includes(normalized) || !isAllowedPaymentMethod(normalized))
   );
 }
+
+export type CanonicalRecurrenceMode =
+  | 'CARD_RECURRING'
+  | 'PIX_AUTOMATIC'
+  | 'PIX_MANUAL_CYCLE'
+  | 'TRIAL'
+  | 'EXEMPT'
+  | 'NONE';
+
+export function resolveRecurrenceMode(params: {
+  paymentMethod?: string | null;
+  isAdmin?: boolean;
+  isTrial?: boolean;
+  explicitMode?: string | null;
+}): CanonicalRecurrenceMode {
+  if (params.isAdmin) return 'EXEMPT';
+  if (params.isTrial) return 'TRIAL';
+  if (
+    params.explicitMode === 'CARD_RECURRING' ||
+    params.explicitMode === 'PIX_AUTOMATIC' ||
+    params.explicitMode === 'PIX_MANUAL_CYCLE'
+  ) {
+    return params.explicitMode;
+  }
+  const normalized = normalizePaymentMethod(params.paymentMethod);
+  if (normalized === 'credit_card') return 'CARD_RECURRING';
+  if (normalized === 'pix_auto') return 'PIX_AUTOMATIC';
+  if (normalized === 'pix') return 'PIX_MANUAL_CYCLE';
+  return 'NONE';
+}
+

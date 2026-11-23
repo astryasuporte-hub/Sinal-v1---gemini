@@ -12,7 +12,7 @@
  * 4. Trial de 7 dias deriva exclusivamente de trial_starts_at/trial_ends_at ou auth.users.created_at.
  */
 
-import { SAAS_TRIAL_DAYS } from '../plans.js';
+import { SAAS_TRIAL_DAYS, resolveRecurrenceMode, type CanonicalRecurrenceMode } from '../plans.js';
 import type { DbSubscriptionRow } from './PaymentsStore.js';
 import type { CanonicalSubscriptionStatus } from './types.js';
 
@@ -32,6 +32,9 @@ export interface SubscriptionEligibilityEvaluation {
   remainingTrialDays: number;
   periodEndIso: string | null;
   hadPaidHistory: boolean;
+  recurrenceMode: CanonicalRecurrenceMode;
+  autoRenew: boolean;
+  isPaused: boolean;
 }
 
 export function evaluateSubscriptionEligibility(params: {
@@ -75,6 +78,9 @@ export function evaluateSubscriptionEligibility(params: {
       remainingTrialDays,
       periodEndIso: trialEndsIso,
       hadPaidHistory: false,
+      recurrenceMode: 'TRIAL',
+      autoRenew: false,
+      isPaused: false,
     };
   }
 
@@ -217,6 +223,17 @@ export function evaluateSubscriptionEligibility(params: {
     canonicalStatus === 'INCOMPLETE' ||
     (canonicalStatus === 'RENEWAL_PENDING' && hadPaidHistory);
 
+  const recurrenceMode = resolveRecurrenceMode({
+    paymentMethod: row.payment_method,
+    explicitMode: meta.recurrence_mode,
+  });
+  const isPaused = Boolean(meta.paused === true);
+  const autoRenew =
+    !isPaused &&
+    canonicalStatus === 'ACTIVE' &&
+    !row.cancel_at_period_end &&
+    recurrenceMode !== 'PIX_MANUAL_CYCLE';
+
   return {
     canonicalStatus,
     isPaidTier,
@@ -233,5 +250,8 @@ export function evaluateSubscriptionEligibility(params: {
     remainingTrialDays,
     periodEndIso,
     hadPaidHistory,
+    recurrenceMode,
+    autoRenew,
+    isPaused,
   };
 }

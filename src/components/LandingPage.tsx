@@ -4,7 +4,7 @@
  */
 
 import React, { useEffect, useRef } from 'react';
-import * as THREE from 'three';
+import type * as ThreeTypes from 'three';
 
 interface LandingPageProps {
   onStartFreeTrial: () => void;
@@ -1527,16 +1527,20 @@ export const LandingPage: React.FC<LandingPageProps> = ({
     }
 
     let globeAnimId: number | null = null;
-    let globeRenderer: THREE.WebGLRenderer | null = null;
+    let globeRenderer: ThreeTypes.WebGLRenderer | null = null;
     let ro: ResizeObserver | null = null;
+    let isUnmounted = false;
 
-    function initGlobe() {
-      if (!stage || !canvas) return;
+    async function initGlobe() {
+      if (!stage || !canvas || isUnmounted) return;
       if (!hasWebGL()) {
         stage.classList.add('no-webgl', 'ready');
         preloader?.classList.add('done');
         return;
       }
+
+      const THREE = await import('../utils/threeLandingGlobe');
+      if (isUnmounted) return;
 
       const rect = () => stage.getBoundingClientRect();
       let w = rect().width || 600, h = rect().height || 600;
@@ -1632,7 +1636,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
         [1.00, -0.80, 0.60], [-0.90, -0.40, 1.10], [0.45, 0.10, 1.40],
         [0.80, 0.85, 0.70], [-1.25, 0.10, 0.85]
       ];
-      const hubObjs: THREE.Mesh[] = [];
+      const hubObjs: ThreeTypes.Mesh[] = [];
       hubs.forEach(([x, y, z]) => {
         const dot = new THREE.Mesh(
           new THREE.SphereGeometry(0.022, 12, 12),
@@ -1652,7 +1656,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
         globe.add(halo);
       });
 
-      const arcs: THREE.Line[] = [];
+      const arcs: ThreeTypes.Line[] = [];
       for (let a = 0; a < hubs.length; a++) {
         for (let b = a + 1; b < hubs.length; b++) {
           if (Math.random() > 0.35) continue;
@@ -1757,7 +1761,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
             const p = Math.min(1, arc.userData.progress);
             const total = arc.userData.points.length;
             arc.geometry.setDrawRange(0, Math.max(2, Math.floor(total * p)));
-            (arc.material as THREE.LineBasicMaterial).opacity = 0.42 * (p < 0.85 ? 1 : (1 - (p - 0.85) / 0.55));
+            (arc.material as ThreeTypes.LineBasicMaterial).opacity = 0.42 * (p < 0.85 ? 1 : (1 - (p - 0.85) / 0.55));
           });
         }
         hubObjs.forEach((h, i) => {
@@ -1821,6 +1825,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
     }
 
     return () => {
+      isUnmounted = true;
       if (cursorRaf) cancelAnimationFrame(cursorRaf);
       if (globeAnimId) cancelAnimationFrame(globeAnimId);
       if (ro) ro.disconnect();

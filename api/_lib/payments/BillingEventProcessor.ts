@@ -148,7 +148,16 @@ export class BillingEventProcessor {
         }
       }
 
-      const transition = computeTransitionState({ event, existingSub });
+      let remainingValidCycleUntil: string | null = null;
+      if (event.canonicalAction === 'REFUND' && typeof store.findRemainingValidPaidPeriod === 'function') {
+        remainingValidCycleUntil = await store.findRemainingValidPaidPeriod({
+          userId: targetUserId,
+          excludeProviderPaymentId: paymentId,
+          periodDays: plan.periodDays,
+        });
+      }
+
+      const transition = computeTransitionState({ event, existingSub, remainingValidCycleUntil });
 
       if (transition.ledgerStatus) {
         await store.upsertPaymentLedgerRecord({
@@ -218,6 +227,62 @@ export class BillingEventProcessor {
           lastEventId: event.providerEventId,
           lastEventAt: event.occurredAt,
           billingMetadata: transition.metadataPatch,
+        });
+      }
+
+      if (
+        event.canonicalAction === 'PENDING_PAYMENT' &&
+        event.pixData?.qrCode &&
+        event.providerOrderId &&
+        typeof store.upsertPixCharge === 'function'
+      ) {
+        await store.upsertPixCharge({
+          userId: targetUserId,
+          attemptId: event.attemptId || null,
+          provider: event.provider,
+          providerOrderId: event.providerOrderId,
+          providerSubscriptionId: event.providerSubscriptionId || null,
+          amountCents: event.amountCents || plan.amountCents,
+          currency: event.currency || plan.currency,
+          pixData: event.pixData,
+        });
+      }
+
+      if (
+        typeof store.recordRefundLifecycle === 'function' &&
+        (event.canonicalAction === 'REFUND_REQUESTED' ||
+          event.canonicalAction === 'REFUND_PROCESSING' ||
+          event.canonicalAction === 'REFUND_FAILED' ||
+          event.canonicalAction === 'REFUND' ||
+          event.canonicalAction === 'CHARGEBACK')
+      ) {
+        const refundStatus =
+          event.canonicalAction === 'REFUND_REQUESTED'
+            ? 'REQUESTED'
+            : event.canonicalAction === 'REFUND_PROCESSING'
+            ? 'PROCESSING'
+            : event.canonicalAction === 'REFUND_FAILED'
+            ? 'FAILED'
+            : event.canonicalAction === 'CHARGEBACK'
+            ? 'CHARGEBACK_OPEN'
+            : 'CONFIRMED';
+
+        await store.recordRefundLifecycle({
+          userId: targetUserId,
+          provider: event.provider,
+          providerPaymentId: paymentId,
+          providerSubscriptionId: event.providerSubscriptionId || null,
+          providerEventId: event.providerEventId,
+          disputeType: event.canonicalAction === 'CHARGEBACK' ? 'CHARGEBACK' : 'REFUND',
+          status: refundStatus,
+          amountCents: event.amountCents || plan.amountCents,
+          currency: event.currency || plan.currency,
+          reason: event.refundReason || null,
+          accessRevoked:
+            event.canonicalAction === 'CHARGEBACK' ||
+            (event.canonicalAction === 'REFUND' && !transition.metadataPatch.partial_refund_preserved_cycle),
+          remainingValidCycleUntil,
+          occurredAt: event.occurredAt,
         });
       }
 

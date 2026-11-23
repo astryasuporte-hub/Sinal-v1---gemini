@@ -35,6 +35,8 @@ export interface CaktoApiResponse<T = any> {
 }
 
 export class CaktoClient {
+  constructor(private readonly fetchFn?: typeof fetch) {}
+
   private getCredentials(): { clientId: string; clientSecret: string } {
     return {
       clientId: (process.env.CAKTO_CLIENT_ID || '').trim(),
@@ -55,7 +57,8 @@ export class CaktoClient {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
-      return await fetch(url, {
+      const activeFetch = this.fetchFn || globalThis.fetch;
+      return await activeFetch(url, {
         ...init,
         signal: controller.signal,
       });
@@ -215,6 +218,51 @@ export class CaktoClient {
       method: 'GET',
     });
   }
+
+  async createDirectPayment(params: {
+    offerId: string;
+    paymentMethod: 'pix' | 'pix_auto' | 'credit_card';
+    customer: {
+      name: string;
+      email: string;
+      phone?: string;
+      docType?: 'cpf' | 'cnpj';
+      docNumber?: string;
+    };
+    idempotencyKey?: string;
+    pixExpiresInSeconds?: number;
+    externalId?: string;
+  }): Promise<CaktoApiResponse> {
+    const headers: Record<string, string> = {};
+    if (params.idempotencyKey) {
+      headers['X-Idempotency-Key'] = params.idempotencyKey;
+    }
+    return this.request('/payments/', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        paymentMethod: params.paymentMethod,
+        customer: params.customer,
+        items: [{ offerId: params.offerId }],
+        ...(params.pixExpiresInSeconds ? { pixExpiresIn: params.pixExpiresInSeconds } : {}),
+        ...(params.externalId ? { sck: params.externalId, external_id: params.externalId } : {}),
+      }),
+    });
+  }
+
+  async listSubscriptions(params: { search?: string; status?: string; limit?: number } = {}): Promise<CaktoApiResponse> {
+    const qs = new URLSearchParams();
+    if (params.search) qs.set('search', params.search);
+    if (params.status) qs.set('status', params.status);
+    if (params.limit) qs.set('limit', String(params.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return this.request(`/subscriptions/${suffix}`, { method: 'GET' });
+  }
+
+  async listWebhooks(): Promise<CaktoApiResponse> {
+    return this.request('/webhooks/', { method: 'GET' });
+  }
 }
 
 export const caktoClient = new CaktoClient();
+

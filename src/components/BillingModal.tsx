@@ -29,8 +29,11 @@ import {
   Infinity as InfinityIcon,
   FileText,
   XCircle,
+  QrCode,
+  Copy,
 } from 'lucide-react';
 import { paymentsService, BillingHistoryItem, AllowedPaymentMethod } from '../services/paymentsService';
+import type { PendingPixCharge } from '../types/sinal';
 
 interface BillingModalProps {
   isOpen: boolean;
@@ -53,10 +56,15 @@ export const BillingModal: React.FC<BillingModalProps> = ({
   const [loadingReconcile, setLoadingReconcile] = useState(false);
   const [loadingCancel, setLoadingCancel] = useState(false);
   const [confirmCancelOpen, setConfirmCancelOpen] = useState(false);
+  const [activePixCharge, setActivePixCharge] = useState<PendingPixCharge | null>(subscription.pendingPixCharge || null);
+  const [copiedPix, setCopiedPix] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'error' | 'info' | 'success'; message: string } | null>(null);
 
   useEffect(() => {
     setLiveSubscription(subscription);
+    if (subscription.pendingPixCharge) {
+      setActivePixCharge(subscription.pendingPixCharge);
+    }
   }, [subscription]);
 
   const refreshAll = useCallback(async () => {
@@ -124,6 +132,19 @@ export const BillingModal: React.FC<BillingModalProps> = ({
   const trialDaysLeft = Math.max(0, Math.min(totalTrialDays, liveSubscription.trialDaysLeft ?? 0));
   const usedTrialDays = Math.max(0, totalTrialDays - trialDaysLeft);
 
+  const serverAllowedMethods = liveSubscription.allowedMethods || ['credit_card', 'pix_auto'];
+  const supportsTraditionalPix = serverAllowedMethods.includes('pix');
+
+  const handleCopyPix = async () => {
+    const code = activePixCharge?.copiaECola || activePixCharge?.qrCode;
+    if (!code) return;
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopiedPix(true);
+      setTimeout(() => setCopiedPix(false), 2500);
+    } catch {}
+  };
+
   const handleCheckout = async () => {
     setLoadingCheckout(true);
     setFeedback(null);
@@ -139,7 +160,16 @@ export const BillingModal: React.FC<BillingModalProps> = ({
           type: 'error',
           message:
             res.error ||
-            'Checkout Cakto bloqueado comercialmente até liberação dos métodos Cartão de Crédito e Pix Automático.',
+            'Checkout Cakto bloqueado comercialmente até liberação dos métodos autorizados.',
+        });
+        return;
+      }
+
+      if (res.pixCharge?.qrCode) {
+        setActivePixCharge(res.pixCharge);
+        setFeedback({
+          type: 'info',
+          message: 'Cobrança Pix dinâmica gerada via Cakto. Escaneie o QR Code ou copie o código abaixo para concluir.',
         });
         return;
       }
@@ -364,7 +394,11 @@ export const BillingModal: React.FC<BillingModalProps> = ({
                     {isProActive || isCanceledWithAccess
                       ? isCanceledWithAccess
                         ? 'Ciclo pago em encerramento'
-                        : 'Ciclo mensal de 30 dias em andamento'
+                        : liveSubscription.recurrenceMode === 'PIX_MANUAL_CYCLE'
+                        ? 'Pix Ciclo 30 dias · Renovação manual'
+                        : liveSubscription.recurrenceMode === 'PIX_AUTOMATIC'
+                        ? 'Pix Automático · Renovação ativa'
+                        : 'Cartão de Crédito · Renovação mensal'
                       : `${usedTrialDays} de ${totalTrialDays} dias de teste utilizados`}
                   </span>
                   <span>
@@ -491,8 +525,8 @@ export const BillingModal: React.FC<BillingModalProps> = ({
                   </span>
                 </div>
 
-                {/* Seletor exclusivo dos dois métodos permitidos */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {/* Seletor dinâmico conforme métodos liberados pelo servidor */}
+                <div className={`grid grid-cols-1 ${supportsTraditionalPix ? 'sm:grid-cols-3' : 'sm:grid-cols-2'} gap-3`}>
                   <button
                     type="button"
                     onClick={() => setSelectedMethod('credit_card')}
@@ -528,7 +562,69 @@ export const BillingModal: React.FC<BillingModalProps> = ({
                       </div>
                     </div>
                   </button>
+
+                  {supportsTraditionalPix && (
+                    <button
+                      type="button"
+                      onClick={() => setSelectedMethod('pix')}
+                      className={`p-3.5 rounded-xl border text-left transition cursor-pointer flex items-start gap-3 ${
+                        selectedMethod === 'pix'
+                          ? 'bg-white text-black border-white'
+                          : 'bg-zinc-950/70 text-zinc-200 border-zinc-800 hover:border-zinc-600'
+                      }`}
+                    >
+                      <QrCode className="w-4 h-4 shrink-0 mt-0.5" />
+                      <div>
+                        <div className="text-xs font-bold">Pix (30 dias)</div>
+                        <div className={`text-[10px] mt-0.5 ${selectedMethod === 'pix' ? 'text-zinc-700' : 'text-zinc-400'}`}>
+                          QR Code dinâmico · ciclo 30d
+                        </div>
+                      </div>
+                    </button>
+                  )}
                 </div>
+
+                {/* Painel oficial de Pix Dinâmico emitido pelo gateway (nunca estático) */}
+                {activePixCharge && activePixCharge.status === 'PENDING' && (
+                  <div className="p-4 rounded-xl bg-zinc-950 border border-emerald-500/30 space-y-3 text-xs">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 font-bold text-emerald-300">
+                        <QrCode className="w-4 h-4" />
+                        <span>Pix Dinâmico Cakto Aguardando Pagamento</span>
+                      </div>
+                      <span className="font-mono text-[11px] text-zinc-300">
+                        {paymentsService.formatCents(activePixCharge.amountCents ?? 3490)}
+                      </span>
+                    </div>
+                    {activePixCharge.qrCodeImageUrl && (
+                      <div className="flex justify-center py-2 bg-white rounded-lg p-2 w-40 mx-auto">
+                        <img
+                          src={activePixCharge.qrCodeImageUrl}
+                          alt="QR Code Pix FatosBR PRO"
+                          className="w-36 h-36 object-contain"
+                        />
+                      </div>
+                    )}
+                    <div className="p-2.5 rounded-lg bg-zinc-900 border border-zinc-800 font-mono text-[11px] text-zinc-300 break-all max-h-20 overflow-y-auto">
+                      {activePixCharge.copiaECola || activePixCharge.qrCode}
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[11px] text-zinc-400 font-mono">
+                        {activePixCharge.expiresAt
+                          ? `Expira em ${new Date(activePixCharge.expiresAt).toLocaleString('pt-BR')}`
+                          : 'Válido conforme janela do gateway'}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => void handleCopyPix()}
+                        className="px-3 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-200 font-semibold flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>{copiedPix ? 'Copiado!' : 'Copiar Pix Copia e Cola'}</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 {/* Aviso transparente quando a oferta ainda está comercialmente bloqueada */}
                 {isCheckoutBlocked && (
@@ -539,7 +635,7 @@ export const BillingModal: React.FC<BillingModalProps> = ({
                     </div>
                     <p className="text-[11px] text-amber-200/85 leading-relaxed">
                       {readiness?.blockedMessage ||
-                        'A oferta FatosBR PRO aguarda confirmação final dos métodos Cartão de Crédito e Pix Automático na Cakto antes da liberação pública.'}
+                        'A oferta FatosBR PRO aguarda confirmação final dos métodos autorizados na Cakto antes da liberação pública.'}
                     </p>
                   </div>
                 )}

@@ -56,24 +56,32 @@ export default async function handler(req: any, res: any) {
   }
 
   try {
-    const apiRes = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`
-      },
-      body: JSON.stringify({
-        from: 'FatosBR Suporte <onboarding@resend.dev>',
-        to: [toEmail],
-        subject: ticketSubject,
-        html,
-        text: messageBody
-      })
-    });
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 10000);
+    let apiRes: Response;
+    try {
+      apiRes = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        signal: ctrl.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+          from: 'FatosBR Suporte <onboarding@resend.dev>',
+          to: [toEmail],
+          subject: ticketSubject,
+          html,
+          text: messageBody
+        })
+      });
+    } finally {
+      clearTimeout(timer);
+    }
 
     const data = await apiRes.json().catch(() => ({}));
     return sendJson(res, apiRes.status, data);
   } catch (err: any) {
-    return sendJson(res, 500, { error: err.message });
+    return sendJson(res, err?.name === 'AbortError' ? 504 : 500, { error: err.message });
   }
 }

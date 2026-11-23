@@ -3049,7 +3049,15 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
             <div className="p-3.5 rounded-xl bg-[#111216] border border-zinc-800/80 flex items-center gap-3">
               <div className="w-10 h-10 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-xs font-bold text-white shrink-0 overflow-hidden">
                 {profile.avatarUrl ? (
-                  <img src={profile.avatarUrl} alt={profile.name} className="w-full h-full object-cover" />
+                  <img
+                    src={profile.avatarUrl}
+                    alt={profile.name}
+                    width={40}
+                    height={40}
+                    loading="lazy"
+                    decoding="async"
+                    className="w-full h-full object-cover"
+                  />
                 ) : (
                   <span>{getInitials(profile.name)}</span>
                 )}

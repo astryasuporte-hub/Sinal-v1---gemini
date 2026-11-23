@@ -1801,7 +1801,15 @@ export const AdminMobileView: React.FC<AdminMobileViewProps> = ({
                       <div className="flex items-center gap-2.5 min-w-0">
                         <div className="w-8 h-8 rounded-full overflow-hidden bg-[#0A1726] border border-[#183047] flex items-center justify-center text-white text-xs font-bold shrink-0">
                           {u.avatarUrl ? (
-                            <img src={u.avatarUrl} alt={u.fullName} className="w-full h-full object-cover" />
+                            <img
+                              src={u.avatarUrl}
+                              alt={u.fullName}
+                              width={32}
+                              height={32}
+                              loading="lazy"
+                              decoding="async"
+                              className="w-full h-full object-cover"
+                            />
                           ) : (
                             <span>{(u.fullName || u.email).substring(0, 2).toUpperCase()}</span>
                           )}

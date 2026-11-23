@@ -15,6 +15,8 @@ import { getActivePaymentProviderId, getPaymentProvider } from '../../payments/P
 import { webhookVerificationService } from '../../payments/WebhookVerificationService.js';
 import { billingEventProcessor } from '../../payments/BillingEventProcessor.js';
 import { getPaymentsPersistence } from '../../payments/PaymentsStore.js';
+import { billingDunningService } from '../../payments/BillingDunningService.js';
+import { fiscalInvoiceService } from '../../payments/FiscalInvoiceService.js';
 import { authenticateFinancialAdmin } from './authHelper.js';
 
 export default async function handler(req: any, res: any) {
@@ -87,6 +89,43 @@ export default async function handler(req: any, res: any) {
       errorCode: outcome.errorCode,
       error: outcome.error,
     });
+  }
+
+  if (!outcome.duplicate && !outcome.ignoredStale && outcome.userId) {
+    const ev = validation.normalizedEvent;
+    const triggerType = billingDunningService.resolveTriggerForCanonicalAction(ev.canonicalAction);
+    if (triggerType) {
+      await billingDunningService
+        .dispatchTrigger({
+          userId: outcome.userId,
+          userEmail: ev.customerEmail,
+          triggerType,
+          dedupKey: `webhook:${ev.provider}:${ev.providerEventId}:${triggerType}`,
+          periodEndIso: ev.nextBillingAt || ev.periodEnd || null,
+          amountCents: ev.amountCents || 3490,
+          metadata: { event_type: ev.eventType, order_id: ev.providerOrderId || null },
+        })
+        .catch(() => {});
+    }
+
+    if (
+      (ev.canonicalAction === 'ACTIVATE' || ev.canonicalAction === 'RENEW' || ev.canonicalAction === 'RECOVER') &&
+      ev.providerOrderId
+    ) {
+      await fiscalInvoiceService
+        .prepareOrQueueForPayment({
+          userId: outcome.userId,
+          providerPaymentId: ev.providerOrderId,
+          amountCents: ev.amountCents || 3490,
+          customerName: ev.customerName || ev.rawPayload?.data?.customer?.name || null,
+          customerDocument:
+            ev.customerDocument ||
+            ev.rawPayload?.data?.customer?.docNumber ||
+            ev.rawPayload?.data?.customer?.document ||
+            null,
+        })
+        .catch(() => {});
+    }
   }
 
   return sendJson(res, 200, {

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, Suspense } from 'react';
 import {
   Shield,
   Activity,
@@ -59,24 +59,34 @@ import { adminService, AdminUser, AdminMetrics, SystemLog } from '../services/ad
 import { ticketService, SupportTicket } from '../services/ticketService';
 import { isSupabaseConfigured, checkSupabaseConnection } from '../lib/supabase';
 import { resendService } from '../services/resendService';
-import { ResendTelemetryCard } from './ResendTelemetryCard';
-import { ProviderDiagnostics } from './ProviderDiagnostics';
-import { ApiHealthDashboard } from './ApiHealthDashboard';
 import { ApiHealthModal } from './ApiHealthModal';
 import { FatosBrLogo } from './FatosBrLogo';
-import { MarketTrendAnalysis } from './MarketTrendAnalysis';
-import { InstagramCarouselStudio } from './InstagramCarouselStudio';
-import { ThreeGlobeScene } from './ThreeGlobeScene';
-import { ResendConfigPanel } from './ResendConfigPanel';
-import { AdminCompanyManager } from './AdminCompanyManager';
-import { AdminBriefingCustomizer } from './AdminBriefingCustomizer';
-import { AdminBriefingOpsPanel } from './AdminBriefingOpsPanel';
-import { AdminMobileView } from './AdminMobileView';
-import { AdminFinancialDashboard } from './AdminFinancialDashboard';
-import { ResendWebhookLiveMonitor } from './ResendWebhookLiveMonitor';
+import { ListRowSkeleton } from './GeneralStates';
+import { VirtualizedList } from './VirtualizedList';
+import { useDebounce } from '../hooks/useDebounce';
 import { notificationService } from '../services/notificationService';
 import { paymentsService } from '../services/paymentsService';
 import { whatsappService } from '../services/whatsappService';
+
+const ResendTelemetryCard = React.lazy(() => import('./ResendTelemetryCard').then((m) => ({ default: m.ResendTelemetryCard })));
+const ProviderDiagnostics = React.lazy(() => import('./ProviderDiagnostics').then((m) => ({ default: m.ProviderDiagnostics })));
+const ApiHealthDashboard = React.lazy(() => import('./ApiHealthDashboard').then((m) => ({ default: m.ApiHealthDashboard })));
+const MarketTrendAnalysis = React.lazy(() => import('./MarketTrendAnalysis').then((m) => ({ default: m.MarketTrendAnalysis })));
+const InstagramCarouselStudio = React.lazy(() => import('./InstagramCarouselStudio').then((m) => ({ default: m.InstagramCarouselStudio })));
+const ThreeGlobeScene = React.lazy(() => import('./ThreeGlobeScene').then((m) => ({ default: m.ThreeGlobeScene })));
+const ResendConfigPanel = React.lazy(() => import('./ResendConfigPanel').then((m) => ({ default: m.ResendConfigPanel })));
+const AdminCompanyManager = React.lazy(() => import('./AdminCompanyManager').then((m) => ({ default: m.AdminCompanyManager })));
+const AdminBriefingCustomizer = React.lazy(() => import('./AdminBriefingCustomizer').then((m) => ({ default: m.AdminBriefingCustomizer })));
+const AdminBriefingOpsPanel = React.lazy(() => import('./AdminBriefingOpsPanel').then((m) => ({ default: m.AdminBriefingOpsPanel })));
+const AdminMobileView = React.lazy(() => import('./AdminMobileView').then((m) => ({ default: m.AdminMobileView })));
+const AdminFinancialDashboard = React.lazy(() => import('./AdminFinancialDashboard').then((m) => ({ default: m.AdminFinancialDashboard })));
+const ResendWebhookLiveMonitor = React.lazy(() => import('./ResendWebhookLiveMonitor').then((m) => ({ default: m.ResendWebhookLiveMonitor })));
+
+const AdminTabFallback = (
+  <div className="p-5 rounded-2xl bg-[#0e1320] border border-[#182136]">
+    <ListRowSkeleton count={4} />
+  </div>
+);
 
 export type StatusColor = 'connected' | 'error' | 'disconnected';
 
@@ -285,6 +295,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [isLoadingUsers, setIsLoadingUsers] = useState(false);
   const [isSeeding, setIsSeeding] = useState(false);
   const [userSearchTerm, setUserSearchTerm] = useState('');
+  const debouncedUserSearch = useDebounce(userSearchTerm, 180);
   const [userPlanFilter, setUserPlanFilter] = useState<'all' | 'pro' | 'trial'>('all');
   const [userProviderFilter, setUserProviderFilter] = useState<'all' | 'google' | 'email'>('all');
   const [selectedUserModal, setSelectedUserModal] = useState<AdminUser | null>(null);
@@ -325,6 +336,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   // Vault & Secrets
   const [secrets, setSecrets] = useState<VaultSecret[]>(INITIAL_SECRETS);
   const [secretSearch, setSecretSearch] = useState('');
+  const debouncedSecretSearch = useDebounce(secretSearch, 180);
   const [editingSecret, setEditingSecret] = useState<VaultSecret | null>(null);
   const [newSecretValue, setNewSecretValue] = useState('');
   const [testingId, setTestingId] = useState<string | null>(null);
@@ -347,6 +359,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
   // Filtros de Eventos
   const [eventSearch, setEventSearch] = useState('');
+  const debouncedEventSearch = useDebounce(eventSearch, 180);
   const [selectedEventModal, setSelectedEventModal] = useState<Event | null>(null);
 
   // Nova Fonte Modal
@@ -371,6 +384,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [resolutionNote, setResolutionNote] = useState('');
   const [isResolving, setIsResolving] = useState(false);
   const [ticketSearch, setTicketSearch] = useState('');
+  const debouncedTicketSearch = useDebounce(ticketSearch, 180);
 
   // Toasts
   const [toastMsg, setToastMsg] = useState<string | null>(null);
@@ -474,7 +488,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   // Lista Filtrada de Usuários
   const filteredUsers = useMemo(() => {
     return usersList.filter((u) => {
-      const q = userSearchTerm.trim().toLowerCase();
+      const q = debouncedUserSearch.trim().toLowerCase();
       const matchesSearch =
         !q ||
         (u.id && u.id.toLowerCase().includes(q)) ||
@@ -497,7 +511,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
       return true;
     });
-  }, [usersList, userSearchTerm, userPlanFilter, userProviderFilter]);
+  }, [usersList, debouncedUserSearch, userPlanFilter, userProviderFilter]);
 
   const copyRlsSql = () => {
     const sql = `-- Políticas RLS no Supabase para liberar leitura das contas para o Super Admin
@@ -923,24 +937,30 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
     setNewSourceDomain('');
   };
 
-  const filteredSecrets = secrets.filter(
-    (s) =>
-      s.name.toLowerCase().includes(secretSearch.toLowerCase()) ||
-      s.keyLabel.toLowerCase().includes(secretSearch.toLowerCase()) ||
-      s.category.toLowerCase().includes(secretSearch.toLowerCase())
-  );
+  const filteredSecrets = useMemo(() => {
+    const q = debouncedSecretSearch.toLowerCase();
+    return secrets.filter(
+      (s) =>
+        s.name.toLowerCase().includes(q) ||
+        s.keyLabel.toLowerCase().includes(q) ||
+        s.category.toLowerCase().includes(q)
+    );
+  }, [secrets, debouncedSecretSearch]);
 
-  const filteredEvents = events.filter(
-    (e) =>
-      e.title.toLowerCase().includes(eventSearch.toLowerCase()) ||
-      e.category.toLowerCase().includes(eventSearch.toLowerCase()) ||
-      e.summary.toLowerCase().includes(eventSearch.toLowerCase())
-  );
+  const filteredEvents = useMemo(() => {
+    const q = debouncedEventSearch.toLowerCase();
+    return events.filter(
+      (e) =>
+        e.title.toLowerCase().includes(q) ||
+        e.category.toLowerCase().includes(q) ||
+        e.summary.toLowerCase().includes(q)
+    );
+  }, [events, debouncedEventSearch]);
 
-  const filteredLogs = systemLogs.filter((log) => {
-    if (logFilter === 'ALL') return true;
-    return log.level === logFilter;
-  });
+  const filteredLogs = useMemo(() => {
+    if (logFilter === 'ALL') return systemLogs;
+    return systemLogs.filter((log) => log.level === logFilter);
+  }, [systemLogs, logFilter]);
 
   // Lista de Abas do Painel Admin
   const ADMIN_NAV_ITEMS: {
@@ -1009,32 +1029,34 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
   // Renderização do Painel Mobile se estiver em viewport móvel ou no modo forçado
   if ((isMobileViewport && viewMode !== 'desktop') || viewMode === 'mobile') {
     return (
-      <AdminMobileView
-        events={events}
-        sources={sources}
-        topics={topics}
-        entities={entities}
-        users={usersList}
-        metrics={metrics}
-        systemLogs={systemLogs}
-        providers={providers}
-        onBackToApp={onBackToApp}
-        onOpenControl={onOpenControl}
-        onShowToast={showToast}
-        onAddEvent={onAddEvent}
-        onDeleteEvent={onDeleteEvent}
-        onClearEvents={onClearEvents}
-        onResetEvents={onResetEvents}
-        onAddSource={onAddSource}
-        onDeleteSource={onDeleteSource}
-        onUpdateEntityLogo={onUpdateEntityLogo}
-        onAddEntity={onAddEntity}
-        onTriggerIngestion={handleTriggerIngestion}
-        ingestionStatus={ingestionStatus}
-        onSeedDatabase={handleSeedDatabase}
-        isSeeding={isSeeding}
-        onToggleDesktopView={() => setViewMode('desktop')}
-      />
+      <Suspense fallback={<div className="min-h-screen bg-[#040911] p-4">{AdminTabFallback}</div>}>
+        <AdminMobileView
+          events={events}
+          sources={sources}
+          topics={topics}
+          entities={entities}
+          users={usersList}
+          metrics={metrics}
+          systemLogs={systemLogs}
+          providers={providers}
+          onBackToApp={onBackToApp}
+          onOpenControl={onOpenControl}
+          onShowToast={showToast}
+          onAddEvent={onAddEvent}
+          onDeleteEvent={onDeleteEvent}
+          onClearEvents={onClearEvents}
+          onResetEvents={onResetEvents}
+          onAddSource={onAddSource}
+          onDeleteSource={onDeleteSource}
+          onUpdateEntityLogo={onUpdateEntityLogo}
+          onAddEntity={onAddEntity}
+          onTriggerIngestion={handleTriggerIngestion}
+          ingestionStatus={ingestionStatus}
+          onSeedDatabase={handleSeedDatabase}
+          isSeeding={isSeeding}
+          onToggleDesktopView={() => setViewMode('desktop')}
+        />
+      </Suspense>
     );
   }
 
@@ -1886,27 +1908,33 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
         {/* ================= TAB: TENDÊNCIAS DE MERCADO (30 DIAS - RECHARTS) ================= */}
         {activeAdminTab === 'trends' && (
           <div className="space-y-6">
-            <MarketTrendAnalysis
-              entities={entities}
-              events={events}
-            />
+            <Suspense fallback={AdminTabFallback}>
+              <MarketTrendAnalysis
+                entities={entities}
+                events={events}
+              />
+            </Suspense>
           </div>
         )}
 
         {/* ================= TAB: PAINEL DE SAÚDE DA API (CHARTS EM TEMPO REAL) ================= */}
         {activeAdminTab === 'api-health' && (
-          <ApiHealthDashboard
-            onBackToOverview={() => setActiveAdminTab('overview')}
-            renderStatusBadge={renderStatusBadge}
-          />
+          <Suspense fallback={AdminTabFallback}>
+            <ApiHealthDashboard
+              onBackToOverview={() => setActiveAdminTab('overview')}
+              renderStatusBadge={renderStatusBadge}
+            />
+          </Suspense>
         )}
 
         {/* ================= TAB: PROVEDORES 24/7 & RATE LIMITS ================= */}
         {activeAdminTab === 'providers' && (
-          <ProviderDiagnostics
-            onBackToOverview={() => setActiveAdminTab('overview')}
-            renderStatusBadge={renderStatusBadge}
-          />
+          <Suspense fallback={AdminTabFallback}>
+            <ProviderDiagnostics
+              onBackToOverview={() => setActiveAdminTab('overview')}
+              renderStatusBadge={renderStatusBadge}
+            />
+          </Suspense>
         )}
 
         {/* ================= TAB 3: IA & MODELOS ================= */}
@@ -2182,7 +2210,9 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
         {activeAdminTab === 'billing' && (
           <div className="space-y-6">
             {/* Dashboard Financeiro Completo: MRR, Faturado vs Não Faturado, Gráfico e Exportação CSV */}
-            <AdminFinancialDashboard users={usersList} onShowToast={showToast} />
+            <Suspense fallback={AdminTabFallback}>
+              <AdminFinancialDashboard users={usersList} onShowToast={showToast} />
+            </Suspense>
 
             <div className="p-4 sm:p-5 rounded-2xl bg-[#0e1320] border border-[#182136] space-y-4">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-[#182136]">
@@ -2700,7 +2730,15 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
                           <div className="flex items-center gap-2.5">
                             <div className="w-8 h-8 rounded-full overflow-hidden bg-zinc-800 border border-zinc-700 flex items-center justify-center text-white text-xs font-bold shrink-0">
                               {u.avatarUrl ? (
-                                <img src={u.avatarUrl} alt={u.fullName} className="w-full h-full object-cover" />
+                                <img
+                                  src={u.avatarUrl}
+                                  alt={u.fullName}
+                                  width={32}
+                                  height={32}
+                                  loading="lazy"
+                                  decoding="async"
+                                  className="w-full h-full object-cover"
+                                />
                               ) : (
                                 <span>{(u.fullName || u.email).substring(0, 2).toUpperCase()}</span>
                               )}
@@ -2824,7 +2862,15 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
                               <div className="flex items-center gap-3">
                                 <div className="w-8 h-8 rounded-full overflow-hidden bg-zinc-800 border border-zinc-700 flex items-center justify-center text-white text-xs font-bold shrink-0">
                                   {u.avatarUrl ? (
-                                    <img src={u.avatarUrl} alt={u.fullName} className="w-full h-full object-cover" />
+                                    <img
+                                      src={u.avatarUrl}
+                                      alt={u.fullName}
+                                      width={32}
+                                      height={32}
+                                      loading="lazy"
+                                      decoding="async"
+                                      className="w-full h-full object-cover"
+                                    />
                                   ) : (
                                     <span>{(u.fullName || u.email).substring(0, 2).toUpperCase()}</span>
                                   )}
@@ -2924,7 +2970,15 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
                     <div className="flex items-center gap-3">
                       <div className="w-10 h-10 rounded-full overflow-hidden bg-zinc-800 border border-zinc-700 flex items-center justify-center text-white text-sm font-bold">
                         {selectedUserModal.avatarUrl ? (
-                          <img src={selectedUserModal.avatarUrl} alt={selectedUserModal.fullName} className="w-full h-full object-cover" />
+                          <img
+                            src={selectedUserModal.avatarUrl}
+                            alt={selectedUserModal.fullName}
+                            width={40}
+                            height={40}
+                            loading="lazy"
+                            decoding="async"
+                            className="w-full h-full object-cover"
+                          />
                         ) : (
                           <span>{(selectedUserModal.fullName || selectedUserModal.email).substring(0, 2).toUpperCase()}</span>
                         )}
@@ -3082,41 +3136,45 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
 
         {/* ================= TAB: EMPRESAS & LOGOTIPOS PNG ================= */}
         {activeAdminTab === 'companies' && (
-          <AdminCompanyManager
-            entities={entities}
-            sources={sources}
-            onUpdateEntityLogo={onUpdateEntityLogo}
-            onAddEntity={onAddEntity}
-            onRefreshCatalog={onRefreshCatalog}
-            onShowToast={showToast}
-          />
+          <Suspense fallback={AdminTabFallback}>
+            <AdminCompanyManager
+              entities={entities}
+              sources={sources}
+              onUpdateEntityLogo={onUpdateEntityLogo}
+              onAddEntity={onAddEntity}
+              onRefreshCatalog={onRefreshCatalog}
+              onShowToast={showToast}
+            />
+          </Suspense>
         )}
 
         {/* ================= TAB 8: BRIEFINGS & E-MAILS ================= */}
         {activeAdminTab === 'briefings' && (
           <div className="space-y-6">
-            {/* Monitoramento Operacional de Briefings, Agendamento & Notificações */}
-            <AdminBriefingOpsPanel />
+            <Suspense fallback={AdminTabFallback}>
+              {/* Monitoramento Operacional de Briefings, Agendamento & Notificações */}
+              <AdminBriefingOpsPanel />
 
-            {/* Customizador de Títulos e Subtítulos de Briefings com Preview e Webhooks em Tempo Real */}
-            <AdminBriefingCustomizer
-              events={events}
-              onShowToast={showToast}
-            />
+              {/* Customizador de Títulos e Subtítulos de Briefings com Preview e Webhooks em Tempo Real */}
+              <AdminBriefingCustomizer
+                events={events}
+                onShowToast={showToast}
+              />
 
-            {/* Interface de Configuração SMTP do Resend e Testes em Tempo Real */}
-            <ResendConfigPanel onShowToast={showToast} />
+              {/* Interface de Configuração SMTP do Resend e Testes em Tempo Real */}
+              <ResendConfigPanel onShowToast={showToast} />
 
-            {/* Componente Dedicado de Métricas em Tempo Real e Log de Webhooks (/api/resend/webhook) */}
-            <ResendWebhookLiveMonitor onShowToast={showToast} />
+              {/* Componente Dedicado de Métricas em Tempo Real e Log de Webhooks (/api/resend/webhook) */}
+              <ResendWebhookLiveMonitor onShowToast={showToast} />
 
-            {/* Componente Visual de Telemetria do Resend (providerStats.resend via /api/resend/status) */}
-            <ResendTelemetryCard
-              onTestDispatchSuccess={(id, recipient) => {
-                showToast(`Briefing de teste despachado via Resend: ID ${id}`);
-                addLog('SUCCESS', 'RESEND', `Disparo teste para ${recipient} concluído. ID Resend: ${id}`);
-              }}
-            />
+              {/* Componente Visual de Telemetria do Resend (providerStats.resend via /api/resend/status) */}
+              <ResendTelemetryCard
+                onTestDispatchSuccess={(id, recipient) => {
+                  showToast(`Briefing de teste despachado via Resend: ID ${id}`);
+                  addLog('SUCCESS', 'RESEND', `Disparo teste para ${recipient} concluído. ID Resend: ${id}`);
+                }}
+              />
+            </Suspense>
 
             <div className="p-4 sm:p-5 rounded-2xl bg-[#0e1320] border border-[#182136] space-y-4">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-[#182136]">
@@ -3426,13 +3484,15 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
         {/* ================= TAB: WEBHOOKS RESEND EM TEMPO REAL ================= */}
         {activeAdminTab === 'webhooks' && (
           <div className="space-y-6">
-            <ResendWebhookLiveMonitor onShowToast={showToast} />
-            <ResendTelemetryCard
-              onTestDispatchSuccess={(id, recipient) => {
-                showToast(`E-mail despachado via Resend: ID ${id}`);
-                addLog('SUCCESS', 'RESEND', `Disparo teste para ${recipient} concluído. ID: ${id}`);
-              }}
-            />
+            <Suspense fallback={AdminTabFallback}>
+              <ResendWebhookLiveMonitor onShowToast={showToast} />
+              <ResendTelemetryCard
+                onTestDispatchSuccess={(id, recipient) => {
+                  showToast(`E-mail despachado via Resend: ID ${id}`);
+                  addLog('SUCCESS', 'RESEND', `Disparo teste para ${recipient} concluído. ID: ${id}`);
+                }}
+              />
+            </Suspense>
           </div>
         )}
 
@@ -3476,31 +3536,37 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
                 </div>
               </div>
 
-              <div className="bg-[#070b12] p-3 sm:p-4 rounded-xl border border-[#162033] font-mono text-[10px] sm:text-xs space-y-2 max-h-96 overflow-y-auto">
+              <div className="bg-[#070b12] p-3 sm:p-4 rounded-xl border border-[#162033] font-mono text-[10px] sm:text-xs">
                 {filteredLogs.length === 0 ? (
                   <div className="p-8 text-center text-zinc-500 font-mono text-xs">
                     Nenhum log operacional registrado nesta sessão. As operações de ingestão, autenticação e suporte aparecerão aqui em tempo real.
                   </div>
                 ) : (
-                  filteredLogs.map((log) => (
-                    <div key={log.id} className="flex items-start gap-2 leading-relaxed">
-                      <span className="text-zinc-500 shrink-0 text-[10px]">[{log.timestamp}]</span>
-                      <span
-                        className={`font-bold shrink-0 text-[9px] px-1 rounded ${
-                          log.level === 'SUCCESS'
-                            ? 'bg-emerald-500/15 text-emerald-400'
-                            : log.level === 'ERROR'
-                            ? 'bg-red-500/15 text-red-400'
-                            : log.level === 'WARN'
-                            ? 'bg-amber-500/15 text-amber-400'
-                            : 'bg-blue-500/15 text-blue-400'
-                        }`}
-                      >
-                        {log.service}
-                      </span>
-                      <span className="text-zinc-300 break-words flex-1">{log.message}</span>
-                    </div>
-                  ))
+                  <VirtualizedList
+                    items={filteredLogs}
+                    itemHeight={30}
+                    containerHeight={384}
+                    getKey={(log) => log.id}
+                    renderItem={(log) => (
+                      <div className="flex items-center gap-2 leading-relaxed h-[30px] overflow-hidden">
+                        <span className="text-zinc-500 shrink-0 text-[10px]">[{log.timestamp}]</span>
+                        <span
+                          className={`font-bold shrink-0 text-[9px] px-1 rounded ${
+                            log.level === 'SUCCESS'
+                              ? 'bg-emerald-500/15 text-emerald-400'
+                              : log.level === 'ERROR'
+                              ? 'bg-red-500/15 text-red-400'
+                              : log.level === 'WARN'
+                              ? 'bg-amber-500/15 text-amber-400'
+                              : 'bg-blue-500/15 text-blue-400'
+                          }`}
+                        >
+                          {log.service}
+                        </span>
+                        <span className="text-zinc-300 truncate flex-1">{log.message}</span>
+                      </div>
+                    )}
+                  />
                 )}
               </div>
             </div>
@@ -3511,8 +3577,8 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
         {activeAdminTab === 'tickets' && (() => {
           const filteredTicketList = tickets.filter((t) => {
             if (ticketFilter !== 'all' && t.status !== ticketFilter) return false;
-            if (ticketSearch.trim()) {
-              const q = ticketSearch.toLowerCase();
+            if (debouncedTicketSearch.trim()) {
+              const q = debouncedTicketSearch.toLowerCase();
               return (
                 t.subject.toLowerCase().includes(q) ||
                 t.message.toLowerCase().includes(q) ||
@@ -3833,11 +3899,13 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
 
         {/* ================= TAB 14: ESTÚDIO INSTAGRAM (CARROSSÉIS P&B 4:5) ================= */}
         {activeAdminTab === 'instagram' && (
-          <InstagramCarouselStudio
-            events={events}
-            entities={entities}
-            onBack={() => setActiveAdminTab('overview')}
-          />
+          <Suspense fallback={AdminTabFallback}>
+            <InstagramCarouselStudio
+              events={events}
+              entities={entities}
+              onBack={() => setActiveAdminTab('overview')}
+            />
+          </Suspense>
         )}
 
         {/* ================= TAB 15: CENA 3D THREE.JS PBR DE ESTÚDIO ================= */}
@@ -3870,7 +3938,9 @@ CREATE POLICY "Usuário ou Super Admin edita o próprio perfil" ON public.profil
               </button>
             </div>
 
-            <ThreeGlobeScene className="h-[520px]" />
+            <Suspense fallback={AdminTabFallback}>
+              <ThreeGlobeScene className="h-[520px]" />
+            </Suspense>
           </div>
         )}
       </main>

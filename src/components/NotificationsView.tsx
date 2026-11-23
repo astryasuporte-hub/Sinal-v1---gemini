@@ -23,6 +23,8 @@ import {
   FileText
 } from 'lucide-react';
 import { CompanyLogoBadge } from './CompanyLogoBadge';
+import { ListRowSkeleton } from './GeneralStates';
+import { useDebounce } from '../hooks/useDebounce';
 import { notificationService } from '../services/notificationService';
 import { userService } from '../services/userService';
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
@@ -95,6 +97,7 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
 
   const [activeTab, setActiveTab] = useState<NotificationCategory>('todas');
   const [searchQuery, setSearchQuery] = useState('');
+  const debouncedSearchQuery = useDebounce(searchQuery, 180);
   const [filterOnlyUnread, setFilterOnlyUnread] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isMobileSearchOpen, setIsMobileSearchOpen] = useState(false);
@@ -398,8 +401,8 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
       if (activeTab === 'fontes' && item.category !== 'fontes') return false;
       if (activeTab === 'atualizacoes' && item.category !== 'atualizacoes') return false;
       if (filterOnlyUnread && item.read) return false;
-      if (searchQuery.trim().length > 0) {
-        const query = searchQuery.toLowerCase();
+      if (debouncedSearchQuery.trim().length > 0) {
+        const query = debouncedSearchQuery.toLowerCase();
         return (
           item.title.toLowerCase().includes(query) ||
           item.subtitle.toLowerCase().includes(query)
@@ -407,7 +410,7 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
       }
       return true;
     });
-  }, [notifications, activeTab, filterOnlyUnread, searchQuery]);
+  }, [notifications, activeTab, filterOnlyUnread, debouncedSearchQuery]);
 
   // Agrupamento por Data
   const groupedByDate = useMemo(() => {
@@ -661,11 +664,10 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
           </button>
         </div>
 
-        {/* LISTAGEM DE NOTIFICAÇÕES, LOADING, ERRO OU EMPTY STATE AUTÊNTICO */}
+        {/* LISTAGEM DE NOTIFICAÇÕES, SKELETON, ERRO OU EMPTY STATE AUTÊNTICO */}
         {isLoading && notifications.length === 0 ? (
-          <div className="p-10 sm:p-14 rounded-3xl border border-[#1e2026] bg-[#111216] text-center space-y-3">
-            <div className="w-8 h-8 rounded-full border-2 border-white/20 border-t-white animate-spin mx-auto" />
-            <p className="text-xs sm:text-sm text-zinc-400">Sincronizando suas notificações...</p>
+          <div className="p-4 sm:p-6 rounded-3xl border border-[#1e2026] bg-[#111216]">
+            <ListRowSkeleton count={5} />
           </div>
         ) : loadError && notifications.length === 0 ? (
           <div className="p-10 sm:p-14 rounded-3xl border border-[#1e2026] bg-[#111216] text-center space-y-4">

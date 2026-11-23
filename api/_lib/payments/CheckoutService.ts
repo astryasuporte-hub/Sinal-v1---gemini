@@ -15,7 +15,13 @@
  */
 
 import crypto from 'crypto';
-import { isAllowedPaymentMethod, isProhibitedPaymentMethod, resolvePlanPrice } from '../plans.js';
+import {
+  getEffectiveAllowedPaymentMethods,
+  isAllowedPaymentMethod,
+  isProhibitedPaymentMethod,
+  resolvePlanPrice,
+  resolveRecurrenceMode,
+} from '../plans.js';
 import { getActivePaymentProviderId, getPaymentProvider } from './PaymentProviderRegistry.js';
 import { getPaymentsPersistence, PaymentsPersistenceAdapter } from './PaymentsStore.js';
 import { evaluateSubscriptionEligibility } from './SubscriptionEligibility.js';
@@ -36,6 +42,8 @@ export class CheckoutService {
     const activeProviderId = getActivePaymentProviderId();
     const provider = getPaymentProvider(activeProviderId);
 
+    const allowedMethods = getEffectiveAllowedPaymentMethods();
+    const recurrenceMode = resolveRecurrenceMode({ paymentMethod: params.requestedMethod });
     const buildBlockedResult = (overrides: Partial<CheckoutSessionResult>): CheckoutSessionResult => ({
       success: false,
       blocked: true,
@@ -45,7 +53,8 @@ export class CheckoutService {
       checkoutId: plan.checkoutId,
       amountCents: plan.amountCents,
       currency: 'BRL',
-      allowedMethods: plan.allowedMethods,
+      allowedMethods,
+      recurrenceMode,
       ...overrides,
     });
 
@@ -68,7 +77,7 @@ export class CheckoutService {
         httpStatus: 400,
         result: buildBlockedResult({
           errorCode: 'PAYMENT_METHOD_NOT_ALLOWED',
-          error: `O método '${params.requestedMethod}' não é suportado. Utilize Cartão de Crédito ou Pix Automático.`,
+          error: `O método '${params.requestedMethod}' não está habilitado para este checkout (${allowedMethods.join(', ')}).`,
         }),
       };
     }
@@ -284,6 +293,7 @@ export class CheckoutService {
           idempotencyKey: params.idempotencyKey || null,
           metadata: {
             requested_method: params.requestedMethod || null,
+            recurrence_mode: recurrenceMode,
           },
           expiresAt,
         });
@@ -380,11 +390,38 @@ export class CheckoutService {
       };
     }
 
-    // 7. Persistir o resultado de forma idempotente
+    // 7. Persistir o resultado de forma idempotente (incluindo Pix dinâmico oficial quando gerado)
+    const pixOrderId = session.pixCharge?.providerOrderId || null;
     await store.updateBillingAttempt(attemptId, {
       status: 'REDIRECTED',
       checkoutUrl: session.checkoutUrl,
+      providerOrderId: pixOrderId,
+      metadata: {
+        recurrence_mode: session.recurrenceMode || recurrenceMode,
+        requested_method: params.requestedMethod || null,
+      },
     });
+
+    if (session.pixCharge?.qrCode && pixOrderId && typeof store.upsertPixCharge === 'function') {
+      await store
+        .upsertPixCharge({
+          userId: params.userId,
+          attemptId,
+          provider: activeProviderId,
+          providerOrderId: pixOrderId,
+          amountCents: plan.amountCents,
+          currency: plan.currency,
+          pixData: {
+            providerOrderId: pixOrderId,
+            pixType: session.pixCharge.pixType,
+            qrCode: session.pixCharge.qrCode,
+            qrCodeImageUrl: session.pixCharge.qrCodeImageUrl,
+            copiaECola: session.pixCharge.copiaECola,
+            expiresAt: session.pixCharge.expiresAt,
+          },
+        })
+        .catch(() => {});
+    }
 
     return {
       httpStatus: 200,

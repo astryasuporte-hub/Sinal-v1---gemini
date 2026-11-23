@@ -5,7 +5,7 @@
  * FatosBR Payments V1.1 — Contratos e Tipos Canônicos de Pagamento e Assinatura
  */
 
-import type { AllowedCaktoPaymentMethod } from '../plans.js';
+import type { AllowedCaktoPaymentMethod, CanonicalRecurrenceMode } from '../plans.js';
 
 export type CanonicalSubscriptionStatus =
   | 'TRIAL_ACTIVE'
@@ -57,6 +57,30 @@ export interface CheckoutCommercialReadiness {
   trialDays?: number;
 }
 
+export interface PixChargePayload {
+  providerOrderId?: string;
+  pixType: 'PIX_TRADITIONAL' | 'PIX_AUTOMATIC';
+  qrCode?: string;
+  qrCodeImageUrl?: string;
+  copiaECola?: string;
+  expiresAt?: string;
+  status?: 'PENDING' | 'PAID' | 'EXPIRED' | 'CANCELLED' | 'REFUSED';
+}
+
+export interface PendingPixChargeView {
+  chargeId: string;
+  providerOrderId: string;
+  pixType: 'PIX_TRADITIONAL' | 'PIX_AUTOMATIC';
+  amountCents: number;
+  currency: 'BRL';
+  status: 'PENDING' | 'PAID' | 'EXPIRED' | 'CANCELLED' | 'REFUSED';
+  qrCode?: string | null;
+  qrCodeImageUrl?: string | null;
+  copiaECola?: string | null;
+  expiresAt?: string | null;
+  createdAt?: string | null;
+}
+
 export interface CheckoutSessionResult {
   success: boolean;
   blocked?: boolean;
@@ -66,12 +90,14 @@ export interface CheckoutSessionResult {
   attemptId?: string;
   provider: PaymentProviderId;
   checkoutUrl?: string;
+  pixCharge?: PixChargePayload;
+  recurrenceMode?: CanonicalRecurrenceMode;
   productId: string;
   offerId: string;
   checkoutId: string;
   amountCents: number;
   currency: 'BRL';
-  allowedMethods: readonly AllowedCaktoPaymentMethod[];
+  allowedMethods: readonly string[];
   expiresAt?: string;
 }
 
@@ -84,7 +110,10 @@ export type CanonicalWebhookAction =
   | 'REFUSED'
   | 'CANCEL'
   | 'EXPIRE'
+  | 'PIX_EXPIRED'
   | 'REFUND_REQUESTED'
+  | 'REFUND_PROCESSING'
+  | 'REFUND_FAILED'
   | 'REFUND'
   | 'CHARGEBACK'
   | 'PENDING_PAYMENT'
@@ -100,6 +129,8 @@ export interface NormalizedPaymentWebhookEvent {
   attemptId?: string;
   userId?: string;
   customerEmail?: string;
+  customerName?: string;
+  customerDocument?: string;
   productId?: string;
   offerId?: string;
   checkoutId?: string;
@@ -111,6 +142,9 @@ export interface NormalizedPaymentWebhookEvent {
   periodStart?: string;
   periodEnd?: string;
   nextBillingAt?: string;
+  subscriptionPaused?: boolean;
+  refundReason?: string;
+  pixData?: PixChargePayload;
   eventHash?: string;
   rawPayload: Record<string, any>;
 }
@@ -137,6 +171,7 @@ export interface ProviderReconcileOrder {
   periodStart?: string;
   periodEnd?: string;
   nextBillingAt?: string;
+  pixData?: PixChargePayload;
 }
 
 export interface UserSubscriptionView {
@@ -159,7 +194,11 @@ export interface UserSubscriptionView {
   gateway: string;
   provider: PaymentProviderId;
   paymentMethod: string;
-  allowedMethods: readonly AllowedCaktoPaymentMethod[];
+  recurrenceMode?: 'CARD_RECURRING' | 'PIX_AUTOMATIC' | 'PIX_MANUAL_CYCLE' | 'TRIAL' | 'EXEMPT' | 'NONE';
+  autoRenew?: boolean;
+  isPaused?: boolean;
+  pendingPixCharge?: PendingPixChargeView | null;
+  allowedMethods: readonly string[];
   isAdminExempt?: boolean;
   hasProAccess: boolean;
   reconciliationRequired?: boolean;
@@ -174,9 +213,10 @@ export interface BillingHistoryEntry {
   amountCents: number;
   amount: number;
   currency: 'BRL';
-  status: 'PAID' | 'PENDING' | 'REFUSED' | 'CANCELED' | 'EXPIRED' | 'BLOCKED' | 'REFUNDED';
+  status: 'PAID' | 'PENDING' | 'REFUSED' | 'CANCELED' | 'EXPIRED' | 'BLOCKED' | 'REFUNDED' | 'REFUND_FAILED';
   paymentMethod: string;
   provider: string;
   referenceId: string;
   description: string;
 }
+

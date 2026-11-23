@@ -249,7 +249,15 @@ export const EntityDetailModal: React.FC<EntityDetailModalProps> = ({
     if (resolvedPhoto) {
       return (
         <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-2xl overflow-hidden border border-zinc-700 bg-zinc-900 shrink-0 shadow-xl">
-          <img src={resolvedPhoto} alt={entity.name} className="w-full h-full object-cover" />
+          <img
+            src={resolvedPhoto}
+            alt={entity.name}
+            width={80}
+            height={80}
+            loading="eager"
+            decoding="async"
+            className="w-full h-full object-cover"
+          />
         </div>
       );
     }

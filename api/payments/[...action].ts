@@ -21,6 +21,7 @@ import webhookHandler from '../_lib/handlers/payments/webhook.js';
 import cancelHandler from '../_lib/handlers/payments/cancel.js';
 import reconcileHandler from '../_lib/handlers/payments/reconcile.js';
 import historyHandler from '../_lib/handlers/payments/history.js';
+import nfseHandler from '../_lib/handlers/payments/nfse.js';
 import { sendJson, setCorsHeaders } from '../_lib/common.js';
 
 export default async function handler(req: any, res: any) {
@@ -52,6 +53,9 @@ export default async function handler(req: any, res: any) {
   }
   if (pathname === '/api/payments/history') {
     return historyHandler(req, res);
+  }
+  if (pathname === '/api/payments/nfse') {
+    return nfseHandler(req, res);
   }
 
   return sendJson(res, 404, {

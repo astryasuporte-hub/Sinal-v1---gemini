@@ -23,6 +23,7 @@ import {
   RefreshCw
 } from 'lucide-react';
 import { FatosBrLogo } from './FatosBrLogo';
+import { FeedSkeleton } from './GeneralStates';
 import { resendService } from '../services/resendService';
 import { userService } from '../services/userService';
 import { briefingService, RealBriefingItem } from '../services/briefingService';
@@ -471,12 +472,9 @@ export const BriefingView: React.FC<BriefingViewProps> = ({
         {/* COLUNA ESQUERDA: Feed de Briefings */}
         <div className="space-y-8 min-w-0">
           
-          {/* Indicador de Carregamento */}
+          {/* Indicador de Carregamento (Skeleton editorial) */}
           {isLoadingBriefings && userBriefings.length === 0 && (
-            <div className="rounded-2xl border border-zinc-800/80 bg-[#0d0e12] p-12 text-center text-zinc-400 text-sm space-y-3">
-              <div className="w-8 h-8 rounded-full border-2 border-white/20 border-t-white animate-spin mx-auto" />
-              <p>Carregando seus briefings...</p>
-            </div>
+            <FeedSkeleton count={3} />
           )}
 
           {/* Estado de Erro / Sessão Expirada no carregamento */}

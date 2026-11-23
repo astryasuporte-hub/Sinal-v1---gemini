@@ -150,20 +150,23 @@ export function toDbPaymentRequestState(rawState?: string | null): DbPaymentRequ
 export function toBillingHistoryStatus(
   dbStatus: string,
   checkoutData?: Record<string, any> | null
-): 'PAID' | 'PENDING' | 'REFUSED' | 'CANCELED' | 'EXPIRED' | 'BLOCKED' | 'REFUNDED' {
+): 'PAID' | 'PENDING' | 'REFUSED' | 'CANCELED' | 'EXPIRED' | 'BLOCKED' | 'REFUNDED' | 'REFUND_FAILED' {
   const s = String(dbStatus || '').trim().toUpperCase();
   if (s === 'APPROVED' || s === 'PAID' || s === 'COMPLETED') return 'PAID';
-  if (s === 'REFUNDED' || s === 'REFUND_FAILED' || s === 'CHARGEBACK') return 'REFUNDED';
+  if (s === 'REFUND_FAILED') return 'REFUND_FAILED';
+  if (s === 'REFUNDED' || s === 'CHARGEBACK') return 'REFUNDED';
   if (s === 'PENDING' || s === 'PROCESSING') return 'PENDING';
 
   const action = String(checkoutData?.canonical_action || checkoutData?.raw_status || '')
     .trim()
     .toUpperCase();
+  if (action === 'REFUND_FAILED') return 'REFUND_FAILED';
   if (action === 'REFUSED' || action === 'FAILED' || action === 'PAYMENT_REFUSED') return 'REFUSED';
-  if (action === 'EXPIRE' || action === 'EXPIRED') return 'EXPIRED';
+  if (action === 'EXPIRE' || action === 'EXPIRED' || action === 'PIX_EXPIRED') return 'EXPIRED';
   if (action === 'BLOCKED') return 'BLOCKED';
   if (s === 'REFUSED' || s === 'FAILED') return 'REFUSED';
   if (s === 'EXPIRED') return 'EXPIRED';
   if (s === 'BLOCKED') return 'BLOCKED';
   return 'CANCELED';
 }
+

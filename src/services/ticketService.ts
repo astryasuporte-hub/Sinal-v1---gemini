@@ -74,7 +74,7 @@ class TicketService {
     try {
       const { data, error } = await supabase
         .from('support_tickets')
-        .select('*')
+        .select('id, user_email, user_name, subject, message, status, created_at, updated_at, responses')
         .order('created_at', { ascending: false });
 
       if (error) {

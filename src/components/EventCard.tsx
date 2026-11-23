@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import { CompanyLogoBadge } from './CompanyLogoBadge';
+import { optimizeExternalImageUrl } from '../utils/imageOptimize';
 
 export function formatDetailedRelativeTime(publishedAt?: string, fallback?: string): string {
   if (!publishedAt) return fallback || 'há pouco';
@@ -167,7 +168,7 @@ export const EventCard: React.FC<EventCardProps> = React.memo(({
       {event.imageUrl && !imgError && (
         <div className="relative w-full h-44 sm:h-52 overflow-hidden bg-zinc-900 border-b border-zinc-800/80">
           <img
-            src={event.imageUrl}
+            src={optimizeExternalImageUrl(event.imageUrl, { width: 800 })}
             alt={event.title}
             width={800}
             height={420}

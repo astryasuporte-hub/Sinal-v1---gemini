@@ -73,13 +73,21 @@ export default async function handler(req: any, res: any) {
         const n = Number(v);
         return Number.isFinite(n) && n >= 0 && n <= max ? Math.round(n * 100) / 100 : null;
       };
+      const allowedDeviceTiers = new Set(['low', 'mid', 'high', 'unknown']);
+      const allowedNetTypes = new Set(['slow-2g', '2g', '3g', '4g', 'unknown']);
+      const deviceTier = allowedDeviceTiers.has(String(raw?.deviceTier)) ? String(raw.deviceTier) : 'unknown';
+      const effectiveType = allowedNetTypes.has(String(raw?.effectiveType)) ? String(raw.effectiveType) : 'unknown';
+
       const sanitizedMetrics = {
         lcpMs: clampMetric(raw?.lcpMs, 120000),
         inpMs: clampMetric(raw?.inpMs, 60000),
         cls: clampMetric(raw?.cls, 100),
         ttfbMs: clampMetric(raw?.ttfbMs, 120000),
+        feedLoadMs: clampMetric(raw?.feedLoadMs, 120000),
         jsErrors: clampMetric(raw?.jsErrors, 1000) ?? 0,
         apiCount: clampMetric(raw?.apiCount, 1000) ?? 0,
+        deviceTier,
+        effectiveType,
         path: typeof raw?.path === 'string' ? raw.path.split('?')[0].split('#')[0].slice(0, 64) : '/',
       };
       if (

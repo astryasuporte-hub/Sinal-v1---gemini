@@ -7,6 +7,7 @@ import React, { useState, useEffect } from 'react';
 import { Event, Entity } from '../types/sinal';
 import { FatosBrLogo } from './FatosBrLogo';
 import { EntityAvatar } from './EntityAvatar';
+import { optimizeExternalImageUrl } from '../utils/imageOptimize';
 import {
   ArrowLeft,
   Bookmark,
@@ -359,7 +360,7 @@ export const EventDetailModal: React.FC<EventDetailModalProps> = ({
             <figure className="mt-6 mb-8">
               <div className="w-full aspect-[16/10] sm:aspect-video rounded-2xl overflow-hidden bg-zinc-950 border border-zinc-900 shadow-2xl">
                 <img
-                  src={event.imageUrl}
+                  src={optimizeExternalImageUrl(event.imageUrl, { width: 1200 })}
                   alt={event.title}
                   width={1200}
                   height={675}

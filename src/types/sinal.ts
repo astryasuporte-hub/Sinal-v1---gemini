@@ -106,6 +106,21 @@ export type SubscriptionStatus =
   | 'EXPIRED'
   | 'PAYMENT_REFUSED';
 
+export type RecurrenceMode = 'CARD_RECURRING' | 'PIX_AUTOMATIC' | 'PIX_MANUAL_CYCLE' | 'TRIAL' | 'EXEMPT' | 'NONE';
+
+export interface PendingPixCharge {
+  chargeId?: string;
+  orderId?: string;
+  providerOrderId?: string;
+  pixType?: 'PIX_TRADITIONAL' | 'PIX_AUTOMATIC';
+  qrCode?: string | null;
+  qrCodeImageUrl?: string | null;
+  copiaECola?: string | null;
+  amountCents?: number;
+  expiresAt?: string | null;
+  status?: 'PENDING' | 'PAID' | 'EXPIRED' | 'CANCELLED' | 'REFUSED';
+}
+
 export interface UserSubscription {
   status: SubscriptionStatus;
   planId?: 'pro' | 'trial';
@@ -126,7 +141,11 @@ export interface UserSubscription {
   gateway: string;
   provider?: 'cakto' | 'sharpify';
   paymentMethod: string;
-  allowedMethods?: ('credit_card' | 'pix_auto')[];
+  allowedMethods?: ('credit_card' | 'pix_auto' | 'pix')[];
+  recurrenceMode?: RecurrenceMode;
+  autoRenew?: boolean;
+  isPaused?: boolean;
+  pendingPixCharge?: PendingPixCharge | null;
   isAdminExempt?: boolean;
   hasProAccess?: boolean;
   reconciliationRequired?: boolean;

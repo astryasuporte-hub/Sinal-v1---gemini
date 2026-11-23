@@ -61,7 +61,7 @@ export class WebhookVerificationService {
         accepted: false,
         httpStatus: 422,
         errorCode: 'PROHIBITED_PAYMENT_METHOD',
-        reason: `Método '${event.paymentMethod}' proibido no Payments V1. Apenas credit_card e pix_auto são aceitos.`,
+        reason: `Método '${event.paymentMethod}' proibido na configuração comercial atual de pagamentos.`,
         signatureOutcome,
         normalizedEvent: event,
       };
@@ -73,7 +73,7 @@ export class WebhookVerificationService {
         accepted: false,
         httpStatus: 422,
         errorCode: 'PAYMENT_METHOD_NOT_ALLOWED',
-        reason: `Método '${event.paymentMethod}' não é um método autorizado para ativação PRO (exigido credit_card ou pix_auto).`,
+        reason: `Método '${event.paymentMethod}' não é um método autorizado para ativação PRO.`,
         signatureOutcome,
         normalizedEvent: event,
       };

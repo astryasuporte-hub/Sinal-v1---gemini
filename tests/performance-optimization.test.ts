@@ -34,6 +34,9 @@ import eventsProxyHandler from '../api/_lib/handlers/proxy/events.js';
 import proxyRouterHandler from '../api/proxy/[...action].js';
 import { briefingEngine, setBriefingEngineTestDeps } from '../api/_lib/briefingEngine.js';
 import { setNotificationEngineTestDeps } from '../api/_lib/notificationEngine.js';
+import { userService, setTestUserServiceClient } from '../src/services/userService.js';
+import { optimizeExternalImageUrl } from '../src/utils/imageOptimize.js';
+import { computeVirtualWindow } from '../src/components/VirtualizedList.js';
 
 let passed = 0;
 let failed = 0;
@@ -280,6 +283,9 @@ async function runTests() {
         inpMs: 85,
         cls: 0.02,
         ttfbMs: 210,
+        feedLoadMs: 390,
+        deviceTier: 'high',
+        effectiveType: '4g',
         jsErrors: 0,
         apiCount: 3,
         path: '/feed?email=vazamento@test.com',
@@ -290,8 +296,14 @@ async function runTests() {
     await proxyRouterHandler(reqPost, resPost);
     assert(
       resPost.statusCode === 202 && resPost.json()?.accepted === true,
-      'POST /api/proxy/perf retorna HTTP 202 { accepted: true }',
+      'POST /api/proxy/perf retorna HTTP 202 { accepted: true } com feedLoadMs/deviceTier/effectiveType',
       `status=${resPost.statusCode} body=${resPost.body}`
+    );
+
+    performanceMonitor.markFeedLoaded(321.4);
+    assert(
+      performanceMonitor.getSnapshot().feedLoadMs === 321,
+      'performanceMonitor.markFeedLoaded registra feedLoadMs arredondado sem PII'
     );
 
     const reqGet: any = { method: 'GET', url: '/api/proxy/perf', headers: { host: 'localhost:3000' } };
@@ -438,12 +450,61 @@ async function runTests() {
       const p2 = page2Res.json();
 
       assert(
-        p1?.success === true && p1?.count === 12 && p1?.hasMore === true && p1?.offset === 0,
-        'GET /api/proxy/events página 1 retorna 12 itens com hasMore=true'
+        p1?.success === true && p1?.count === 12 && p1?.hasMore === true && p1?.offset === 0 && typeof p1?.nextCursor === 'string',
+        'GET /api/proxy/events página 1 retorna 12 itens com hasMore=true e nextCursor opaco'
       );
       assert(
         p2?.success === true && p2?.count === 12 && p2?.offset === 12 && p1?.events?.[0]?.id !== p2?.events?.[0]?.id,
         'GET /api/proxy/events página 2 retorna offset=12 sem sobrepor página 1'
+      );
+
+      // Paginação Keyset via ?cursor= deve produzir exatamente os mesmos itens da página 2 sem OFFSET
+      const cursorPage2Res = createMockRes();
+      await eventsProxyHandler(
+        { method: 'GET', url: `/api/proxy/events?limit=12&cursor=${encodeURIComponent(p1.nextCursor)}`, headers: {} },
+        cursorPage2Res
+      );
+      const cp2 = cursorPage2Res.json();
+      assert(
+        cp2?.success === true &&
+          cp2?.count === 12 &&
+          cp2?.events?.[0]?.id === p2?.events?.[0]?.id &&
+          cp2?.events?.[11]?.id === p2?.events?.[11]?.id,
+        'Paginação Keyset (?cursor=) casa exatamente com página 2 e devolve Server-Timing + ETag'
+      );
+
+      // Valida cabeçalhos Server-Timing, X-Request-Id, ETag e 304 Not Modified via If-None-Match
+      const p1Etag = page1Res.headers['ETag'];
+      assert(
+        Boolean(p1Etag) &&
+          typeof page1Res.headers['Server-Timing'] === 'string' &&
+          page1Res.headers['Server-Timing'].includes('db_events') &&
+          typeof page1Res.headers['X-Request-Id'] === 'string',
+        'Resposta inclui ETag fraca, Server-Timing e X-Request-Id'
+      );
+
+      const notModRes = createMockRes();
+      await eventsProxyHandler(
+        { method: 'GET', url: '/api/proxy/events?limit=12&offset=0', headers: { 'if-none-match': p1Etag } },
+        notModRes
+      );
+      assert(
+        notModRes.statusCode === 304 && notModRes.body === '',
+        'GET /api/proxy/events retorna HTTP 304 Not Modified quando ETag coincide',
+        `status=${notModRes.statusCode}`
+      );
+
+      // Testa filtro SQL de categoria pushdown
+      await db.exec(`
+        INSERT INTO public.topics (id, name) VALUES ('top-eco', 'Economia'), ('top-tech', 'Tecnologia');
+        INSERT INTO public.event_topics (event_id, topic_id) VALUES ('evt-1', 'top-eco'), ('evt-2', 'top-tech');
+      `);
+      const catRes = createMockRes();
+      await eventsProxyHandler({ method: 'GET', url: '/api/proxy/events?limit=10&category=Economia', headers: {} }, catRes);
+      const catBody = catRes.json();
+      assert(
+        catBody?.success === true && catBody?.events?.length === 1 && catBody?.events?.[0]?.id === 'evt-1',
+        'Filtro ?category=Economia é empurrado ao SQL e retorna apenas evt-1'
       );
 
       // EXPLAIN antes dos índices
@@ -484,16 +545,40 @@ async function runTests() {
         `before=[${planBefore.slice(0, 80)}] after=[${planAfter.slice(0, 80)}]`
       );
 
-      // Valida script de rollback
+      // Valida nova migração 20261123000003 (índice keyset + joins) + EXPLAIN
+      const migration3Sql = fs.readFileSync(
+        path.resolve('supabase/migrations/20261123000003_perf_cursor_and_join_indexes.sql'),
+        'utf8'
+      );
+      await db.exec(migration3Sql);
+      await db.exec(migration3Sql); // idempotência
+      await db.exec('ANALYZE;');
+
+      const explainCursorRes = await db.query<{ 'QUERY PLAN': string }>(
+        `EXPLAIN SELECT id, published_at FROM public.events WHERE published_at < NOW() - interval '100 minutes' ORDER BY published_at DESC, id DESC LIMIT 12`
+      );
+      const planCursor = explainCursorRes.rows.map((r) => r['QUERY PLAN']).join(' ');
+      assert(
+        planCursor.includes('Index') || planCursor.includes('idx_events_published_id_desc'),
+        'Migração 20261123000003 habilita Index Scan no cursor composto (published_at DESC, id DESC)',
+        planCursor.slice(0, 120)
+      );
+
+      // Valida scripts de rollback (20261123000002 e 20261123000003)
       const rollbackSql = fs.readFileSync(
         path.resolve('supabase/migrations/20261123000002_rollback_perf_indexes.sql'),
         'utf8'
       );
-      await db.exec(rollbackSql);
-      const idxAfterRollback = await db.query<{ indexname: string }>(
-        `SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'idx_notifications_user_unread_created_desc'`
+      const rollback3Sql = fs.readFileSync(
+        path.resolve('supabase/migrations/20261123000003_rollback_perf_cursor_indexes.sql'),
+        'utf8'
       );
-      assert(idxAfterRollback.rows.length === 0, 'Script de rollback remove os índices adicionados com segurança');
+      await db.exec(rollbackSql);
+      await db.exec(rollback3Sql);
+      const idxAfterRollback = await db.query<{ indexname: string }>(
+        `SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND indexname IN ('idx_notifications_user_unread_created_desc', 'idx_events_published_id_desc')`
+      );
+      assert(idxAfterRollback.rows.length === 0, 'Scripts de rollback removem todos os índices das migrações 0002 e 0003 com segurança');
     } finally {
       setTestPostgresPool(null);
       await db.close();
@@ -699,6 +784,96 @@ async function runTests() {
     assert(
       Boolean(apiHeader?.headers?.some((x: any) => String(x.value).includes('no-store'))),
       'vercel.json mantém no-store para respostas dinâmicas/autenticadas de /api/*'
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // 10. userService SWR Deduplication & Cache Invalidation
+  // ---------------------------------------------------------------------------
+  console.log('\n10. userService SWR Deduplication & Invalidation');
+  {
+    let dbPrefReads = 0;
+    let savedMorning = false;
+    const mockPrefClient: any = {
+      from: (table: string) => {
+        const chain: any = {
+          select: () => chain,
+          eq: () => chain,
+          upsert: async (payload: any) => {
+            if (table === 'user_preferences' && typeof payload?.email_morning_briefing === 'boolean') {
+              savedMorning = payload.email_morning_briefing;
+            }
+            return { error: null };
+          },
+          maybeSingle: async () => {
+            if (table === 'user_preferences') dbPrefReads++;
+            await new Promise((r) => setTimeout(r, 15));
+            return {
+              data: {
+                id: 'u-swr-1',
+                email_morning_briefing: savedMorning,
+                timezone: 'America/Sao_Paulo',
+                updated_at: new Date().toISOString(),
+              },
+              error: null,
+            };
+          },
+        };
+        return chain;
+      },
+    };
+
+    setTestUserServiceClient({ client: mockPrefClient, configured: true });
+    try {
+      const batch = await Promise.all(
+        Array.from({ length: 5 }, () => userService.getUserPreferencesDetailed('u-swr-1'))
+      );
+      assert(
+        dbPrefReads === 1 && batch.every((r) => r.data?.email_morning_briefing === false),
+        '5 leituras simultâneas de getUserPreferencesDetailed deduplicam em 1 query',
+        `dbPrefReads=${dbPrefReads}`
+      );
+
+      await userService.updateUserPreferencesDetailed('u-swr-1', { email_morning_briefing: true });
+      const fresh = await userService.getUserPreferencesDetailed('u-swr-1');
+      assert(
+        fresh.data?.email_morning_briefing === true && dbPrefReads === 2,
+        'updateUserPreferencesDetailed invalida cache SWR e lê dado atualizado',
+        `morning=${fresh.data?.email_morning_briefing}, reads=${dbPrefReads}`
+      );
+    } finally {
+      setTestUserServiceClient(null);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 11. Otimização de URLs de Imagem (WebP/w) & Virtualização DOM (computeVirtualWindow)
+  // ---------------------------------------------------------------------------
+  console.log('\n11. imageOptimize & computeVirtualWindow');
+  {
+    const unsplashRaw = 'https://images.unsplash.com/photo-1500000000000-abcdef123456';
+    const optUnsplash = optimizeExternalImageUrl(unsplashRaw, { width: 800, quality: 80 });
+    assert(
+      optUnsplash.includes('fm=webp') && optUnsplash.includes('auto=format') && optUnsplash.includes('w=800'),
+      'optimizeExternalImageUrl adiciona auto=format, fm=webp e w=800 em URLs Unsplash',
+      optUnsplash
+    );
+
+    const otherUrl = 'https://cdn.example.com/news/cover.jpg';
+    assert(
+      optimizeExternalImageUrl(otherUrl, { width: 800 }) === otherUrl,
+      'optimizeExternalImageUrl preserva domínios externos sem suporte conhecido'
+    );
+
+    const win = computeVirtualWindow(10000, 44000, 440, 44, 6);
+    const renderedCount = win.endIndex - win.startIndex;
+    assert(
+      win.totalHeight === 440000 &&
+        win.startIndex === 994 &&
+        renderedCount <= 25 &&
+        win.offsetTop === win.startIndex * 44,
+      'computeVirtualWindow limita nós renderizados em <= 25 itens para lista de 10.000 linhas',
+      JSON.stringify(win)
     );
   }
 

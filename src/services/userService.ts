@@ -4,6 +4,7 @@
  */
 
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
+import { swrFetch, invalidateRequestCache } from './requestCache';
 
 export type OnboardingStatus = 'NOT_STARTED' | 'IN_PROGRESS' | 'COMPLETED' | 'ERROR';
 
@@ -37,6 +38,7 @@ let testSupabaseOverride: { client: SupabaseClientLike; configured: boolean } | 
 export function setTestUserServiceClient(
   override: { client: any; configured?: boolean } | null
 ): void {
+  invalidateRequestCache('user:prefs:');
   if (override) {
     testSupabaseOverride = {
       client: override.client as SupabaseClientLike,
@@ -297,14 +299,28 @@ export const userService = {
     const { client, configured } = getDb();
     if (!configured || !userId) return { data: null };
 
-    try {
-      const [prefRes, settingsRes] = await Promise.all([
-        client.from('user_preferences').select('*').eq('id', userId).maybeSingle(),
-        client.from('user_settings').select('*').eq('user_id', userId).maybeSingle(),
-      ]);
+    const cacheKey = `user:prefs:${userId}`;
+    const result = await swrFetch(cacheKey, 15_000, async () => {
+      try {
+        const prefCols =
+          'id, email_morning_briefing, email_evening_briefing, email_breaking_alerts, weekend_edition, briefing_email, morning_time, evening_time, timezone, notification_settings, updated_at';
+        const settingsCols =
+          'user_id, email_morning_briefing, email_evening_briefing, email_breaking_alerts, weekend_edition, briefing_email, morning_time, evening_time, timezone, notification_settings, updated_at';
 
-      const prefErr = prefRes.error;
-      const settingsErr = settingsRes.error;
+        let [prefRes, settingsRes] = await Promise.all([
+          client.from('user_preferences').select(prefCols).eq('id', userId).maybeSingle(),
+          client.from('user_settings').select(settingsCols).eq('user_id', userId).maybeSingle(),
+        ]);
+
+        if (prefRes.error && isMissingColumnError(prefRes.error)) {
+          prefRes = await client.from('user_preferences').select('*').eq('id', userId).maybeSingle();
+        }
+        if (settingsRes.error && isMissingColumnError(settingsRes.error)) {
+          settingsRes = await client.from('user_settings').select('*').eq('user_id', userId).maybeSingle();
+        }
+
+        const prefErr = prefRes.error;
+        const settingsErr = settingsRes.error;
 
       if (this.isSessionExpiredError(prefErr) || this.isSessionExpiredError(settingsErr)) {
         return { data: null, error: 'Sua sessão expirou. Faça login novamente.', sessionExpired: true };
@@ -373,10 +389,16 @@ export const userService = {
             : prefData?.updated_at || settingsData?.updated_at,
       };
 
-      return { data: merged };
-    } catch (err: any) {
-      return { data: null, error: err?.message || 'Erro de conexão ao consultar preferências.' };
+        return { data: merged };
+      } catch (err: any) {
+        return { data: null, error: err?.message || 'Erro de conexão ao consultar preferências.' };
+      }
+    });
+
+    if (result?.error || result?.sessionExpired) {
+      invalidateRequestCache(cacheKey);
     }
+    return result;
   },
 
   /**
@@ -568,6 +590,7 @@ export const userService = {
         }
       }
 
+      invalidateRequestCache(`user:prefs:${userId}`);
       return { success: true, updatedAt: nowIso };
     } catch (err: any) {
       return { success: false, error: err?.message || 'Erro de conexão ao salvar preferências.' };

@@ -79,6 +79,7 @@ import { useI18n, useTranslation } from './i18n';
 import { CookieConsentBanner } from './components/CookieConsentBanner';
 import { useDebounce } from './hooks/useDebounce';
 import { runOptimisticMutation } from './utils/optimisticToggle';
+import { performanceMonitor } from './services/performanceMonitor';
 
 // Code splitting de rotas e modais pesados via React.lazy (reduz drasticamente o bundle inicial)
 const LandingPage = lazy(() => import('./components/LandingPage').then((m) => ({ default: m.LandingPage })));
@@ -521,6 +522,7 @@ export default function App() {
         );
         setIsLoading(false);
         hasShownStale = true;
+        performanceMonitor.markFeedLoaded();
         setFeedAnimationKey((k) => k + 1);
         // Não encerra a execução: prossegue com a revalidação assíncrona em segundo plano
       } else {
@@ -549,6 +551,7 @@ export default function App() {
         setEvents(eventsWithViewed);
         // Persiste nas duas camadas (Memória RAM + localStorage)
         rateLimitService.saveCachedFeed(eventsWithViewed);
+        performanceMonitor.markFeedLoaded();
         setLastSyncTime(
           new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
         );
@@ -1552,7 +1555,15 @@ export default function App() {
             <div className="flex items-center gap-3 p-3.5 rounded-xl bg-[#080b12] border border-[#162035]">
               <div className="w-10 h-10 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-sm font-bold text-white overflow-hidden shrink-0">
                 {currentUserAvatar ? (
-                  <img src={currentUserAvatar} alt={currentUser.email} className="w-full h-full object-cover" />
+                  <img
+                    src={currentUserAvatar}
+                    alt={currentUser.email}
+                    width={40}
+                    height={40}
+                    loading="lazy"
+                    decoding="async"
+                    className="w-full h-full object-cover"
+                  />
                 ) : (
                   <span>{(currentUser.email || 'U').substring(0, 2).toUpperCase()}</span>
                 )}
@@ -2503,7 +2514,10 @@ export default function App() {
 
                       <div className="space-y-4">
                         {renderedFeedEvents.map((event, index) => (
-                          <div key={`${event.id}-${activeTab}-${homeCategoryFilter}`}>
+                          <div
+                            key={`${event.id}-${activeTab}-${homeCategoryFilter}`}
+                            className={index >= 4 ? '[content-visibility:auto] [contain-intrinsic-size:auto_280px]' : undefined}
+                          >
                             <EventCard
                               event={event}
                               index={index}

@@ -219,7 +219,7 @@ export const adminService = {
       try {
         const { data: remoteProfiles, error } = await supabase
           .from('profiles')
-          .select('*')
+          .select('id, user_id, email, name, full_name, avatar_url, plan_name, subscription_status, trial_ends_at, is_admin, created_at, updated_at')
           .order('created_at', { ascending: false });
 
         if (!error && remoteProfiles && remoteProfiles.length > 0) {
@@ -262,7 +262,9 @@ export const adminService = {
 
       // Tentar também consultar a tabela user_preferences para resgatar e-mails cadastrados
       try {
-        const { data: remotePrefs } = await supabase.from('user_preferences').select('*');
+        const { data: remotePrefs } = await supabase
+          .from('user_preferences')
+          .select('id, briefing_email, created_at');
         if (remotePrefs && remotePrefs.length > 0) {
           remotePrefs.forEach((pref: any) => {
             if (pref.briefing_email && !registryMap.has(pref.briefing_email.toLowerCase())) {

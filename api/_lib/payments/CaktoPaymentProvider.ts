@@ -24,10 +24,14 @@ import crypto from 'crypto';
 import {
   ALLOWED_CAKTO_METHODS,
   PROHIBITED_PAYMENT_METHODS,
+  getEffectiveAllowedPaymentMethods,
   isAllowedPaymentMethod,
+  isDirectPixApiEnabled,
   isProhibitedPaymentMethod,
+  isTraditionalPixCommercialEnabled,
   normalizePaymentMethod,
   resolvePlanPrice,
+  resolveRecurrenceMode,
 } from '../plans.js';
 import { safeCompare } from '../crypto.js';
 import { CaktoClient, caktoClient } from './CaktoClient.js';
@@ -38,6 +42,7 @@ import type {
   CheckoutSessionInput,
   CheckoutSessionResult,
   NormalizedPaymentWebhookEvent,
+  PixChargePayload,
   ProviderCancelResult,
   ProviderReconcileOrder,
 } from './types.js';
@@ -368,6 +373,10 @@ export class CaktoPaymentProvider implements PaymentProvider {
     );
 
     const unexpectedMethods = detectedMethods.filter((m) => !isAllowedPaymentMethod(m));
+    const effectiveAllowed = getEffectiveAllowedPaymentMethods();
+    const effectiveProhibited = isTraditionalPixCommercialEnabled()
+      ? PROHIBITED_PAYMENT_METHODS.filter((m) => m !== 'pix' && m !== 'pix_avulso')
+      : PROHIBITED_PAYMENT_METHODS;
     if (unexpectedMethods.length > 0) {
       return {
         ready: false,
@@ -376,7 +385,7 @@ export class CaktoPaymentProvider implements PaymentProvider {
         commercialEnabled,
         methodsVerified,
         allowedMethods: ALLOWED_CAKTO_METHODS,
-        prohibitedMethods: PROHIBITED_PAYMENT_METHODS,
+        prohibitedMethods: effectiveProhibited,
         detectedProviderMethods: detectedMethods,
         productMethods,
         offerMethods,
@@ -423,7 +432,7 @@ export class CaktoPaymentProvider implements PaymentProvider {
         commercialEnabled,
         methodsVerified,
         allowedMethods: ALLOWED_CAKTO_METHODS,
-        prohibitedMethods: PROHIBITED_PAYMENT_METHODS,
+        prohibitedMethods: effectiveProhibited,
         detectedProviderMethods: detectedMethods,
         productMethods,
         offerMethods,
@@ -442,7 +451,7 @@ export class CaktoPaymentProvider implements PaymentProvider {
       commercialEnabled,
       methodsVerified,
       allowedMethods: ALLOWED_CAKTO_METHODS,
-      prohibitedMethods: PROHIBITED_PAYMENT_METHODS,
+      prohibitedMethods: effectiveProhibited,
       detectedProviderMethods: detectedMethods,
       productMethods,
       offerMethods,
@@ -458,8 +467,13 @@ export class CaktoPaymentProvider implements PaymentProvider {
 
   async createCheckoutSession(input: CheckoutSessionInput): Promise<CheckoutSessionResult> {
     const plan = resolvePlanPrice(input.planId);
+    const normalizedRequested = input.requestedMethod ? normalizePaymentMethod(input.requestedMethod) : undefined;
+    const effectiveAllowed = getEffectiveAllowedPaymentMethods();
 
-    if (input.requestedMethod && isProhibitedPaymentMethod(input.requestedMethod)) {
+    if (
+      normalizedRequested &&
+      (isProhibitedPaymentMethod(normalizedRequested) || !isAllowedPaymentMethod(normalizedRequested))
+    ) {
       return {
         success: false,
         blocked: true,
@@ -472,7 +486,7 @@ export class CaktoPaymentProvider implements PaymentProvider {
         checkoutId: plan.checkoutId,
         amountCents: plan.amountCents,
         currency: 'BRL',
-        allowedMethods: plan.allowedMethods,
+        allowedMethods: effectiveAllowed,
       };
     }
 
@@ -493,8 +507,40 @@ export class CaktoPaymentProvider implements PaymentProvider {
         checkoutId: plan.checkoutId,
         amountCents: plan.amountCents,
         currency: 'BRL',
-        allowedMethods: plan.allowedMethods,
+        allowedMethods: effectiveAllowed,
       };
+    }
+
+    const resolvedRecurrence = resolveRecurrenceMode({ paymentMethod: normalizedRequested || 'credit_card' });
+    const recurrenceMode =
+      resolvedRecurrence === 'PIX_AUTOMATIC' || resolvedRecurrence === 'PIX_MANUAL_CYCLE'
+        ? resolvedRecurrence
+        : 'CARD_RECURRING';
+
+    // Quando Pix tradicional + API direta estiverem explicitamente habilitados no servidor, gera cobrança Pix real via API Cakto
+    let pixCharge: PixChargePayload | undefined;
+    if (normalizedRequested === 'pix' && isDirectPixApiEnabled() && input.userEmail) {
+      const directRes = await this.client.createDirectPayment({
+        offerId: plan.offerId,
+        paymentMethod: 'pix',
+        customer: {
+          name: input.userName || input.userEmail.split('@')[0] || 'Assinante FatosBR',
+          email: input.userEmail,
+        },
+        idempotencyKey: input.idempotencyKey || input.attemptId,
+        pixExpiresInSeconds: 1800,
+        externalId: input.attemptId,
+      });
+
+      const directData = directRes.data?.data || directRes.data;
+      const extractedPix = this.extractPixPayload(directData, 'pix');
+      if (directRes.ok && extractedPix?.qrCode) {
+        pixCharge = {
+          ...extractedPix,
+          providerOrderId: String(directData?.id || directData?.order_id || '') || undefined,
+          status: 'PENDING',
+        };
+      }
     }
 
     const url = new URL(plan.checkoutBaseUrl);
@@ -506,8 +552,8 @@ export class CaktoPaymentProvider implements PaymentProvider {
     if (input.userName) {
       url.searchParams.set('name', input.userName);
     }
-    if (input.requestedMethod && isAllowedPaymentMethod(input.requestedMethod)) {
-      url.searchParams.set('paymentMethod', normalizePaymentMethod(input.requestedMethod));
+    if (normalizedRequested && isAllowedPaymentMethod(normalizedRequested)) {
+      url.searchParams.set('paymentMethod', normalizedRequested);
     }
 
     return {
@@ -516,13 +562,15 @@ export class CaktoPaymentProvider implements PaymentProvider {
       attemptId: input.attemptId,
       provider: this.id,
       checkoutUrl: url.toString(),
+      pixCharge,
+      recurrenceMode,
       productId: plan.productId,
       offerId: plan.offerId,
       checkoutId: plan.checkoutId,
       amountCents: plan.amountCents,
       currency: 'BRL',
-      allowedMethods: plan.allowedMethods,
-      expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
+      allowedMethods: effectiveAllowed,
+      expiresAt: pixCharge?.expiresAt || new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
     };
   }
 
@@ -718,6 +766,11 @@ export class CaktoPaymentProvider implements PaymentProvider {
       parseIsoOrNull(rawPayload?.createdAt || data?.updatedAt || data?.paidAt || data?.createdAt) ||
       new Date().toISOString();
 
+    const subscriptionPaused = eventType === 'subscription_paused';
+    const refundReason =
+      String(data?.refund_reason || data?.reason || data?.dispute_reason || '').trim() || undefined;
+    const pixData = this.extractPixPayload(data, paymentMethod);
+
     let canonicalAction: CanonicalWebhookAction = 'IGNORE';
     if (eventType === 'purchase_approved' || eventType === 'order_paid') {
       canonicalAction = 'ACTIVATE';
@@ -742,11 +795,17 @@ export class CaktoPaymentProvider implements PaymentProvider {
       canonicalAction = 'CANCEL';
     } else if (eventType === 'subscription_expired') {
       canonicalAction = 'EXPIRE';
+    } else if (eventType === 'pix_expirado' || eventType === 'pix_expired' || eventType === 'order_expired') {
+      canonicalAction = 'PIX_EXPIRED';
     } else if (eventType === 'refund_requested') {
       canonicalAction = 'REFUND_REQUESTED';
-    } else if (eventType === 'refund') {
+    } else if (eventType === 'refund_processing') {
+      canonicalAction = 'REFUND_PROCESSING';
+    } else if (eventType === 'refund_failed') {
+      canonicalAction = 'REFUND_FAILED';
+    } else if (eventType === 'refund' || eventType === 'refunded') {
       canonicalAction = 'REFUND';
-    } else if (eventType === 'chargeback') {
+    } else if (eventType === 'chargeback' || eventType === 'chargeback_open' || eventType === 'dispute') {
       canonicalAction = 'CHARGEBACK';
     } else if (
       eventType === 'waiting_payment' ||
@@ -778,7 +837,64 @@ export class CaktoPaymentProvider implements PaymentProvider {
       periodStart,
       periodEnd,
       nextBillingAt,
+      subscriptionPaused,
+      refundReason,
+      pixData,
       rawPayload,
+    };
+  }
+
+  private extractPixPayload(data: any, normalizedMethod: string): PixChargePayload | undefined {
+    if (!data || typeof data !== 'object') return undefined;
+    const pixObj = data.pix && typeof data.pix === 'object' ? data.pix : null;
+    const qrCode = String(
+      pixObj?.qrCode ||
+        pixObj?.qr_code ||
+        pixObj?.emv ||
+        pixObj?.copiaECola ||
+        pixObj?.copia_e_cola ||
+        data?.pix_qr_code ||
+        data?.qr_code ||
+        ''
+    ).trim();
+    const copiaECola = String(
+      pixObj?.copiaECola ||
+        pixObj?.copia_e_cola ||
+        pixObj?.emv ||
+        pixObj?.qrCode ||
+        pixObj?.qr_code ||
+        ''
+    ).trim();
+    const qrCodeImageUrl = String(
+      pixObj?.qrCodeImageUrl ||
+        pixObj?.qrCodeBase64 ||
+        pixObj?.qr_code_url ||
+        pixObj?.qrcode_image ||
+        ''
+    ).trim();
+    const expiresAt = parseIsoOrNull(
+      pixObj?.expirationDate ||
+        pixObj?.expiresAt ||
+        pixObj?.expires_at ||
+        data?.pix_expires_at ||
+        data?.expirationDate
+    );
+
+    if (!qrCode && !copiaECola && !qrCodeImageUrl && normalizedMethod !== 'pix' && normalizedMethod !== 'pix_auto') {
+      return undefined;
+    }
+    if (!qrCode && !copiaECola && !qrCodeImageUrl && !expiresAt) {
+      return undefined;
+    }
+
+    return {
+      providerOrderId: String(data?.id || data?.order_id || data?.orderId || '').trim() || undefined,
+      pixType: normalizedMethod === 'pix' ? 'PIX_TRADITIONAL' : 'PIX_AUTOMATIC',
+      qrCode: qrCode || undefined,
+      qrCodeImageUrl: qrCodeImageUrl || undefined,
+      copiaECola: copiaECola || qrCode || undefined,
+      expiresAt,
+      status: 'PENDING',
     };
   }
 
@@ -885,6 +1001,8 @@ export class CaktoPaymentProvider implements PaymentProvider {
 
     const paidAt = parseIsoOrNull(order?.paidAt || order?.paid_at || order?.approved_at);
 
+    const normalizedMethod = normalizePaymentMethod(String(order?.paymentMethod || order?.payment_method || ''));
+
     return {
       providerOrderId: String(order?.id || ''),
       providerSubscriptionId: String(order?.subscription?.id || order?.subscription_id || '') || undefined,
@@ -892,7 +1010,7 @@ export class CaktoPaymentProvider implements PaymentProvider {
       customerEmail: String(order?.customer?.email || '').toLowerCase() || undefined,
       productId: String(order?.product?.id || order?.product_id || '') || undefined,
       offerId: String(order?.offer?.id || order?.offer_id || '') || undefined,
-      paymentMethod: normalizePaymentMethod(String(order?.paymentMethod || order?.payment_method || '')),
+      paymentMethod: normalizedMethod,
       amountCents: normalizeCaktoAmountToCents(order?.amount_cents ?? order?.amount) || 0,
       currency: String(order?.currency || 'BRL').toUpperCase(),
       status,
@@ -900,6 +1018,7 @@ export class CaktoPaymentProvider implements PaymentProvider {
       periodStart: parseIsoOrNull(order?.subscription?.current_period_start) || subDetails.periodStart || paidAt,
       periodEnd: parseIsoOrNull(order?.subscription?.current_period_end) || subDetails.periodEnd,
       nextBillingAt: parseIsoOrNull(order?.subscription?.next_payment_date) || subDetails.nextBillingAt,
+      pixData: this.extractPixPayload(order, normalizedMethod),
     };
   }
 }
