@@ -38,6 +38,7 @@ export interface CreateNotificationParams {
   category?: 'acontecimentos' | 'entidades' | 'temas' | 'fontes' | 'atualizacoes';
   eventId?: string;
   entityId?: string;
+  eventRevision?: number;
   metadata?: Record<string, any>;
 }
 
@@ -50,6 +51,8 @@ export interface SegmentedEventDispatchInput {
   entityIds?: string[];
   sourceIds?: string[];
   type?: 'NEWS_HIGH_RELEVANCE' | 'EVENT_UPDATED';
+  eventRevision?: number;
+  significantChangeReason?: string;
 }
 
 export interface UserAlertPreferencesRecord {
@@ -275,6 +278,7 @@ export const notificationEngine = {
       category = 'acontecimentos',
       eventId,
       entityId,
+      eventRevision: rawEventRevision,
       metadata = {},
     } = params;
 
@@ -283,22 +287,41 @@ export const notificationEngine = {
     }
 
     const canonicalType = normalizeNotificationType(type);
+    const eventRevision = Math.max(
+      1,
+      Math.floor(Number(rawEventRevision ?? metadata?.eventRevision ?? 1) || 1)
+    );
     const resolvedBody = String(body || subtitle || title).trim();
     const resolvedSubtitle = String(subtitle || resolvedBody).trim();
-    const enrichedMetadata: Record<string, any> = { ...metadata, notification_type: canonicalType };
+    const enrichedMetadata: Record<string, any> = {
+      ...metadata,
+      notification_type: canonicalType,
+      ...(eventId ? { eventRevision } : {}),
+    };
     const { executeSql: runSql, isPostgresConfigured: pgConfigured, getServerSupabase: getSb } = getDeps();
 
     // 1. Tentar persistência direta via PostgreSQL nativo se configurado
     if (pgConfigured()) {
       const findExistingPg = async (): Promise<string | undefined> => {
         if (eventId) {
-          const existingRes = await runSql(
-            `SELECT id FROM public.notifications
-             WHERE user_id = $1 AND event_id = $2 AND category = $3
-             LIMIT 1`,
-            [userId, eventId, category]
-          );
-          if (existingRes.rows[0]?.id) return String(existingRes.rows[0].id);
+          try {
+            const existingRes = await runSql(
+              `SELECT id FROM public.notifications
+               WHERE user_id = $1 AND event_id = $2 AND category = $3 AND event_revision = $4
+               LIMIT 1`,
+              [userId, eventId, category, eventRevision]
+            );
+            if (existingRes.rows[0]?.id) return String(existingRes.rows[0].id);
+          } catch (colErr: any) {
+            if (!isMissingColumnError(colErr)) throw colErr;
+            const legacyExisting = await runSql(
+              `SELECT id FROM public.notifications
+               WHERE user_id = $1 AND event_id = $2 AND category = $3
+               LIMIT 1`,
+              [userId, eventId, category]
+            );
+            if (legacyExisting.rows[0]?.id) return String(legacyExisting.rows[0].id);
+          }
         }
         if (enrichedMetadata?.briefingId) {
           const existingBriefing = await runSql(
@@ -312,7 +335,11 @@ export const notificationEngine = {
         return undefined;
       };
 
-      const runPgInsert = async (includeBody: boolean, includeSubtitle: boolean) => {
+      const runPgInsert = async (
+        includeBody: boolean,
+        includeSubtitle: boolean,
+        includeEventRevision: boolean
+      ) => {
         const cols = ['user_id', 'type', 'title'];
         const vals: any[] = [userId, canonicalType, title];
         if (includeBody) {
@@ -322,6 +349,10 @@ export const notificationEngine = {
         if (includeSubtitle) {
           cols.push('subtitle');
           vals.push(resolvedSubtitle);
+        }
+        if (includeEventRevision) {
+          cols.push('event_revision');
+          vals.push(eventRevision);
         }
         cols.push('category', 'read', 'event_id', 'entity_id', 'metadata', 'created_at');
         vals.push(
@@ -344,11 +375,15 @@ export const notificationEngine = {
       try {
         let insertRes;
         try {
-          insertRes = await runPgInsert(true, true);
+          insertRes = await runPgInsert(true, true, true);
         } catch (colErr: any) {
           if (!isMissingColumnError(colErr)) throw colErr;
           const msg = String(colErr.message || '').toLowerCase();
-          insertRes = await runPgInsert(!msg.includes('body'), !msg.includes('subtitle'));
+          insertRes = await runPgInsert(
+            !msg.includes('body'),
+            !msg.includes('subtitle'),
+            !msg.includes('event_revision')
+          );
         }
 
         if (insertRes.rows[0]?.id) {
@@ -371,13 +406,26 @@ export const notificationEngine = {
       const supabase = getSb();
 
       if (eventId) {
-        const { data: existing, error: checkErr } = await (supabase as any)
+        let { data: existing, error: checkErr } = await (supabase as any)
           .from('notifications')
           .select('id')
           .eq('user_id', userId)
           .eq('event_id', eventId)
           .eq('category', category)
+          .eq('event_revision', eventRevision)
           .maybeSingle();
+
+        if (checkErr && isMissingColumnError(checkErr)) {
+          const legacyCheck = await (supabase as any)
+            .from('notifications')
+            .select('id')
+            .eq('user_id', userId)
+            .eq('event_id', eventId)
+            .eq('category', category)
+            .maybeSingle();
+          existing = legacyCheck.data;
+          checkErr = legacyCheck.error;
+        }
 
         if (!checkErr && existing?.id) {
           return { success: true, id: existing.id, duplicate: true };
@@ -409,6 +457,7 @@ export const notificationEngine = {
         read_at: null,
         event_id: eventId || null,
         entity_id: entityId || null,
+        event_revision: eventRevision,
         metadata: enrichedMetadata,
       };
 
@@ -418,13 +467,14 @@ export const notificationEngine = {
         .select('id')
         .single();
 
-      // Tolerância estrita apenas para colunas ausentes em esquemas antigos (read_at / subtitle / body)
+      // Tolerância estrita apenas para colunas ausentes em esquemas antigos (read_at / subtitle / body / event_revision)
       if (error && isMissingColumnError(error)) {
         const fallbackPayload = { ...rowPayload };
         const msg = String(error.message || '').toLowerCase();
         if (msg.includes('read_at')) delete fallbackPayload.read_at;
         if (msg.includes('subtitle')) delete fallbackPayload.subtitle;
         if (msg.includes('body')) delete fallbackPayload.body;
+        if (msg.includes('event_revision')) delete fallbackPayload.event_revision;
         const retry = await (supabase as any)
           .from('notifications')
           .insert(fallbackPayload)
@@ -437,13 +487,24 @@ export const notificationEngine = {
       if (error) {
         if (isUniqueViolationError(error)) {
           if (eventId) {
-            const { data: existing } = await (supabase as any)
+            let { data: existing, error: revErr } = await (supabase as any)
               .from('notifications')
               .select('id')
               .eq('user_id', userId)
               .eq('event_id', eventId)
               .eq('category', category)
+              .eq('event_revision', eventRevision)
               .maybeSingle();
+            if (revErr && isMissingColumnError(revErr)) {
+              const legacyExisting = await (supabase as any)
+                .from('notifications')
+                .select('id')
+                .eq('user_id', userId)
+                .eq('event_id', eventId)
+                .eq('category', category)
+                .maybeSingle();
+              existing = legacyExisting.data;
+            }
             return { success: true, id: existing?.id, duplicate: true };
           }
           if (enrichedMetadata?.briefingId) {
@@ -702,7 +763,12 @@ export const notificationEngine = {
           continue;
         }
 
-        const descriptionText = (input.summary || input.title).trim();
+        const eventRevision = Math.max(1, Math.floor(Number(input.eventRevision ?? 1) || 1));
+        const baseDescription = (input.summary || input.title).trim();
+        const descriptionText =
+          eventRevision > 1 && input.significantChangeReason
+            ? `Atualização relevante (rev. ${eventRevision}): ${baseDescription}`
+            : baseDescription;
         const res = await this.createNotification({
           userId,
           type: canonicalType,
@@ -712,7 +778,14 @@ export const notificationEngine = {
           subtitle: descriptionText,
           eventId: input.eventId,
           entityId: chosenEntityId,
-          metadata: { relevanceScore },
+          eventRevision,
+          metadata: {
+            relevanceScore,
+            eventRevision,
+            ...(input.significantChangeReason
+              ? { significantChangeReason: input.significantChangeReason }
+              : {}),
+          },
         });
 
         if (res.duplicate) stats.duplicates++;

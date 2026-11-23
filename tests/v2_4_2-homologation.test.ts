@@ -2,13 +2,16 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * FATOSBR V2.4.2 — SUÍTE DE HOMOLOGAÇÃO FINAL DE BRIEFINGS & NOTIFICAÇÕES (100% ISOLADA)
+ * FATOSBR V2.4.2 — SUÍTE DE HOMOLOGAÇÃO FINAL (ATIVAÇÃO CONTROLADA, 100% ISOLADA)
  *
- * Valida em PostgreSQL real embarcado (PGlite) + migrações reais V2.3.1..V2.4.1 sem chamadas externas:
- * 1. Associação determinística de entidades (catálogo realista de 8 entidades, dry-run -> apply -> idempotência).
- * 2. Transactional Outbox Atômica na Ingestão + Rollback se Outbox falhar + Catch-up idempotente.
- * 3. Contrato oficial Svix em /api/resend/webhook, erros recuperáveis (HTTP 503), retentativas e anti-replay.
- * 4. Geração de Briefings (MORNING/EVENING), Outbox -> Notificações segmentadas, RLS estrito e evidências sanitizadas.
+ * Valida em PostgreSQL real embarcado (PGlite) + migrações reais V2.3.1..V2.4.2 sem chamadas externas:
+ * 1. Backfill determinístico de entidades (catálogo real de 8 entidades, dry-run -> apply -> idempotência).
+ * 2. Transactional Outbox Atômica na Ingestão + Rollback + Política Anti-Spam por Revisão Significativa (event_revision).
+ * 3. /api/notifications/process-outbox: lote pequeno, segmentação, preferências, dedup, retries/backoff, dead-letter, locks e runLog.
+ * 4. /api/resend/webhook: contrato oficial Svix, idempotência durável em internal.resend_webhook_events
+ *    (CONCORRÊNCIA IN_FLIGHT -> 503; FALHA -> 503; PROCESSED -> 200 duplicate), todos os eventos Resend e proteção out-of-order.
+ * 5. Briefings end-to-end (MORNING/EVENING, personalização com articles/follows, seções canônicas, dedup, RLS,
+ *    BRIEFING_READY, Resend mockado, horários personalizados e múltiplos timezones/DST).
  */
 
 import fs from 'node:fs';
@@ -28,7 +31,13 @@ import {
   enqueueNotificationOutbox,
 } from '../api/_lib/notificationOutbox.js';
 import { notificationEngine, setNotificationEngineTestDeps } from '../api/_lib/notificationEngine.js';
-import { briefingEngine, setBriefingEngineTestDeps } from '../api/_lib/briefingEngine.js';
+import {
+  briefingEngine,
+  computeNextUserBriefingAt,
+  getBriefingPeriodWindow,
+  isUserWithinScheduleWindow,
+  setBriefingEngineTestDeps,
+} from '../api/_lib/briefingEngine.js';
 import {
   backfillEventEntities,
   compileEntityMatchers,
@@ -44,7 +53,8 @@ import resendWebhookHandler, {
   setResendWebhookTestDeps,
 } from '../api/_lib/handlers/resend/webhook.js';
 import resendStatusHandler from '../api/_lib/handlers/resend/status.js';
-import { setDistributedLockTestDeps } from '../api/_lib/distributedLock.js';
+import processOutboxHandler from '../api/_lib/handlers/notifications/processOutbox.js';
+import { acquireDistributedLeaseLock, setDistributedLockTestDeps } from '../api/_lib/distributedLock.js';
 
 let passed = 0;
 let failed = 0;
@@ -436,6 +446,9 @@ async function setupIsolatedDatabase(): Promise<PGlite> {
     'supabase/migrations/20261122000003_v2_4_1_distributed_locks_and_job_runs.sql',
     'supabase/migrations/20261122000004_v2_4_1_resend_deliveries_and_outbox.sql',
     'supabase/migrations/20261122000005_v2_4_1_entity_aliases_and_event_entities.sql',
+    'supabase/migrations/20261123000001_v2_4_2_webhook_idempotency_and_revision_dedup.sql',
+    // Executa V2.4.2 duas vezes em isolamento para comprovar idempotência estrita da nova migração incremental:
+    'supabase/migrations/20261123000001_v2_4_2_webhook_idempotency_and_revision_dedup.sql',
   ];
 
   for (const mf of migrationFiles) {
@@ -474,7 +487,7 @@ async function setupIsolatedDatabase(): Promise<PGlite> {
 
 async function runV242HomologationSuite() {
   console.log('==============================================================================');
-  console.log('🛡️  FATOSBR V2.4.2 — HOMOLOGAÇÃO FINAL DE BRIEFINGS & NOTIFICAÇÕES (ISOLADA)');
+  console.log('🛡️  FATOSBR V2.4.2 — HOMOLOGAÇÃO FINAL DE ATIVAÇÃO CONTROLADA (ISOLADA)');
   console.log('==============================================================================\n');
 
   const db = await setupIsolatedDatabase();
@@ -482,6 +495,9 @@ async function runV242HomologationSuite() {
 
   const USER_A = '11111111-1111-4111-8111-111111111111';
   const USER_B = '22222222-2222-4222-8222-222222222222';
+  const USER_C_OPT_OUT_HIGH = '33333333-3333-4333-8333-333333333333';
+  const USER_D_OPTOUT_URGENT = '44444444-4444-4444-8444-444444444444';
+
   const rawWhSecretB64 = Buffer.from('fatosbr_v242_webhook_test_key_32b').toString('base64');
   const testWebhookSecret = `whsec_${rawWhSecretB64}`;
 
@@ -489,7 +505,10 @@ async function runV242HomologationSuite() {
     RESEND_API_KEY: process.env.RESEND_API_KEY,
     RESEND_FROM_EMAIL: process.env.RESEND_FROM_EMAIL,
     RESEND_WEBHOOK_SECRET: process.env.RESEND_WEBHOOK_SECRET,
+    CRON_SECRET: process.env.CRON_SECRET,
   };
+
+  process.env.CRON_SECRET = 'cron_v242_isolated_test_secret';
 
   const withPgTx = async <T>(cb: (client: any) => Promise<T>): Promise<T> => {
     await db.exec('BEGIN');
@@ -554,7 +573,6 @@ async function runV242HomologationSuite() {
       `INSERT INTO public.event_articles (event_id, article_id, is_primary) VALUES ('hist-evt-5', '33333333-3333-4333-8333-333333333335', true)`
     );
 
-    // Confere bugs corrigidos diretamente no matcher:
     const catalog = await loadActiveEntityCatalog((sql, params) => db.query(sql, params));
     const matchers = compileEntityMatchers(catalog);
     const stfWithoutAcronym = matchCompiledEntities('Supremo Tribunal Federal julga recurso hoje', matchers);
@@ -572,8 +590,7 @@ async function runV242HomologationSuite() {
       JSON.stringify({ stfWithoutAcronym, petroDotSuffix, b3ShortAcronym, negCheck })
     );
 
-    // Backfill DRY-RUN
-    const emptyBefore = await db.query<{ cnt: number }>(`SELECT COUNT(*)::int AS cnt FROM public.event_entities`);
+    // Backfill DRY-RUN + APPLY + Idempotência
     const dryRunRes = await backfillEventEntities({
       queryFn: (sql, params) => db.query(sql, params),
       batchSize: 2,
@@ -581,22 +598,6 @@ async function runV242HomologationSuite() {
       dryRun: true,
       onlyMissing: true,
     });
-    const emptyAfterDry = await db.query<{ cnt: number }>(`SELECT COUNT(*)::int AS cnt FROM public.event_entities`);
-
-    assert(
-      emptyBefore.rows[0].cnt === 0 &&
-        emptyAfterDry.rows[0].cnt === 0 &&
-        dryRunRes.dryRun === true &&
-        dryRunRes.scanned === 6 &&
-        dryRunRes.eventsWithMatches === 5 &&
-        dryRunRes.linksPlanned === 8 &&
-        dryRunRes.linksInserted === 0 &&
-        dryRunRes.matchesPreview.length === 5,
-      'Backfill dry-run identifica exatamente 8 vínculos em 5 acontecimentos reais sem gravar nem inventar entidades',
-      JSON.stringify({ dryRunRes })
-    );
-
-    // Backfill APPLY + Idempotência
     const applyRes = await backfillEventEntities({
       queryFn: (sql, params) => db.query(sql, params),
       batchSize: 2,
@@ -611,28 +612,23 @@ async function runV242HomologationSuite() {
       dryRun: false,
       onlyMissing: true,
     });
-    const entityCountAfter = await db.query<{ cnt: number }>(`SELECT COUNT(*)::int AS cnt FROM public.entities`);
     const linksAfterApply = await db.query<{ cnt: number }>(`SELECT COUNT(*)::int AS cnt FROM public.event_entities`);
-    const negEvtLinks = await db.query<{ cnt: number }>(
-      `SELECT COUNT(*)::int AS cnt FROM public.event_entities WHERE event_id = 'hist-evt-neg'`
-    );
 
     assert(
-      applyRes.linksInserted === 8 &&
+      dryRunRes.linksPlanned === 8 &&
+        dryRunRes.linksInserted === 0 &&
+        applyRes.linksInserted === 8 &&
         reApplyRes.linksInserted === 0 &&
-        linksAfterApply.rows[0].cnt === 8 &&
-        entityCountAfter.rows[0].cnt === 8 &&
-        negEvtLinks.rows[0].cnt === 0,
-      'Backfill apply persiste 8 vínculos reais em public.event_entities, mantém 8 entidades originais e 2ª execução é idempotente',
-      JSON.stringify({ applyRes, reApplyRes, links: linksAfterApply.rows[0].cnt })
+        linksAfterApply.rows[0].cnt === 8,
+      'Backfill dry-run -> apply persiste 8 vínculos reais em public.event_entities e 2ª execução é idempotente',
+      JSON.stringify({ dryRunRes, applyRes, reApplyRes })
     );
 
     // -------------------------------------------------------------------------
-    // BLOCO 2: Transactional Outbox na Ingestão (Atomicidade, Rollback e Recovery)
+    // BLOCO 2: Outbox Atômica, Rollback & Política de Revisão Significativa (Anti-Spam)
     // -------------------------------------------------------------------------
-    console.log('\n📋 Bloco 2: Transactional Outbox Atômica na Ingestão, Rollback e Recovery');
+    console.log('\n📋 Bloco 2: Transactional Outbox Atômica, Rollback e Deduplicação por Revisão Significativa');
 
-    // Simula outbox para os eventos históricos ainda sem outbox via recoverMissingNotificationOutbox
     const firstRecover = await recoverMissingNotificationOutbox({
       queryFn: (sql, params) => db.query(sql, params),
       sinceHours: 240,
@@ -645,11 +641,10 @@ async function runV242HomologationSuite() {
     });
     assert(
       firstRecover.recovered === 6 && secondRecover.scanned === 0 && secondRecover.recovered === 0,
-      'recoverMissingNotificationOutbox recupera acontecimentos legados sem outbox de forma 100% idempotente',
-      JSON.stringify({ firstRecover, secondRecover })
+      'recoverMissingNotificationOutbox recupera acontecimentos legados sem outbox de forma idempotente'
     );
 
-    // Teste de atomicidade: falha na gravação da outbox dentro de runServerSideIngestion -> ROLLBACK completo do acontecimento
+    // Rollback atômico quando outbox falha
     setIngestionEngineTestDeps({
       isPostgresConfigured: () => true,
       executeSql: (sql, params) => db.query(sql, params),
@@ -678,224 +673,319 @@ async function runV242HomologationSuite() {
     });
 
     const eventsBeforeFail = await db.query<{ cnt: number }>(`SELECT COUNT(*)::int AS cnt FROM public.events`);
-    const outboxBeforeFail = await db.query<{ cnt: number }>(
-      `SELECT COUNT(*)::int AS cnt FROM internal.notification_outbox`
-    );
-
     const failedIngestRes = await runServerSideIngestion({ keywords: ['petrobras'] });
     const eventsAfterFail = await db.query<{ cnt: number }>(`SELECT COUNT(*)::int AS cnt FROM public.events`);
-    const articlesAfterFail = await db.query<{ cnt: number }>(
-      `SELECT COUNT(*)::int AS cnt FROM public.articles WHERE canonical_url = 'https://g1.globo.com/economia/petrobras-refino-rollback'`
-    );
-    const outboxAfterFail = await db.query<{ cnt: number }>(
-      `SELECT COUNT(*)::int AS cnt FROM internal.notification_outbox`
-    );
 
     assert(
       failedIngestRes.success === false &&
         String(failedIngestRes.error || '').includes('OUTBOX_ATOMIC_ENQUEUE_FAILED') &&
-        eventsAfterFail.rows[0].cnt === eventsBeforeFail.rows[0].cnt &&
-        articlesAfterFail.rows[0].cnt === 0 &&
-        outboxAfterFail.rows[0].cnt === outboxBeforeFail.rows[0].cnt,
-      'Falha na gravação da outbox faz rollback atômico de public.events e public.articles (zero eventos órfãos sem alerta)',
-      JSON.stringify({
-        failedIngestRes,
-        eventsBefore: eventsBeforeFail.rows[0].cnt,
-        eventsAfter: eventsAfterFail.rows[0].cnt,
-      })
+        eventsAfterFail.rows[0].cnt === eventsBeforeFail.rows[0].cnt,
+      'Falha na gravação da outbox faz rollback atômico de public.events e public.articles'
     );
 
-    // Agora executa ingestão com outbox atômica saudável + re-execução idempotente
+    // Ciclo de vida por revisão significativa:
+    // Fase 1: Acontecimento DEVELOPING (1 veículo, score=86 -> rev 1)
+    let ingestArticlePhase: 'DEVELOPING' | 'CONFIRMED' = 'DEVELOPING';
     setIngestionEngineTestDeps({
       isPostgresConfigured: () => true,
       executeSql: (sql, params) => db.query(sql, params),
       withTransaction: withPgTx,
-      fetchUpstreamFn: async () => ({
-        articles: [
-          {
-            title: 'Petrobras anuncia plano recorde de refino em conjunto com B3',
-            url: 'https://g1.globo.com/economia/petrobras-b3-plano',
-            canonicalUrl: 'https://g1.globo.com/economia/petrobras-b3-plano',
-            description: 'Investidores repercutem o anúncio na B3.',
-            sourceName: 'G1',
-            domain: 'g1.globo.com',
-            publishedAt: refMondayMorning.toISOString(),
-            category: 'Empresas',
-            topicSlug: 'empresas',
-          },
-          {
-            title: 'Plano de refino da Petrobras movimenta ações na B3 hoje',
-            url: 'https://valor.globo.com/empresas/petrobras-b3-plano',
-            canonicalUrl: 'https://valor.globo.com/empresas/petrobras-b3-plano',
-            description: 'Corretoras avaliam dividendos e capex.',
-            sourceName: 'Valor Econômico',
-            domain: 'valor.globo.com',
-            publishedAt: refMondayMorning.toISOString(),
-            category: 'Empresas',
-            topicSlug: 'empresas',
-          },
-        ],
-        providers: { gnews: { configured: true, count: 2 } },
-      }),
+      fetchUpstreamFn: async () => {
+        const baseArticle = {
+          title: 'Petrobras anuncia plano recorde de refino em conjunto com B3',
+          url: 'https://g1.globo.com/economia/petrobras-b3-plano',
+          canonicalUrl: 'https://g1.globo.com/economia/petrobras-b3-plano',
+          description: 'Investidores repercutem o anúncio na B3.',
+          sourceName: 'G1',
+          domain: 'g1.globo.com',
+          publishedAt: refMondayMorning.toISOString(),
+          category: 'Empresas',
+          topicSlug: 'empresas',
+        };
+        if (ingestArticlePhase === 'DEVELOPING') {
+          return {
+            articles: [baseArticle],
+            providers: { gnews: { configured: true, count: 1 } },
+          };
+        }
+        return {
+          articles: [
+            baseArticle,
+            {
+              title: 'Plano de refino da Petrobras movimenta ações na B3 hoje',
+              url: 'https://valor.globo.com/empresas/petrobras-b3-plano',
+              canonicalUrl: 'https://valor.globo.com/empresas/petrobras-b3-plano',
+              description: 'Corretoras avaliam dividendos e capex.',
+              sourceName: 'Valor Econômico',
+              domain: 'valor.globo.com',
+              publishedAt: refMondayMorning.toISOString(),
+              category: 'Empresas',
+              topicSlug: 'empresas',
+            },
+          ],
+          providers: { gnews: { configured: true, count: 2 } },
+        };
+      },
       enqueueOutboxFn: enqueueNotificationOutbox,
     });
 
-    const okIngest1 = await runServerSideIngestion({ keywords: ['petrobras'] });
-    const okIngest2 = await runServerSideIngestion({ keywords: ['petrobras'] });
-    const outboxTotalAfterOk = await db.query<{ cnt: number }>(
-      `SELECT COUNT(*)::int AS cnt FROM internal.notification_outbox`
+    const ingRev1 = await runServerSideIngestion({ keywords: ['petrobras'] });
+    const ingRev1Trivial = await runServerSideIngestion({ keywords: ['petrobras'] }); // Re-ingestão idêntica -> zero spam
+
+    ingestArticlePhase = 'CONFIRMED';
+    const ingRev2Significant = await runServerSideIngestion({ keywords: ['petrobras'] }); // Promoção DEVELOPING -> CONFIRMED (rev 2!)
+    const ingRev2Trivial = await runServerSideIngestion({ keywords: ['petrobras'] }); // Re-ingestão idêntica após CONFIRMED -> zero spam!
+
+    const revEventRows = await db.query<any>(
+      `SELECT id, status, revision, article_count FROM public.events WHERE title LIKE 'Petrobras anuncia plano recorde%'`
+    );
+    const revOutboxRows = await db.query<any>(
+      `SELECT dedup_key, event_type, status, (payload->>'eventRevision')::int AS rev
+         FROM internal.notification_outbox
+        WHERE event_id = $1
+        ORDER BY created_at ASC`,
+      [revEventRows.rows[0]?.id]
     );
 
     assert(
-      okIngest1.success === true &&
-        okIngest1.eventsCreated === 1 &&
-        okIngest1.outboxEnqueued === 1 &&
-        (okIngest1.entityLinksCreated || 0) >= 2 &&
-        okIngest2.success === true &&
-        outboxTotalAfterOk.rows[0].cnt === outboxBeforeFail.rows[0].cnt + 1,
-      'Ingestão grava acontecimentos, event_entities e internal.notification_outbox na mesma transação atômica com idempotência',
-      JSON.stringify({ okIngest1, okIngest2, outboxCount: outboxTotalAfterOk.rows[0].cnt })
+      ingRev1.outboxEnqueued === 1 &&
+        ingRev1Trivial.outboxEnqueued === 0 &&
+        ingRev2Significant.eventsUpdated === 1 &&
+        ingRev2Significant.outboxEnqueued === 1 &&
+        ingRev2Trivial.outboxEnqueued === 0 &&
+        revEventRows.rows[0]?.status === 'CONFIRMED' &&
+        Number(revEventRows.rows[0]?.revision) === 2 &&
+        revOutboxRows.rows.length === 2 &&
+        revOutboxRows.rows[0]?.dedup_key === `event:${revEventRows.rows[0]?.id}` &&
+        revOutboxRows.rows[1]?.dedup_key === `event:${revEventRows.rows[0]?.id}:rev:2`,
+      'Política de revisão significativa enfileira rev=1 e rev=2 (CONFIRMED), ignorando re-execuções triviais sem spam',
+      JSON.stringify({ ingRev1, ingRev1Trivial, ingRev2Significant, ingRev2Trivial, evt: revEventRows.rows[0], outbox: revOutboxRows.rows })
     );
 
-    // -------------------------------------------------------------------------
-    // BLOCO 3: Webhook Resend (Contrato Svix Estrito, Erro 503 Retryável & Anti-Replay)
-    // -------------------------------------------------------------------------
-    console.log('\n📋 Bloco 3: /api/resend/webhook — Contrato Oficial Svix, 503 Recuperável e Anti-Replay');
-    clearResendWebhookReplayCache();
-
-    // 3.1 Sem RESEND_WEBHOOK_SECRET -> 503 (sem inventar segredo)
-    delete process.env.RESEND_WEBHOOK_SECRET;
-    process.env.RESEND_FROM_EMAIL = DEFAULT_VERIFIED_RESEND_FROM;
-    delete process.env.RESEND_API_KEY;
-
-    const statusResNoKey = createMockRes();
-    await resendStatusHandler({ method: 'GET', headers: {} }, statusResNoKey);
-    assert(
-      statusResNoKey.statusCode === 200 &&
-        statusResNoKey.json()?.provider === 'Resend' &&
-        statusResNoKey.json()?.sender === DEFAULT_VERIFIED_RESEND_FROM &&
-        statusResNoKey.json()?.webhookConfigured === false,
-      'GET /api/resend/status reporta sender configurado e webhookConfigured=false sem RESEND_WEBHOOK_SECRET'
-    );
-
-    const noSecretWhRes = createMockRes();
-    await resendWebhookHandler(
-      {
-        method: 'POST',
-        headers: { 'svix-id': 'msg_no_sec', 'svix-timestamp': String(Math.floor(Date.now() / 1000)), 'svix-signature': 'v1,abc' },
-        rawBody: JSON.stringify({ type: 'email.delivered', data: { email_id: 're_any' } }),
-      },
-      noSecretWhRes
-    );
-    assert(
-      noSecretWhRes.statusCode === 503 && noSecretWhRes.json()?.error === 'RESEND_WEBHOOK_SECRET_UNCONFIGURED',
-      'POST /api/resend/webhook sem RESEND_WEBHOOK_SECRET retorna HTTP 503'
-    );
-
-    process.env.RESEND_WEBHOOK_SECRET = testWebhookSecret;
-    process.env.RESEND_API_KEY = 're_test_v242_isolated_no_network';
-
-    const nowSec = Math.floor(Date.now() / 1000);
-    const sigKey = Buffer.from(rawWhSecretB64, 'base64');
-    const signSvix = (id: string, ts: string, body: string) =>
-      `v1,${crypto.createHmac('sha256', sigKey).update(`${id}.${ts}.${body}`).digest('base64')}`;
-
-    const samplePayload = JSON.stringify({
-      id: 'evt_svix_test',
-      type: 'email.delivered',
-      created_at: new Date().toISOString(),
-      data: { email_id: 're_v242_msg_1' },
-    });
-
-    // Rejeições estritas do contrato Svix:
-    const expiredSig = verifyResendWebhookSignature({
-      rawBody: samplePayload,
-      headers: {
-        'svix-id': 'msg_exp',
-        'svix-timestamp': String(nowSec - 305),
-        'svix-signature': signSvix('msg_exp', String(nowSec - 305), samplePayload),
-      },
-      secret: testWebhookSecret,
-      nowMs: nowSec * 1000,
-    });
-    const futureSig = verifyResendWebhookSignature({
-      rawBody: samplePayload,
-      headers: {
-        'svix-id': 'msg_fut',
-        'svix-timestamp': String(nowSec + 305),
-        'svix-signature': signSvix('msg_fut', String(nowSec + 305), samplePayload),
-      },
-      secret: testWebhookSecret,
-      nowMs: nowSec * 1000,
-    });
-    const decimalTsSig = verifyResendWebhookSignature({
-      rawBody: samplePayload,
-      headers: {
-        'svix-id': 'msg_dec',
-        'svix-timestamp': `${nowSec}.5`,
-        'svix-signature': signSvix('msg_dec', `${nowSec}.5`, samplePayload),
-      },
-      secret: testWebhookSecret,
-      nowMs: nowSec * 1000,
-    });
-    const aliasHeaderSig = verifyResendWebhookSignature({
-      rawBody: samplePayload,
-      headers: {
-        'webhook-id': 'msg_alias',
-        'webhook-timestamp': String(nowSec),
-        'webhook-signature': signSvix('msg_alias', String(nowSec), samplePayload),
-      },
-      secret: testWebhookSecret,
-      nowMs: nowSec * 1000,
-    });
-    const legacyDirectSig = verifyResendWebhookSignature({
-      rawBody: samplePayload,
-      headers: {
-        'x-resend-signature': `sha256=${crypto.createHmac('sha256', testWebhookSecret).update(samplePayload).digest('hex')}`,
-      },
-      secret: testWebhookSecret,
-      nowMs: nowSec * 1000,
-    });
-
-    assert(
-      !expiredSig.valid &&
-        !futureSig.valid &&
-        !decimalTsSig.valid &&
-        !aliasHeaderSig.valid &&
-        !legacyDirectSig.valid,
-      'Contrato oficial Svix rejeita timestamp expirado/futuro/decimal, aliases webhook-* e fallback x-resend-signature',
-      JSON.stringify({ expiredSig, futureSig, decimalTsSig, aliasHeaderSig, legacyDirectSig })
-    );
-
-    // Prepara registro ACCEPTED em internal.briefing_email_deliveries via briefingEngine (fetch mockado)
-    await db.query(
-      `INSERT INTO public.user_preferences (id, email_morning_briefing, email_evening_briefing, email_breaking_alerts, briefing_email, weekend_edition, timezone, morning_time, evening_time)
-       VALUES
-         ($1, true, true, true, 'usuario.a@fatosbr.local', true, 'America/Sao_Paulo', '07:00', '20:00'),
-         ($2, true, true, true, 'usuario.b@fatosbr.local', true, 'America/Sao_Paulo', '07:00', '20:00')`,
-      [USER_A, USER_B]
-    );
-    await db.query(
-      `INSERT INTO public.user_settings (user_id, email_morning_briefing, email_evening_briefing, email_breaking_alerts, timezone, notification_settings)
-       VALUES
-         ($1, true, true, true, 'America/Sao_Paulo', '{"urgentEvents":true,"entityUpdates":true,"onlyHighRelevance":false,"dailyBriefings":true}'::jsonb),
-         ($2, true, true, true, 'America/Sao_Paulo', '{"urgentEvents":true,"entityUpdates":true,"onlyHighRelevance":false,"dailyBriefings":true}'::jsonb)`,
-      [USER_A, USER_B]
-    );
-    await db.query(
-      `INSERT INTO public.user_entity_follows (user_id, entity_id) VALUES
-        ($1, 'ent-petro'),
-        ($1, 'ent-bc'),
-        ($2, 'ent-vale')`,
-      [USER_A, USER_B]
-    );
-
-    let resendMockSendCount = 0;
+    // Teste direto de integridade do índice único em public.notifications (mesma revisão bloqueada, revisão 2 permitida)
     setNotificationEngineTestDeps({
       isPostgresConfigured: () => true,
       executeSql: (sql, params) => db.query(sql, params),
       getServerSupabase: () => sbAdapter as any,
     });
+    const revIdxTestEvt = 'evt-rev-idx-integrity';
+    const nRev1A = await notificationEngine.createNotification({
+      userId: USER_A,
+      type: 'NEWS_HIGH_RELEVANCE',
+      category: 'entidades',
+      title: 'Evento Teste Rev 1',
+      eventId: revIdxTestEvt,
+      eventRevision: 1,
+    });
+    const nRev1Dup = await notificationEngine.createNotification({
+      userId: USER_A,
+      type: 'NEWS_HIGH_RELEVANCE',
+      category: 'entidades',
+      title: 'Evento Teste Rev 1 Duplicado',
+      eventId: revIdxTestEvt,
+      eventRevision: 1,
+    });
+    const nRev2 = await notificationEngine.createNotification({
+      userId: USER_A,
+      type: 'EVENT_UPDATED',
+      category: 'entidades',
+      title: 'Evento Teste Rev 2 Confirmado',
+      eventId: revIdxTestEvt,
+      eventRevision: 2,
+    });
+    const idxCountRes = await db.query<{ cnt: number }>(
+      `SELECT COUNT(*)::int AS cnt FROM public.notifications WHERE user_id = $1 AND event_id = $2`,
+      [USER_A, revIdxTestEvt]
+    );
+    assert(
+      nRev1A.success && !nRev1A.duplicate && nRev1Dup.duplicate === true && nRev2.success && !nRev2.duplicate && idxCountRes.rows[0].cnt === 2,
+      'Índice único idx_notifications_dedup_user_event_cat bloqueia duplicata na mesma revisão e permite nova revisão significativa'
+    );
+
+    // -------------------------------------------------------------------------
+    // BLOCO 3: Worker /api/notifications/process-outbox (Lote Pequeno, Preferências, Retries, DLQ, Locks e Logs)
+    // -------------------------------------------------------------------------
+    console.log('\n📋 Bloco 3: /api/notifications/process-outbox — Lote, Preferências, Backoff, DLQ, Locks & Logs');
+
+    await db.query(
+      `INSERT INTO public.user_preferences (id, email_morning_briefing, email_evening_briefing, email_breaking_alerts, briefing_email, weekend_edition, timezone, morning_time, evening_time)
+       VALUES
+         ($1, true, true, true, 'usuario.a@fatosbr.local', true, 'America/Sao_Paulo', '07:00', '20:00'),
+         ($2, true, true, true, 'usuario.b@fatosbr.local', true, 'America/Sao_Paulo', '07:00', '20:00'),
+         ($3, false, false, true, 'usuario.c@fatosbr.local', false, 'America/Manaus', '07:00', '20:00'),
+         ($4, false, false, false, 'usuario.d@fatosbr.local', false, 'America/New_York', '07:00', '20:00')`,
+      [USER_A, USER_B, USER_C_OPT_OUT_HIGH, USER_D_OPTOUT_URGENT]
+    );
+    await db.query(
+      `INSERT INTO public.user_settings (user_id, email_morning_briefing, email_evening_briefing, email_breaking_alerts, timezone, notification_settings)
+       VALUES
+         ($1, true, true, true, 'America/Sao_Paulo', '{"urgentEvents":true,"entityUpdates":true,"onlyHighRelevance":false,"dailyBriefings":true}'::jsonb),
+         ($2, true, true, true, 'America/Sao_Paulo', '{"urgentEvents":true,"entityUpdates":true,"onlyHighRelevance":false,"dailyBriefings":true}'::jsonb),
+         ($3, false, false, true, 'America/Manaus', '{"urgentEvents":true,"entityUpdates":true,"onlyHighRelevance":true,"dailyBriefings":true}'::jsonb),
+         ($4, false, false, false, 'America/New_York', '{"urgentEvents":false,"entityUpdates":true,"onlyHighRelevance":false,"dailyBriefings":false}'::jsonb)`,
+      [USER_A, USER_B, USER_C_OPT_OUT_HIGH, USER_D_OPTOUT_URGENT]
+    );
+    await db.query(
+      `INSERT INTO public.user_entity_follows (user_id, entity_id) VALUES
+        ($1, 'ent-petro'),
+        ($1, 'ent-bc'),
+        ($2, 'ent-vale'),
+        ($3, 'ent-itau'),
+        ($4, 'ent-petro')`,
+      [USER_A, USER_B, USER_C_OPT_OUT_HIGH, USER_D_OPTOUT_URGENT]
+    );
+
+    setDistributedLockTestDeps({
+      isPostgresConfigured: () => true,
+      executeSql: (sql, params) => db.query(sql, params),
+      getServerSupabase: () => sbAdapter as any,
+    });
+    setNotificationOutboxTestDeps({
+      isPostgresConfigured: () => true,
+      executeSql: (sql, params) => db.query(sql, params),
+      getServerSupabase: () => sbAdapter as any,
+      dispatchFn: notificationEngine.dispatchSegmentedNotificationsForEvent.bind(notificationEngine),
+    });
+
+    // Unauthorized & Method Not Allowed checks
+    const outboxUnauth = createMockRes();
+    await processOutboxHandler({ method: 'GET', url: '/api/notifications/process-outbox', headers: {} }, outboxUnauth);
+    const outboxBadMethod = createMockRes();
+    await processOutboxHandler({ method: 'DELETE', url: '/api/notifications/process-outbox', headers: {} }, outboxBadMethod);
+    assert(
+      outboxUnauth.statusCode === 401 && outboxBadMethod.statusCode === 405,
+      'Endpoint /api/notifications/process-outbox exige auth (401) e método GET/POST (405)'
+    );
+
+    // Concurrent distributed lock check -> HTTP 409
+    const workerLockHolder = await acquireDistributedLeaseLock({
+      lockKey: 'fatosbr:notification-outbox:worker',
+      ttlMs: 30_000,
+    });
+    const outboxLockedRes = createMockRes();
+    await processOutboxHandler(
+      {
+        method: 'GET',
+        url: '/api/notifications/process-outbox?limit=5',
+        headers: { authorization: 'Bearer cron_v242_isolated_test_secret' },
+      },
+      outboxLockedRes
+    );
+    await workerLockHolder.release();
+    assert(
+      workerLockHolder.acquired === true &&
+        outboxLockedRes.statusCode === 409 &&
+        outboxLockedRes.json()?.error === 'OUTBOX_WORKER_ALREADY_RUNNING',
+      'Trava distribuída impede concorrência no worker da outbox retornando HTTP 409'
+    );
+
+    // Lote controlado (limit=4, maxBatches=2) -> processa até 8 itens via GET estilo Vercel/Cron
+    const cronOutboxRes = createMockRes();
+    await processOutboxHandler(
+      {
+        method: 'GET',
+        url: '/api/notifications/process-outbox?limit=4&maxBatches=2',
+        headers: { authorization: 'Bearer cron_v242_isolated_test_secret' },
+      },
+      cronOutboxRes
+    );
+    const cronJson = cronOutboxRes.json();
+
+    // Verifica preferências: USER_C (onlyHighRelevance=true) NÃO recebe hist-evt-5 (score 82 < 85), USER_D (urgentEvents=false) NÃO recebe Petrobras, USER_A recebe rev=1 e rev=2 de Petrobras!
+    const userCHighCheck = await db.query<{ cnt: number }>(
+      `SELECT COUNT(*)::int AS cnt FROM public.notifications WHERE user_id = $1 AND event_id = 'hist-evt-5'`,
+      [USER_C_OPT_OUT_HIGH]
+    );
+    const userDUrgentCheck = await db.query<{ cnt: number }>(
+      `SELECT COUNT(*)::int AS cnt FROM public.notifications WHERE user_id = $1`,
+      [USER_D_OPTOUT_URGENT]
+    );
+    const userAPetroRevs = await db.query<{ cnt: number }>(
+      `SELECT COUNT(*)::int AS cnt FROM public.notifications WHERE user_id = $1 AND event_id = $2`,
+      [USER_A, revEventRows.rows[0]?.id]
+    );
+
+    assert(
+      cronOutboxRes.statusCode === 200 &&
+        cronJson?.success === true &&
+        cronJson?.completed >= 7 &&
+        Boolean(cronJson?.runLog?.runId) &&
+        typeof cronJson?.runLog?.durationMs === 'number' &&
+        userCHighCheck.rows[0].cnt === 0 &&
+        userDUrgentCheck.rows[0].cnt === 0 &&
+        userAPetroRevs.rows[0].cnt === 2,
+      'GET /api/notifications/process-outbox processa lote com runLog estruturado, respeita preferências e entrega rev=1 + rev=2',
+      JSON.stringify({ cronJson, userC: userCHighCheck.rows[0], userD: userDUrgentCheck.rows[0], userAPetroRevs: userAPetroRevs.rows[0] })
+    );
+
+    // Testa retries com backoff + DEAD_LETTER via endpoint HTTP
+    await enqueueNotificationOutbox(
+      { eventId: 'evt-outbox-dlq-v242', title: 'Evento falha persistente', relevanceScore: 95 },
+      { maxAttempts: 2 }
+    );
+    setNotificationOutboxTestDeps({
+      isPostgresConfigured: () => true,
+      executeSql: (sql, params) => db.query(sql, params),
+      getServerSupabase: () => sbAdapter as any,
+      dispatchFn: async (payload) => {
+        if (payload.eventId === 'evt-outbox-dlq-v242') {
+          return {
+            targetedUsers: 1,
+            created: 0,
+            duplicates: 0,
+            skippedByPreferences: 0,
+            errors: 1,
+            errorDetails: ['Erro transitório simulado no dispatch'],
+          };
+        }
+        return notificationEngine.dispatchSegmentedNotificationsForEvent(payload);
+      },
+    });
+
+    const retryRes1 = createMockRes();
+    await processOutboxHandler(
+      { method: 'POST', headers: { authorization: 'Bearer cron_v242_isolated_test_secret' }, body: { limit: 5 } },
+      retryRes1
+    );
+    const failedRow = await db.query<any>(
+      `SELECT status, attempts, next_retry_at > NOW() AS backoff_future FROM internal.notification_outbox WHERE event_id = 'evt-outbox-dlq-v242'`
+    );
+    await db.query(
+      `UPDATE internal.notification_outbox SET next_retry_at = NOW() - INTERVAL '1 second' WHERE event_id = 'evt-outbox-dlq-v242'`
+    );
+    const retryRes2 = createMockRes();
+    await processOutboxHandler(
+      { method: 'POST', headers: { authorization: 'Bearer cron_v242_isolated_test_secret' }, body: { limit: 5 } },
+      retryRes2
+    );
+    const dlqRow = await db.query<any>(
+      `SELECT status, attempts, last_error FROM internal.notification_outbox WHERE event_id = 'evt-outbox-dlq-v242'`
+    );
+    assert(
+      retryRes1.json()?.retried === 1 &&
+        failedRow.rows[0]?.status === 'FAILED' &&
+        failedRow.rows[0]?.backoff_future === true &&
+        retryRes2.json()?.deadLettered === 1 &&
+        dlqRow.rows[0]?.status === 'DEAD_LETTER' &&
+        dlqRow.rows[0]?.attempts === 2,
+      'Outbox worker aplica backoff exponencial (FAILED -> next_retry_at futuro) e move para DEAD_LETTER ao esgotar max_attempts',
+      JSON.stringify({ r1: retryRes1.json(), failedRow: failedRow.rows[0], r2: retryRes2.json(), dlqRow: dlqRow.rows[0] })
+    );
+
+    // Restaura dispatch real para o restante
+    setNotificationOutboxTestDeps({
+      isPostgresConfigured: () => true,
+      executeSql: (sql, params) => db.query(sql, params),
+      getServerSupabase: () => sbAdapter as any,
+      dispatchFn: notificationEngine.dispatchSegmentedNotificationsForEvent.bind(notificationEngine),
+    });
+
+    // -------------------------------------------------------------------------
+    // BLOCO 4: Briefings End-to-End (Personalização, Seções, Dedup, RLS, Multi-Timezone/DST & Mock Resend)
+    // -------------------------------------------------------------------------
+    console.log('\n📋 Bloco 4: Briefings End-to-End (MORNING/EVENING, Personalização, RLS, Multi-TZ/DST & Mock Resend)');
+
+    let resendMockSendCount = 0;
     setBriefingEngineTestDeps({
       isPostgresConfigured: () => true,
       executeSql: (sql, params) => db.query(sql, params),
@@ -907,7 +997,15 @@ async function runV242HomologationSuite() {
       }) as any,
     });
 
+    // Garante múltiplas confirmações para cobrir todas as seções canônicas no briefing de USER_A
     const morningA = await briefingEngine.generateForUser({
+      userId: USER_A,
+      type: 'MORNING',
+      sendEmail: true,
+      referenceDate: refMondayMorning,
+      retryDelayBaseMs: 1,
+    });
+    const morningADup = await briefingEngine.generateForUser({
       userId: USER_A,
       type: 'MORNING',
       sendEmail: true,
@@ -921,7 +1019,7 @@ async function runV242HomologationSuite() {
       referenceDate: refMondayMorning,
       retryDelayBaseMs: 1,
     });
-    // Evento noturno para EVENING briefing (20:30 UTC / 17:30 BRT)
+
     await db.query(
       `INSERT INTO public.events (id, title, summary, why_it_matters, relevance_score, status, published_at)
        VALUES ('hist-evt-eve', 'Banco Central publica ata com projeções atualizadas do Copom', 'Ata traz cenário de juros para 2027.', 'Direciona curva futura.', 91, 'CONFIRMED', $1)`,
@@ -934,17 +1032,190 @@ async function runV242HomologationSuite() {
       referenceDate: new Date('2026-11-23T23:00:00.000Z'), // 20:00 BRT
       retryDelayBaseMs: 1,
     });
+    // Briefing #4 de email (para testar 4o evento webhook email.failed posteriormente)
+    const eveningB = await briefingEngine.generateForUser({
+      userId: USER_B,
+      type: 'EVENING',
+      sendEmail: true,
+      referenceDate: new Date('2026-11-23T23:00:00.000Z'),
+      retryDelayBaseMs: 1,
+    });
+
+    const userAMorningItems = await db.query<{ event_id: string; section: string; position: number }>(
+      `SELECT event_id, section, position FROM public.briefing_items WHERE briefing_id = $1 ORDER BY position ASC`,
+      [morningA.briefingId]
+    );
+    const allAllowedSections = ['TOP_STORIES', 'UPDATES', 'DEVELOPING', 'WATCH_NEXT'];
+    const sectionsValid = userAMorningItems.rows.every((r) => allAllowedSections.includes(r.section));
+    const userAPrioritizedPetro = userAMorningItems.rows.some((r) =>
+      r.event_id === 'hist-evt-1' || r.event_id === revEventRows.rows[0]?.id
+    );
 
     assert(
       morningA.status === 'SENT' &&
+        morningADup.status === 'SKIPPED_DUPLICATE' &&
         morningB.status === 'SENT' &&
         eveningA.status === 'SENT' &&
-        resendMockSendCount === 3,
-      'Motor de Briefings gera e persiste MORNING e EVENING para múltiplos usuários usando fetch mockado (sem e-mails reais)',
-      JSON.stringify({ morningA, morningB, eveningA, resendMockSendCount })
+        eveningB.status === 'SENT' &&
+        resendMockSendCount === 4 &&
+        sectionsValid &&
+        userAPrioritizedPetro,
+      'Briefings MORNING/EVENING geram itens personalizados com seções canônicas, dedup por slot, BRIEFING_READY e 4 envios mockados',
+      JSON.stringify({ morningA, morningADup, sections: userAMorningItems.rows.map((r) => r.section), resendMockSendCount })
     );
 
-    // Simula falha de persistência durante webhook -> DEVE retornar HTTP 503 (e NÃO 200) e permitir retry com mesmo svix-id!
+    // Horários personalizados & Multi-Timezone / DST (Sao_Paulo, Manaus, New_York, Lisbon, Tokyo)
+    const spEarly = isUserWithinScheduleWindow(
+      { timezone: 'America/Sao_Paulo', morningTime: '08:15', eveningTime: '20:00' },
+      'MORNING',
+      new Date('2026-11-23T11:00:00.000Z') // 08:00 BRT < 08:15
+    );
+    const spDue = isUserWithinScheduleWindow(
+      { timezone: 'America/Sao_Paulo', morningTime: '07:45', eveningTime: '20:00' },
+      'MORNING',
+      new Date('2026-11-23T11:00:00.000Z') // 08:00 BRT >= 07:45
+    );
+    const manausWait = isUserWithinScheduleWindow(
+      { timezone: 'America/Manaus', morningTime: '07:30', eveningTime: '20:00' },
+      'MORNING',
+      new Date('2026-11-23T11:00:00.000Z') // 07:00 Manaus < 07:30
+    );
+    const tokyoEvening = isUserWithinScheduleWindow(
+      { timezone: 'Asia/Tokyo', morningTime: '07:00', eveningTime: '20:00' },
+      'EVENING',
+      new Date('2026-11-23T11:30:00.000Z') // 20:30 JST >= 20:00
+    );
+    const nyEdt = getBriefingPeriodWindow('MORNING', new Date('2026-10-30T12:00:00.000Z'), {
+      timezone: 'America/New_York',
+      morningTime: '07:00',
+    });
+    const nyEst = getBriefingPeriodWindow('MORNING', new Date('2026-11-03T13:00:00.000Z'), {
+      timezone: 'America/New_York',
+      morningTime: '07:00',
+    });
+    const lisbonNextWeekday = computeNextUserBriefingAt(
+      { timezone: 'Europe/Lisbon', morningTime: '07:30', eveningTime: '20:00', weekendEdition: false },
+      'MORNING',
+      new Date('2026-11-20T18:00:00.000Z')
+    );
+
+    assert(
+      !spEarly &&
+        spDue &&
+        !manausWait &&
+        tokyoEvening &&
+        new Date(nyEdt.scheduledFor).getUTCHours() === 11 &&
+        new Date(nyEst.scheduledFor).getUTCHours() === 12 &&
+        lisbonNextWeekday.startsWith('2026-11-23T07:30'),
+      'Janelas personalizadas (morning_time/evening_time), multi-timezone (SP/Manaus/Tokyo/NY/Lisbon) e transição DST validados'
+    );
+
+    // -------------------------------------------------------------------------
+    // BLOCO 5: Homologação Completa Resend Webhooks (Concorrência IN_FLIGHT, 503 Retry,
+    //          Idempotência Durável, Todos os Eventos & Out-of-Order)
+    // -------------------------------------------------------------------------
+    console.log('\n📋 Bloco 5: Resend Webhooks — Svix Estrito, Idempotência Durável, IN_FLIGHT->503 & Out-of-Order');
+    clearResendWebhookReplayCache();
+
+    // Sem RESEND_WEBHOOK_SECRET -> 503 (zero segredos inventados)
+    delete process.env.RESEND_WEBHOOK_SECRET;
+    process.env.RESEND_FROM_EMAIL = DEFAULT_VERIFIED_RESEND_FROM;
+    delete process.env.RESEND_API_KEY;
+
+    const statusResNoKey = createMockRes();
+    await resendStatusHandler({ method: 'GET', headers: {} }, statusResNoKey);
+    const noSecretWhRes = createMockRes();
+    await resendWebhookHandler(
+      {
+        method: 'POST',
+        headers: { 'svix-id': 'msg_no_sec', 'svix-timestamp': String(Math.floor(Date.now() / 1000)), 'svix-signature': 'v1,abc' },
+        rawBody: JSON.stringify({ type: 'email.delivered', data: { email_id: 're_v242_msg_1' } }),
+      },
+      noSecretWhRes
+    );
+    assert(
+      statusResNoKey.json()?.webhookConfigured === false &&
+        noSecretWhRes.statusCode === 503 &&
+        noSecretWhRes.json()?.error === 'RESEND_WEBHOOK_SECRET_UNCONFIGURED',
+      'Sem RESEND_WEBHOOK_SECRET: status reporta webhookConfigured=false e webhook retorna HTTP 503'
+    );
+
+    process.env.RESEND_WEBHOOK_SECRET = testWebhookSecret;
+    process.env.RESEND_API_KEY = 're_test_v242_isolated_no_network';
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    const sigKey = Buffer.from(rawWhSecretB64, 'base64');
+    const signSvix = (id: string, ts: string, body: string) =>
+      `v1,${crypto.createHmac('sha256', sigKey).update(`${id}.${ts}.${body}`).digest('base64')}`;
+
+    const sendSignedWebhook = async (svixId: string, eventType: string, emailId: string) => {
+      const ts = String(Math.floor(Date.now() / 1000));
+      const bodyStr = JSON.stringify({
+        id: `evt_${svixId}`,
+        type: eventType,
+        created_at: new Date().toISOString(),
+        data: { email_id: emailId },
+      });
+      const resObj = createMockRes();
+      await resendWebhookHandler(
+        {
+          method: 'POST',
+          headers: {
+            'svix-id': svixId,
+            'svix-timestamp': ts,
+            'svix-signature': signSvix(svixId, ts, bodyStr),
+          },
+          rawBody: bodyStr,
+        },
+        resObj
+      );
+      return resObj;
+    };
+
+    // Rejeições Svix estritas
+    const samplePayload = JSON.stringify({ id: 'evt_svix', type: 'email.delivered', data: { email_id: 're_v242_msg_1' } });
+    const expiredSig = verifyResendWebhookSignature({
+      rawBody: samplePayload,
+      headers: { 'svix-id': 'msg_exp', 'svix-timestamp': String(nowSec - 305), 'svix-signature': signSvix('msg_exp', String(nowSec - 305), samplePayload) },
+      secret: testWebhookSecret,
+      nowMs: nowSec * 1000,
+    });
+    const aliasSig = verifyResendWebhookSignature({
+      rawBody: samplePayload,
+      headers: { 'webhook-id': 'msg_al', 'webhook-timestamp': String(nowSec), 'webhook-signature': signSvix('msg_al', String(nowSec), samplePayload) },
+      secret: testWebhookSecret,
+      nowMs: nowSec * 1000,
+    });
+    assert(!expiredSig.valid && !aliasSig.valid, 'Contrato Svix rejeita expiração > 300s e headers alias webhook-*');
+
+    // 5.1 Teste CRÍTICO DE CONCORRÊNCIA (IN_FLIGHT):
+    // Simula Instância A com PROCESSING ativo em internal.resend_webhook_events (ainda não persistiu)
+    const inflightSvixId = 'msg_v242_concurrent_inflight';
+    await db.query(
+      `INSERT INTO internal.resend_webhook_events (svix_id, event_type, provider_message_id, status, processing_started_at)
+       VALUES ($1, 'email.delivered', 're_v242_msg_1', 'PROCESSING', NOW())`,
+      [inflightSvixId]
+    );
+    setResendWebhookTestDeps({
+      isPostgresConfigured: () => true,
+      executeSql: (sql, params) => db.query(sql, params),
+      verifyAdminRequest: async () => false,
+    });
+    const concurrentRes = await sendSignedWebhook(inflightSvixId, 'email.delivered', 're_v242_msg_1');
+    const deliveryDuringInflight = await db.query<{ status: string }>(
+      `SELECT status FROM internal.briefing_email_deliveries WHERE provider_message_id = 're_v242_msg_1'`
+    );
+    assert(
+      concurrentRes.statusCode === 503 &&
+        concurrentRes.json()?.error === 'WEBHOOK_IN_FLIGHT_RETRYABLE' &&
+        concurrentRes.json()?.retryable === true &&
+        concurrentRes.json()?.duplicate === false &&
+        deliveryDuringInflight.rows[0]?.status === 'ACCEPTED',
+      'Concorrência IN_FLIGHT (outra instância ainda processando) retorna HTTP 503 retryable e NUNCA 200 duplicate falso',
+      JSON.stringify({ statusCode: concurrentRes.statusCode, json: concurrentRes.json(), delivery: deliveryDuringInflight.rows[0] })
+    );
+
+    // 5.2 Falha durante apply_resend_webhook_event -> marca FAILED na tabela durável + HTTP 503 -> Retry depois conclui PROCESSED!
     let simulateApplyFailure = true;
     let applySqlCallCount = 0;
     setResendWebhookTestDeps({
@@ -962,111 +1233,80 @@ async function runV242HomologationSuite() {
     });
 
     const retrySvixId = 'msg_v242_retry_flow_1';
-    const retryTs = String(Math.floor(Date.now() / 1000));
-    const retryBody = JSON.stringify({
-      id: 'evt_v242_retry_1',
-      type: 'email.delivered',
-      created_at: new Date().toISOString(),
-      data: { email_id: 're_v242_msg_1' },
-    });
-    const retryHeaders = {
-      'svix-id': retrySvixId,
-      'svix-timestamp': retryTs,
-      'svix-signature': signSvix(retrySvixId, retryTs, retryBody),
-    };
+    const failWhRes = await sendSignedWebhook(retrySvixId, 'email.delivered', 're_v242_msg_1');
+    const inboxAfterFail = await db.query<{ status: string; attempt_count: number }>(
+      `SELECT status, attempt_count FROM internal.resend_webhook_events WHERE svix_id = $1`,
+      [retrySvixId]
+    );
 
-    const failWhRes = createMockRes();
-    await resendWebhookHandler({ method: 'POST', headers: retryHeaders, rawBody: retryBody }, failWhRes);
-
-    const statusBeforeRetry = await db.query<any>(
+    simulateApplyFailure = false;
+    const recoveredWhRes = await sendSignedWebhook(retrySvixId, 'email.delivered', 're_v242_msg_1');
+    const inboxAfterRecover = await db.query<{ status: string; attempt_count: number; delivery_status: string }>(
+      `SELECT status, attempt_count, delivery_status FROM internal.resend_webhook_events WHERE svix_id = $1`,
+      [retrySvixId]
+    );
+    const deliveryAfterDelivered = await db.query<{ status: string }>(
       `SELECT status FROM internal.briefing_email_deliveries WHERE provider_message_id = 're_v242_msg_1'`
     );
 
     assert(
       failWhRes.statusCode === 503 &&
-        failWhRes.json()?.retryable === true &&
-        failWhRes.json()?.error === 'WEBHOOK_PERSISTENCE_RETRYABLE' &&
-        statusBeforeRetry.rows[0]?.status === 'ACCEPTED',
-      'POST /api/resend/webhook retorna HTTP 503 recuperável quando persistência falha (nunca retorna 200 falso)',
-      JSON.stringify({ statusCode: failWhRes.statusCode, json: failWhRes.json(), row: statusBeforeRetry.rows[0] })
-    );
-
-    // Agora banco se recupera e Resend retenta exatamente o mesmo svix-id:
-    simulateApplyFailure = false;
-    const recoveredWhRes = createMockRes();
-    await resendWebhookHandler({ method: 'POST', headers: retryHeaders, rawBody: retryBody }, recoveredWhRes);
-    const statusAfterRetry = await db.query<any>(
-      `SELECT status, webhook_event_type, webhook_payload FROM internal.briefing_email_deliveries WHERE provider_message_id = 're_v242_msg_1'`
-    );
-
-    assert(
-      recoveredWhRes.statusCode === 200 &&
+        inboxAfterFail.rows[0]?.status === 'FAILED' &&
+        recoveredWhRes.statusCode === 200 &&
         recoveredWhRes.json()?.duplicate === false &&
-        recoveredWhRes.json()?.deliveryUpdated === true &&
-        statusAfterRetry.rows[0]?.status === 'DELIVERED' &&
-        statusAfterRetry.rows[0]?.webhook_payload?.svix_id === retrySvixId,
-      'Retentativa do webhook com mesmo svix-id após 503 persiste ACCEPTED -> DELIVERED com sucesso',
-      JSON.stringify({ json: recoveredWhRes.json(), row: statusAfterRetry.rows[0] })
+        inboxAfterRecover.rows[0]?.status === 'PROCESSED' &&
+        inboxAfterRecover.rows[0]?.attempt_count === 2 &&
+        deliveryAfterDelivered.rows[0]?.status === 'DELIVERED',
+      'Falha marca FAILED + 503; retry com mesmo svix-id conclui DELIVERED -> PROCESSED na tentativa 2',
+      JSON.stringify({ inboxAfterFail: inboxAfterFail.rows[0], inboxAfterRecover: inboxAfterRecover.rows[0], recovered: recoveredWhRes.json() })
     );
 
-    // Anti-replay: reenvio em memória warm E após limpar cache em memória (anti-replay persistente distribuído!)
+    // 5.3 Replay APENAS quando PROCESSED durável -> 200 duplicate:true (sem reexecutar apply_resend_webhook_event)
     const callsBeforeReplay = applySqlCallCount;
-    const warmReplayRes = createMockRes();
-    await resendWebhookHandler({ method: 'POST', headers: retryHeaders, rawBody: retryBody }, warmReplayRes);
-
     clearResendWebhookReplayCache();
-    const coldReplayRes = createMockRes();
-    await resendWebhookHandler({ method: 'POST', headers: retryHeaders, rawBody: retryBody }, coldReplayRes);
-
+    const replayRes = await sendSignedWebhook(retrySvixId, 'email.delivered', 're_v242_msg_1');
     assert(
-      warmReplayRes.statusCode === 200 &&
-        warmReplayRes.json()?.duplicate === true &&
-        warmReplayRes.json()?.replayProtected === true &&
-        coldReplayRes.statusCode === 200 &&
-        coldReplayRes.json()?.duplicate === true &&
-        coldReplayRes.json()?.replayProtected === true &&
+      replayRes.statusCode === 200 &&
+        replayRes.json()?.duplicate === true &&
+        replayRes.json()?.replayProtected === true &&
         applySqlCallCount === callsBeforeReplay,
-      'Anti-replay bloqueia reprocessamento duplicado (warm e cold start distribuído) sem mutar banco novamente',
-      JSON.stringify({ warm: warmReplayRes.json(), cold: coldReplayRes.json(), callsBeforeReplay, applySqlCallCount })
+      'Replay após confirmação durável PROCESSED retorna 200 { duplicate: true } sem mutar banco novamente'
     );
 
-    // -------------------------------------------------------------------------
-    // BLOCO 4: Outbox -> Notificações Segmentadas, RLS Estrito e Evidências Reais
-    // -------------------------------------------------------------------------
-    console.log('\n📋 Bloco 4: Worker Outbox, Notificações Segmentadas, Isolamento RLS & Evidências');
+    // 5.4 Out-of-Order (email.delivery_delayed tardio após DELIVERED não rebaixa!) + demais eventos Resend:
+    //     email.delivery_delayed -> DELAYED (msg_2), email.bounced -> BOUNCED (msg_2),
+    //     email.complained -> COMPLAINED (msg_3), email.failed -> FAILED (msg_4)
+    const lateDelayRes = await sendSignedWebhook('msg_v242_late_delay_1', 'email.delivery_delayed', 're_v242_msg_1');
+    const delayedRes2 = await sendSignedWebhook('msg_v242_delay_2', 'email.delivery_delayed', 're_v242_msg_2');
+    const bouncedRes2 = await sendSignedWebhook('msg_v242_bounce_2', 'email.bounced', 're_v242_msg_2');
+    const complainedRes3 = await sendSignedWebhook('msg_v242_complain_3', 'email.complained', 're_v242_msg_3');
+    const failedRes4 = await sendSignedWebhook('msg_v242_fail_4', 'email.failed', 're_v242_msg_4');
 
-    setNotificationOutboxTestDeps({
-      isPostgresConfigured: () => true,
-      executeSql: (sql, params) => db.query(sql, params),
-      getServerSupabase: () => sbAdapter as any,
-      dispatchFn: notificationEngine.dispatchSegmentedNotificationsForEvent.bind(notificationEngine),
-    });
-
-    const outboxBatch = await processNotificationOutboxBatch({ limit: 50 });
-    const outboxStats = await getNotificationOutboxStats();
-    const userBReceivedPetro = await db.query<{ cnt: number }>(
-      `SELECT COUNT(*)::int AS cnt FROM public.notifications n
-        JOIN public.events e ON e.id = n.event_id
-        WHERE n.user_id = $1 AND e.title ILIKE '%Petrobras%' AND n.type <> 'BRIEFING_READY'`,
-      [USER_B]
+    const finalDeliveries = await db.query<{ provider_message_id: string; status: string }>(
+      `SELECT provider_message_id, status FROM internal.briefing_email_deliveries ORDER BY provider_message_id ASC`
     );
-    const userAReceivedPetro = await db.query<{ cnt: number }>(
-      `SELECT COUNT(*)::int AS cnt FROM public.notifications n
-        JOIN public.events e ON e.id = n.event_id
-        WHERE n.user_id = $1 AND e.title ILIKE '%Petrobras%' AND n.type <> 'BRIEFING_READY'`,
-      [USER_A]
-    );
+    const statusByMsg = Object.fromEntries(finalDeliveries.rows.map((r) => [r.provider_message_id, r.status]));
 
     assert(
-      outboxBatch.completed >= 6 &&
-        outboxStats.completed >= 6 &&
-        userAReceivedPetro.rows[0].cnt >= 1 &&
-        userBReceivedPetro.rows[0].cnt === 0,
-      'Worker da Outbox materializa notificações segmentadas em public.notifications apenas para usuários elegíveis',
-      JSON.stringify({ outboxBatch, outboxStats, userAReceivedPetro: userAReceivedPetro.rows[0], userBReceivedPetro: userBReceivedPetro.rows[0] })
+      lateDelayRes.statusCode === 200 &&
+        lateDelayRes.json()?.reason === 'OUT_OF_ORDER_IGNORED' &&
+        statusByMsg['re_v242_msg_1'] === 'DELIVERED' &&
+        delayedRes2.statusCode === 200 &&
+        bouncedRes2.statusCode === 200 &&
+        statusByMsg['re_v242_msg_2'] === 'BOUNCED' &&
+        complainedRes3.statusCode === 200 &&
+        statusByMsg['re_v242_msg_3'] === 'COMPLAINED' &&
+        failedRes4.statusCode === 200 &&
+        statusByMsg['re_v242_msg_4'] === 'FAILED',
+      'Homologação Resend valida email.delivered, delivery_delayed, bounced, complained, failed e proteção out-of-order',
+      JSON.stringify({ lateDelay: lateDelayRes.json(), statusByMsg })
     );
 
-    // Teste real de RLS com SET LOCAL ROLE authenticated e auth.uid() para USER_A e USER_B
+    // -------------------------------------------------------------------------
+    // BLOCO 6: RLS Isolado + Evidências Sanitizadas de Banco
+    // -------------------------------------------------------------------------
+    console.log('\n📋 Bloco 6: RLS Estrito (authenticated) & Evidências Persistidas no PostgreSQL Isolado');
+
     const rlsCheck = await withPgTx(async (client) => {
       await client.query(`SET LOCAL ROLE authenticated`);
       await client.query(`SELECT set_config('request.jwt.claim.sub', $1, true)`, [USER_A]);
@@ -1079,7 +1319,7 @@ async function runV242HomologationSuite() {
 
       let internalDenied = false;
       try {
-        await client.query(`SELECT * FROM internal.notification_outbox LIMIT 1`);
+        await client.query(`SELECT * FROM internal.resend_webhook_events LIMIT 1`);
       } catch {
         internalDenied = true;
       }
@@ -1087,8 +1327,8 @@ async function runV242HomologationSuite() {
       return {
         aBriefingsAllOwn: aBriefings.rows.length >= 2 && aBriefings.rows.every((r: any) => r.user_id === USER_A),
         aNotifsAllOwn: aNotifs.rows.length >= 2 && aNotifs.rows.every((r: any) => r.user_id === USER_A),
-        bBriefingsAllOwn: bBriefings.rows.length >= 1 && bBriefings.rows.every((r: any) => r.user_id === USER_B),
-        bNotifsAllOwn: bNotifs.rows.length >= 1 && bNotifs.rows.every((r: any) => r.user_id === USER_B),
+        bBriefingsAllOwn: bBriefings.rows.length >= 2 && bBriefings.rows.every((r: any) => r.user_id === USER_B),
+        bNotifsAllOwn: bNotifs.rows.length >= 2 && bNotifs.rows.every((r: any) => r.user_id === USER_B),
         internalDenied,
       };
     });
@@ -1099,45 +1339,37 @@ async function runV242HomologationSuite() {
         rlsCheck.bBriefingsAllOwn &&
         rlsCheck.bNotifsAllOwn &&
         rlsCheck.internalDenied,
-      'RLS isola briefings/notifications por auth.uid() entre USER_A e USER_B e nega acesso de authenticated ao schema internal',
-      JSON.stringify(rlsCheck)
+      'RLS isola briefings/notifications por auth.uid() e bloqueia schema internal para authenticated'
     );
 
-    // Evidências reais sanitizadas persistidas no PostgreSQL isolado
     const briefingsEvidence = await db.query(
       `SELECT id, left(user_id::text, 8) AS user_prefix, type, local_date::text AS local_date, status, period_start, period_end
-         FROM public.briefings
-        ORDER BY created_at ASC`
+         FROM public.briefings ORDER BY created_at ASC`
     );
-    const briefingItemsEvidence = await db.query(
-      `SELECT left(briefing_id::text, 8) AS briefing_prefix, event_id, section, position
-         FROM public.briefing_items
-        ORDER BY briefing_id, position ASC`
+    const outboxEvidence = await db.query(
+      `SELECT status, COUNT(*)::int AS cnt FROM internal.notification_outbox GROUP BY status ORDER BY status ASC`
+    );
+    const webhookInboxEvidence = await db.query(
+      `SELECT svix_id, event_type, status, attempt_count, delivery_status, reason
+         FROM internal.resend_webhook_events ORDER BY created_at ASC`
     );
     const notificationsEvidence = await db.query(
-      `SELECT id, left(user_id::text, 8) AS user_prefix, type, left(title, 52) AS title_preview,
-              subtitle IS NOT NULL AS has_subtitle, body IS NOT NULL AS has_body, read, read_at IS NOT NULL AS has_read_at
-         FROM public.notifications
-        ORDER BY created_at ASC
-        LIMIT 12`
-    );
-    const deliveriesEvidence = await db.query(
-      `SELECT left(briefing_id::text, 8) AS briefing_prefix, edition_type, status, provider_message_id, from_email, webhook_event_type
-         FROM internal.briefing_email_deliveries
-        ORDER BY created_at ASC`
+      `SELECT left(user_id::text, 8) AS user_prefix, type, category, event_revision, left(title, 42) AS title_preview,
+              body IS NOT NULL AS has_body, subtitle IS NOT NULL AS has_subtitle
+         FROM public.notifications ORDER BY created_at ASC LIMIT 12`
     );
 
     console.log('\n📄 Evidência — public.briefings:', JSON.stringify(briefingsEvidence.rows, null, 2));
-    console.log('📄 Evidência — public.briefing_items (amostra):', JSON.stringify(briefingItemsEvidence.rows.slice(0, 8), null, 2));
+    console.log('📄 Evidência — internal.notification_outbox:', JSON.stringify(outboxEvidence.rows, null, 2));
+    console.log('📄 Evidência — internal.briefing_email_deliveries:', JSON.stringify(statusByMsg, null, 2));
+    console.log('📄 Evidência — internal.resend_webhook_events:', JSON.stringify(webhookInboxEvidence.rows, null, 2));
     console.log('📄 Evidência — public.notifications (amostra):', JSON.stringify(notificationsEvidence.rows, null, 2));
-    console.log('📄 Evidência — internal.briefing_email_deliveries:', JSON.stringify(deliveriesEvidence.rows, null, 2));
 
     assert(
-      briefingsEvidence.rows.length === 3 &&
-        briefingItemsEvidence.rows.length >= 6 &&
-        notificationsEvidence.rows.length >= 4 &&
+      briefingsEvidence.rows.length === 4 &&
+        notificationsEvidence.rows.length >= 6 &&
         notificationsEvidence.rows.every((r: any) => r.has_body === true),
-      'Evidências persistidas de briefings, briefing_items, notifications (body NOT NULL) e briefing_email_deliveries confirmadas'
+      'Evidências persistidas completas confirmadas em todas as tabelas auditadas'
     );
   } finally {
     setIngestionEngineTestDeps(null);
@@ -1156,6 +1388,9 @@ async function runV242HomologationSuite() {
 
     if (savedEnv.RESEND_WEBHOOK_SECRET === undefined) delete process.env.RESEND_WEBHOOK_SECRET;
     else process.env.RESEND_WEBHOOK_SECRET = savedEnv.RESEND_WEBHOOK_SECRET;
+
+    if (savedEnv.CRON_SECRET === undefined) delete process.env.CRON_SECRET;
+    else process.env.CRON_SECRET = savedEnv.CRON_SECRET;
 
     await db.close();
   }

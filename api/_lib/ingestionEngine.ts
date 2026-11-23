@@ -760,13 +760,25 @@ export async function runServerSideIngestion(options?: {
 
         const enrichmentStatus = 'PENDING';
 
-        // Verifica se o evento já existe
+        // Verifica se o evento já existe e avalia revisão significativa (anti-spam)
         const existingEvt = await client.query(
-          `SELECT id, article_count, status FROM public.events WHERE id = $1 LIMIT 1`,
+          `SELECT id, article_count, status, relevance_score, COALESCE(revision, 1) AS revision
+             FROM public.events
+            WHERE id = $1
+            LIMIT 1`,
           [eventUuid]
         );
 
+        let shouldNotify = false;
+        let eventRevision = 1;
+        let significantChangeReason: string | undefined;
+        let effectiveRelevanceScore = relevanceScore;
+
         if (existingEvt.rows.length === 0) {
+          shouldNotify = true;
+          eventRevision = 1;
+          significantChangeReason = 'NEW_EVENT';
+
           // Inserção com cast explícito $11::jsonb
           await client.query(
             `INSERT INTO public.events (
@@ -795,10 +807,31 @@ export async function runServerSideIngestion(options?: {
           );
           eventsCreated++;
         } else {
-          // Atualização de Acontecimento Existente
-          const existingStatus = existingEvt.rows[0].status;
-          const newCount = Math.max(existingEvt.rows[0].article_count || 1, cl.relatedArticles.length);
+          // Atualização de Acontecimento Existente com política estrita de revisão significativa
+          const existingRow = existingEvt.rows[0];
+          const existingStatus = String(existingRow.status || 'DEVELOPING');
+          const prevCount = Math.max(1, Number(existingRow.article_count || 1));
+          const prevRelevance = Number(existingRow.relevance_score ?? relevanceScore);
+          const prevRevision = Math.max(1, Number(existingRow.revision || 1));
+
+          const newCount = Math.max(prevCount, cl.relatedArticles.length);
           const nextStatus = (hasIndependentConfirmation || existingStatus === 'CONFIRMED') ? 'CONFIRMED' : 'UPDATED';
+          effectiveRelevanceScore = Math.max(prevRelevance, relevanceScore);
+
+          const confirmedPromotion = existingStatus !== 'CONFIRMED' && nextStatus === 'CONFIRMED';
+          const crossedHighRelevance = prevRelevance < 85 && effectiveRelevanceScore >= 85;
+          const materialCoverageExpansion = newCount >= prevCount + 2;
+          const majorRelevanceJump = effectiveRelevanceScore >= prevRelevance + 8;
+
+          if (confirmedPromotion) significantChangeReason = 'STATUS_CONFIRMED';
+          else if (crossedHighRelevance) significantChangeReason = 'RELEVANCE_THRESHOLD_CROSSED';
+          else if (materialCoverageExpansion) significantChangeReason = 'COVERAGE_EXPANDED';
+          else if (majorRelevanceJump) significantChangeReason = 'RELEVANCE_SURGE';
+
+          const isSignificantRevision = Boolean(significantChangeReason);
+          eventRevision = isSignificantRevision ? prevRevision + 1 : prevRevision;
+          // Anti-spam: além de exigir alteração relevante, limita revisões notificáveis a <= 5 (exceto promoção a CONFIRMED)
+          shouldNotify = isSignificantRevision && (confirmedPromotion || eventRevision <= 5);
 
           await client.query(
             `UPDATE public.events SET
@@ -807,9 +840,19 @@ export async function runServerSideIngestion(options?: {
               last_updated_at = NOW(),
               updated_at = NOW(),
               key_points = $4::jsonb,
-              why_it_matters = $5
+              why_it_matters = $5,
+              revision = $6,
+              relevance_score = $7
             WHERE id = $1`,
-            [eventUuid, newCount, nextStatus, keyPoints, whyItMatters]
+            [
+              eventUuid,
+              newCount,
+              nextStatus,
+              keyPoints,
+              whyItMatters,
+              eventRevision,
+              effectiveRelevanceScore
+            ]
           );
           eventsUpdated++;
         }
@@ -866,16 +909,20 @@ export async function runServerSideIngestion(options?: {
               .filter((sid): sid is string => Boolean(sid))
           )
         );
-        eventsToNotify.push({
-          eventId: eventUuid,
-          title: primary.article.title,
-          summary,
-          relevanceScore,
-          entityIds: matchedEntityIds,
-          topicIds: realTopicId ? [realTopicId] : [],
-          sourceIds: clusterSourceIds,
-          type: existingEvt.rows.length === 0 ? 'NEWS_HIGH_RELEVANCE' : 'EVENT_UPDATED',
-        });
+        if (shouldNotify) {
+          eventsToNotify.push({
+            eventId: eventUuid,
+            title: primary.article.title,
+            summary,
+            relevanceScore: effectiveRelevanceScore,
+            entityIds: matchedEntityIds,
+            topicIds: realTopicId ? [realTopicId] : [],
+            sourceIds: clusterSourceIds,
+            type: existingEvt.rows.length === 0 ? 'NEWS_HIGH_RELEVANCE' : 'EVENT_UPDATED',
+            eventRevision,
+            significantChangeReason,
+          });
+        }
       }
 
       // 3.6 Transactional Outbox Atômica: grava alertas na mesma transação dos acontecimentos

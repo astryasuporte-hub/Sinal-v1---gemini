@@ -2,20 +2,22 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * Vercel Serverless Function: Resend Webhooks Handler (Hardened V2.4.1)
+ * Vercel Serverless Function: Resend Webhooks Handler (Hardened V2.4.2)
  *
- * - POST: Valida assinatura criptográfica Svix/HMAC (RESEND_WEBHOOK_SECRET) e
- *   atualiza o estado durável em internal.briefing_email_deliveries
- *   (DELIVERED | BOUNCED | COMPLAINED | FAILED | DELAYED).
+ * - POST: Valida assinatura criptográfica Svix/HMAC (RESEND_WEBHOOK_SECRET),
+ *   controla idempotência durável em internal.resend_webhook_events
+ *   (PROCESSING -> PROCESSED / FAILED) e aplica o estado em
+ *   internal.briefing_email_deliveries (DELIVERED | BOUNCED | COMPLAINED | FAILED | DELAYED).
+ *   * Nunca retorna 200 duplicate sem evidência durável de status='PROCESSED'.
+ *   * Se outra instância estiver em voo (IN_FLIGHT) ou houver falha de persistência,
+ *     retorna HTTP 503 retryable para que a Svix reenvie com o mesmo svix-id.
  * - GET: Restrito a administradores autenticados (sem exposição de e-mails PII).
  */
 
-import crypto from 'node:crypto';
 import { sendJson, setCorsHeaders } from '../../common.js';
 import { verifyAdminRequest } from '../../adminAuth.js';
 import { executeSql, isPostgresConfigured } from '../../postgres.js';
 import { getServerSupabase } from '../../db.js';
-import { acquireDistributedLeaseLock, DistributedLockHandle } from '../../distributedLock.js';
 import { verifyResendWebhookSignature } from '../../resendClient.js';
 
 interface WebhookDeps {
@@ -51,48 +53,7 @@ function getDeps(): WebhookDeps {
   );
 }
 
-const REPLAY_TTL_MS = 310_000;
-const MAX_REPLAY_CACHE_SIZE = 2000;
-const processedSvixEvents = new Map<string, number>();
-
-export function clearResendWebhookReplayCache(): void {
-  processedSvixEvents.clear();
-}
-
-function pruneReplayCache(nowMs: number): void {
-  for (const [key, expiresAt] of processedSvixEvents.entries()) {
-    if (expiresAt <= nowMs) {
-      processedSvixEvents.delete(key);
-    }
-  }
-  while (processedSvixEvents.size > MAX_REPLAY_CACHE_SIZE) {
-    const oldestKey = processedSvixEvents.keys().next().value;
-    if (!oldestKey) break;
-    processedSvixEvents.delete(oldestKey);
-  }
-}
-
-function isSvixIdInMemoryCache(svixId: string, nowMs = Date.now()): boolean {
-  const expiresAt = processedSvixEvents.get(svixId);
-  if (!expiresAt) return false;
-  if (expiresAt <= nowMs) {
-    processedSvixEvents.delete(svixId);
-    return false;
-  }
-  return true;
-}
-
-function markSvixIdInMemoryCache(svixId: string, nowMs = Date.now()): void {
-  pruneReplayCache(nowMs);
-  processedSvixEvents.set(svixId, nowMs + REPLAY_TTL_MS);
-}
-
-function buildSvixReplayLockKey(svixId: string): string {
-  const direct = `resend:svix:${svixId}`;
-  if (direct.length <= 200) return direct;
-  const hash = crypto.createHash('sha256').update(svixId).digest('hex');
-  return `resend:svix:sha256:${hash}`;
-}
+const INBOX_STALE_PROCESSING_MS = 60_000;
 
 const recentWebhookEvents: Array<{
   id: string;
@@ -100,8 +61,13 @@ const recentWebhookEvents: Array<{
   type: string;
   providerMessageId: string | null;
   deliveryUpdated: boolean;
+  deliveryStatus: string | null;
   timestamp: string;
 }> = [];
+
+export function clearResendWebhookReplayCache(): void {
+  recentWebhookEvents.length = 0;
+}
 
 async function readRawRequestBody(req: any): Promise<string> {
   if (typeof req.rawBody === 'string') return req.rawBody;
@@ -124,6 +90,182 @@ function isKnownEmailDeliveryEvent(eventType: string): boolean {
     eventType.startsWith('email.') ||
     ['delivered', 'bounced', 'complained', 'failed', 'delayed'].includes(eventType)
   );
+}
+
+function isMissingWebhookInboxSchemaError(err: any): boolean {
+  const code = String(err?.code || '');
+  const msg = String(err?.message || '');
+  return (
+    code === '42883' ||
+    code === '42P01' ||
+    (/claim_resend_webhook_event|complete_resend_webhook_event|fail_resend_webhook_event|resend_webhook_events/i.test(
+      msg
+    ) &&
+      /does not exist|n[aã]o existe|undefined_function|could not find the function/i.test(msg))
+  );
+}
+
+type ClaimOutcome =
+  | {
+      kind: 'ACQUIRED' | 'LEGACY_NO_INBOX';
+    }
+  | {
+      kind: 'ALREADY_PROCESSED';
+      deliveryUpdated: boolean;
+      deliveryStatus: string | null;
+      reason: string | null;
+    }
+  | {
+      kind: 'IN_FLIGHT';
+    };
+
+async function claimDurableWebhookEvent(
+  deps: WebhookDeps,
+  params: {
+    svixId: string;
+    eventType: string;
+    providerMessageId: string;
+    payloadMeta: Record<string, any>;
+  }
+): Promise<ClaimOutcome> {
+  if (deps.isPostgresConfigured()) {
+    try {
+      const res = await deps.executeSql(
+        `SELECT public.claim_resend_webhook_event($1, $2, $3, $4::jsonb, $5) AS result`,
+        [
+          params.svixId,
+          params.eventType,
+          params.providerMessageId || null,
+          JSON.stringify(params.payloadMeta),
+          INBOX_STALE_PROCESSING_MS,
+        ]
+      );
+      const result = res?.rows?.[0]?.result;
+      if (!result || typeof result !== 'object') {
+        throw new Error('INVALID_WEBHOOK_CLAIM_RESPONSE');
+      }
+      if (result.action === 'ALREADY_PROCESSED') {
+        return {
+          kind: 'ALREADY_PROCESSED',
+          deliveryUpdated: Boolean(result.delivery_updated),
+          deliveryStatus: result.delivery_status ? String(result.delivery_status) : null,
+          reason: result.reason ? String(result.reason) : null,
+        };
+      }
+      if (result.action === 'IN_FLIGHT') {
+        return { kind: 'IN_FLIGHT' };
+      }
+      if (result.action === 'ACQUIRED') {
+        return { kind: 'ACQUIRED' };
+      }
+      throw new Error(`UNKNOWN_WEBHOOK_CLAIM_ACTION: ${String(result.action)}`);
+    } catch (err: any) {
+      if (isMissingWebhookInboxSchemaError(err)) {
+        console.warn('[Resend Webhook] Tabela/RPC V2.4.2 de idempotência ausente; executando sem caixa de entrada durável.');
+        return { kind: 'LEGACY_NO_INBOX' };
+      }
+      throw err;
+    }
+  }
+
+  const sb = deps.getServerSupabase() as any;
+  if (!sb || typeof sb.rpc !== 'function') {
+    throw new Error('WEBHOOK_STORE_UNAVAILABLE');
+  }
+
+  const rpcRes = await sb.rpc('claim_resend_webhook_event', {
+    p_svix_id: params.svixId,
+    p_event_type: params.eventType,
+    p_provider_message_id: params.providerMessageId || null,
+    p_payload_meta: params.payloadMeta,
+    p_stale_ms: INBOX_STALE_PROCESSING_MS,
+  });
+
+  if (rpcRes?.error) {
+    if (isMissingWebhookInboxSchemaError(rpcRes.error)) {
+      console.warn('[Resend Webhook] RPC V2.4.2 de idempotência ausente no Supabase; prosseguindo com apply direto.');
+      return { kind: 'LEGACY_NO_INBOX' };
+    }
+    throw new Error(rpcRes.error.message || 'WEBHOOK_CLAIM_RPC_ERROR');
+  }
+
+  const result = rpcRes?.data;
+  if (!result || typeof result !== 'object') {
+    throw new Error('INVALID_WEBHOOK_CLAIM_RESPONSE');
+  }
+  if (result.action === 'ALREADY_PROCESSED') {
+    return {
+      kind: 'ALREADY_PROCESSED',
+      deliveryUpdated: Boolean(result.delivery_updated),
+      deliveryStatus: result.delivery_status ? String(result.delivery_status) : null,
+      reason: result.reason ? String(result.reason) : null,
+    };
+  }
+  if (result.action === 'IN_FLIGHT') {
+    return { kind: 'IN_FLIGHT' };
+  }
+  if (result.action === 'ACQUIRED') {
+    return { kind: 'ACQUIRED' };
+  }
+  throw new Error(`UNKNOWN_WEBHOOK_CLAIM_ACTION: ${String(result.action)}`);
+}
+
+async function markDurableWebhookCompleted(
+  deps: WebhookDeps,
+  params: {
+    svixId: string;
+    deliveryUpdated: boolean;
+    deliveryStatus: string | null;
+    reason: string | null;
+  }
+): Promise<void> {
+  if (deps.isPostgresConfigured()) {
+    const res = await deps.executeSql(
+      `SELECT public.complete_resend_webhook_event($1, $2, $3, $4) AS result`,
+      [params.svixId, params.deliveryUpdated, params.deliveryStatus, params.reason]
+    );
+    const completed = res?.rows?.[0]?.result?.completed;
+    if (!completed) {
+      throw new Error('WEBHOOK_COMPLETE_NOT_FOUND');
+    }
+    return;
+  }
+
+  const sb = deps.getServerSupabase() as any;
+  const rpcRes = await sb.rpc('complete_resend_webhook_event', {
+    p_svix_id: params.svixId,
+    p_delivery_updated: params.deliveryUpdated,
+    p_delivery_status: params.deliveryStatus,
+    p_reason: params.reason,
+  });
+  if (rpcRes?.error || !rpcRes?.data?.completed) {
+    throw new Error(rpcRes?.error?.message || 'WEBHOOK_COMPLETE_RPC_FAILED');
+  }
+}
+
+async function markDurableWebhookFailed(
+  deps: WebhookDeps,
+  svixId: string,
+  errorMessage: string
+): Promise<void> {
+  try {
+    if (deps.isPostgresConfigured()) {
+      await deps.executeSql(`SELECT public.fail_resend_webhook_event($1, $2)`, [
+        svixId,
+        errorMessage.slice(0, 500),
+      ]);
+      return;
+    }
+    const sb = deps.getServerSupabase() as any;
+    if (sb && typeof sb.rpc === 'function') {
+      await sb.rpc('fail_resend_webhook_event', {
+        p_svix_id: svixId,
+        p_error: errorMessage.slice(0, 500),
+      });
+    }
+  } catch (err: any) {
+    console.warn('[Resend Webhook] Falha ao registrar status FAILED do webhook:', err?.message);
+  }
 }
 
 export default async function handler(req: any, res: any) {
@@ -205,9 +347,31 @@ export default async function handler(req: any, res: any) {
     }
 
     const eventId = String(payload?.id || payload?.data?.email_id || svixId);
+    const webhookMeta = {
+      type: eventType,
+      svix_id: svixId,
+      created_at: payload?.created_at || null,
+    };
 
-    // Anti-replay rápido em memória (populado somente após confirmação de persistência)
-    if (isSvixIdInMemoryCache(svixId)) {
+    let claim: ClaimOutcome;
+    try {
+      claim = await claimDurableWebhookEvent(deps, {
+        svixId,
+        eventType,
+        providerMessageId,
+        payloadMeta: webhookMeta,
+      });
+    } catch (claimErr: any) {
+      console.error('[Resend Webhook] Erro ao reivindicar evento durável:', claimErr?.message);
+      return sendJson(res, 503, {
+        success: false,
+        retryable: true,
+        error: 'WEBHOOK_PERSISTENCE_RETRYABLE',
+        message: 'Camada de persistência indisponível temporariamente; tente novamente.',
+      });
+    }
+
+    if (claim.kind === 'ALREADY_PROCESSED') {
       return sendJson(res, 200, {
         success: true,
         received: true,
@@ -215,67 +379,25 @@ export default async function handler(req: any, res: any) {
         replayProtected: true,
         svixId,
         eventId,
+        deliveryUpdated: claim.deliveryUpdated,
+        deliveryStatus: claim.deliveryStatus,
+        reason: claim.reason,
       });
     }
 
-    // Anti-replay distribuído persistente via lock lease (liberado se persistência falhar)
-    let replayLease: DistributedLockHandle | null = null;
-    try {
-      replayLease = await acquireDistributedLeaseLock({
-        lockKey: buildSvixReplayLockKey(svixId),
-        ttlMs: REPLAY_TTL_MS,
-        heartbeatIntervalMs: REPLAY_TTL_MS + 60_000, // sem timer em background
-        metadata: { eventType, providerMessageId },
-        deps: {
-          executeSql: deps.executeSql,
-          isPostgresConfigured: deps.isPostgresConfigured,
-          getServerSupabase: deps.getServerSupabase,
-        },
+    if (claim.kind === 'IN_FLIGHT') {
+      return sendJson(res, 503, {
+        success: false,
+        retryable: true,
+        duplicate: false,
+        error: 'WEBHOOK_IN_FLIGHT_RETRYABLE',
+        svixId,
+        eventId,
+        message: 'Evento webhook em processamento concorrente; reenvio solicitado até confirmação durável.',
       });
-
-      if (!replayLease.acquired) {
-        markSvixIdInMemoryCache(svixId);
-        return sendJson(res, 200, {
-          success: true,
-          received: true,
-          duplicate: true,
-          replayProtected: true,
-          svixId,
-          eventId,
-        });
-      }
-    } catch (lockErr: any) {
-      const lockErrMsg = String(lockErr?.message || '');
-      const isMissingLockSchema =
-        lockErr?.code === '42883' ||
-        lockErr?.code === '42P01' ||
-        (/acquire_distributed_job_lock|distributed_job_locks/i.test(lockErrMsg) &&
-          /does not exist|n[aã]o existe|undefined_function/i.test(lockErrMsg));
-
-      if (!isMissingLockSchema) {
-        console.error('[Resend Webhook] Falha ao verificar anti-replay distribuído:', lockErrMsg);
-        return sendJson(res, 503, {
-          success: false,
-          retryable: true,
-          error: 'WEBHOOK_PERSISTENCE_RETRYABLE',
-          message: 'Camada de persistência indisponível temporariamente; tente novamente.',
-        });
-      }
     }
 
-    const releaseReplayLeaseOnFailure = async () => {
-      if (replayLease?.acquired) {
-        try {
-          await replayLease.release();
-        } catch {}
-      }
-    };
-
-    const webhookMeta = {
-      type: eventType,
-      svix_id: svixId,
-      created_at: payload?.created_at || null,
-    };
+    const hasDurableInbox = claim.kind === 'ACQUIRED';
 
     let deliveryResult: any = { updated: false };
     if (providerMessageId) {
@@ -287,7 +409,9 @@ export default async function handler(req: any, res: any) {
           );
           deliveryResult = pgRes?.rows?.[0]?.result ?? null;
           if (!deliveryResult || typeof deliveryResult !== 'object') {
-            await releaseReplayLeaseOnFailure();
+            if (hasDurableInbox) {
+              await markDurableWebhookFailed(deps, svixId, 'INVALID_APPLY_RESULT');
+            }
             return sendJson(res, 503, {
               success: false,
               retryable: true,
@@ -297,7 +421,9 @@ export default async function handler(req: any, res: any) {
           }
         } catch (err: any) {
           console.error('[Resend Webhook] Erro ao persistir evento via PG:', err?.message);
-          await releaseReplayLeaseOnFailure();
+          if (hasDurableInbox) {
+            await markDurableWebhookFailed(deps, svixId, err?.message || 'PG_APPLY_ERROR');
+          }
           return sendJson(res, 503, {
             success: false,
             retryable: true,
@@ -309,7 +435,9 @@ export default async function handler(req: any, res: any) {
         try {
           const sb = deps.getServerSupabase() as any;
           if (!sb || typeof sb.rpc !== 'function') {
-            await releaseReplayLeaseOnFailure();
+            if (hasDurableInbox) {
+              await markDurableWebhookFailed(deps, svixId, 'SUPABASE_CLIENT_UNAVAILABLE');
+            }
             return sendJson(res, 503, {
               success: false,
               retryable: true,
@@ -324,7 +452,13 @@ export default async function handler(req: any, res: any) {
           });
           if (rpcRes?.error || !rpcRes?.data) {
             console.error('[Resend Webhook] Erro ao persistir evento via RPC:', rpcRes?.error?.message);
-            await releaseReplayLeaseOnFailure();
+            if (hasDurableInbox) {
+              await markDurableWebhookFailed(
+                deps,
+                svixId,
+                rpcRes?.error?.message || 'RPC_APPLY_ERROR'
+              );
+            }
             return sendJson(res, 503, {
               success: false,
               retryable: true,
@@ -335,7 +469,9 @@ export default async function handler(req: any, res: any) {
           deliveryResult = rpcRes.data;
         } catch (err: any) {
           console.error('[Resend Webhook] Exceção ao persistir evento via RPC:', err?.message);
-          await releaseReplayLeaseOnFailure();
+          if (hasDurableInbox) {
+            await markDurableWebhookFailed(deps, svixId, err?.message || 'RPC_APPLY_EXCEPTION');
+          }
           return sendJson(res, 503, {
             success: false,
             retryable: true,
@@ -346,15 +482,41 @@ export default async function handler(req: any, res: any) {
       }
     }
 
-    // Marca svix-id como processado SOMENTE após persistência confirmada (permite retry após 5xx)
-    markSvixIdInMemoryCache(svixId);
+    const deliveryUpdated = Boolean(deliveryResult?.updated);
+    const deliveryStatus = deliveryResult?.status ? String(deliveryResult.status) : null;
+    const reason = deliveryResult?.reason ? String(deliveryResult.reason) : null;
+
+    if (hasDurableInbox) {
+      try {
+        await markDurableWebhookCompleted(deps, {
+          svixId,
+          deliveryUpdated,
+          deliveryStatus,
+          reason,
+        });
+      } catch (completeErr: any) {
+        console.error('[Resend Webhook] Erro ao concluir estado PROCESSED:', completeErr?.message);
+        await markDurableWebhookFailed(
+          deps,
+          svixId,
+          completeErr?.message || 'WEBHOOK_COMPLETE_ERROR'
+        );
+        return sendJson(res, 503, {
+          success: false,
+          retryable: true,
+          error: 'WEBHOOK_PERSISTENCE_RETRYABLE',
+          message: 'Falha ao confirmar idempotência durável do webhook; reenvio solicitado.',
+        });
+      }
+    }
 
     const webhookItem = {
       id: eventId,
       svixId,
       type: eventType,
       providerMessageId: providerMessageId || null,
-      deliveryUpdated: Boolean(deliveryResult?.updated),
+      deliveryUpdated,
+      deliveryStatus,
       timestamp: String(payload?.created_at || new Date().toISOString()),
     };
 
@@ -367,9 +529,9 @@ export default async function handler(req: any, res: any) {
       duplicate: false,
       svixId,
       eventId: webhookItem.id,
-      deliveryUpdated: webhookItem.deliveryUpdated,
-      deliveryStatus: deliveryResult?.status || null,
-      reason: deliveryResult?.reason || null,
+      deliveryUpdated,
+      deliveryStatus,
+      reason,
     });
   }
 

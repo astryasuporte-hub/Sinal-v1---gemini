@@ -78,7 +78,9 @@ export async function enqueueNotificationOutbox(
     return { enqueued: false, error: 'INVALID_OUTBOX_PAYLOAD' };
   }
 
-  const dedupKey = `event:${input.eventId}`;
+  const eventRevision = Math.max(1, Math.floor(Number(input.eventRevision ?? 1) || 1));
+  const dedupKey =
+    eventRevision > 1 ? `event:${input.eventId}:rev:${eventRevision}` : `event:${input.eventId}`;
   const eventType = input.type || 'NEWS_HIGH_RELEVANCE';
   const maxAttempts = Math.max(1, Math.min(10, Number(options?.maxAttempts ?? 5)));
   const deps = getDeps();
@@ -186,7 +188,7 @@ export async function recoverMissingNotificationOutbox(options?: {
   const cutoffIso = new Date(Date.now() - sinceHours * 3600_000).toISOString();
 
   const missingRes = await queryFn(
-    `SELECT e.id, e.title, e.summary, e.relevance_score, e.status
+    `SELECT e.id, e.title, e.summary, e.relevance_score, e.status, COALESCE(e.revision, 1) AS revision
        FROM public.events e
       WHERE COALESCE(e.published_at, e.created_at) >= $1::timestamptz
         AND NOT EXISTS (
@@ -260,6 +262,7 @@ export async function recoverMissingNotificationOutbox(options?: {
   for (const ev of missingEvents) {
     const eventId = String(ev.id);
     const eventType = String(ev.status || '').toUpperCase() === 'UPDATED' ? 'EVENT_UPDATED' : 'NEWS_HIGH_RELEVANCE';
+    const eventRevision = Math.max(1, Number(ev.revision || 1));
     const res = await enqueueNotificationOutbox(
       {
         eventId,
@@ -270,6 +273,7 @@ export async function recoverMissingNotificationOutbox(options?: {
         topicIds: topicsByEvent.get(eventId) || [],
         sourceIds: sourcesByEvent.get(eventId) || [],
         type: eventType,
+        eventRevision,
       },
       options?.queryFn ? { queryFn: options.queryFn } : undefined
     );

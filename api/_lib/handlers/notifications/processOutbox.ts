@@ -4,15 +4,20 @@
  *
  * Protected Server-Side Endpoint: /api/notifications/process-outbox
  *
- * Processa o lote de eventos pendentes/com retry em internal.notification_outbox
- * usando trava distribuída fail-closed contra execução simultânea.
+ * Processa lotes pendentes/com retry em internal.notification_outbox
+ * usando trava distribuída fail-closed contra execução simultânea e log estruturado sem PII.
  */
 
 import { sendJson, setCorsHeaders, readJsonBody } from '../../common.js';
 import { verifyAdminRequest } from '../../adminAuth.js';
 import { safeCompare } from '../../crypto.js';
 import { acquireDistributedLeaseLock } from '../../distributedLock.js';
-import { processNotificationOutboxBatch } from '../../notificationOutbox.js';
+import {
+  getNotificationOutboxStats,
+  processNotificationOutboxBatch,
+} from '../../notificationOutbox.js';
+
+const OUTBOX_WORKER_LOCK_KEY = 'fatosbr:notification-outbox:worker';
 
 async function isAuthorizedTrigger(req: any): Promise<boolean> {
   const authHeader = String(req?.headers?.authorization || '');
@@ -56,31 +61,92 @@ export default async function handler(req: any, res: any) {
     });
   }
 
+  const startedMs = Date.now();
+  const startedAt = new Date(startedMs).toISOString();
+  const runId = `outbox_${startedMs.toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+
   try {
     const urlObj = new URL(req.url || '/api/notifications/process-outbox', 'http://localhost');
     const body = req.method === 'POST' ? await readJsonBody(req) : {};
     const rawLimit = body?.limit ?? urlObj.searchParams.get('limit') ?? 25;
     const limit = Math.max(1, Math.min(100, Number(rawLimit) || 25));
 
+    const rawMaxBatches = body?.maxBatches ?? urlObj.searchParams.get('maxBatches') ?? 1;
+    const maxBatches = Math.max(1, Math.min(4, Number(rawMaxBatches) || 1));
+
     const lock = await acquireDistributedLeaseLock({
-      lockKey: 'fatosbr:notification-outbox:worker',
+      lockKey: OUTBOX_WORKER_LOCK_KEY,
       ttlMs: 120_000,
-      metadata: { limit },
+      metadata: { limit, maxBatches, runId },
     });
 
     if (!lock.acquired) {
       return sendJson(res, 409, {
         success: false,
         error: 'OUTBOX_WORKER_ALREADY_RUNNING',
+        lockKey: OUTBOX_WORKER_LOCK_KEY,
         message: 'Já existe um worker processando a fila de notificações.',
       });
     }
 
     try {
-      const summary = await processNotificationOutboxBatch({ limit });
+      let claimed = 0;
+      let completed = 0;
+      let retried = 0;
+      let deadLettered = 0;
+      let notificationsCreated = 0;
+      let batchesExecuted = 0;
+      const errors: string[] = [];
+
+      for (let batchIdx = 0; batchIdx < maxBatches; batchIdx++) {
+        const batch = await processNotificationOutboxBatch({ limit });
+        batchesExecuted++;
+        claimed += batch.claimed;
+        completed += batch.completed;
+        retried += batch.retried;
+        deadLettered += batch.deadLettered;
+        notificationsCreated += batch.notificationsCreated;
+        if (batch.errors.length > 0) {
+          errors.push(...batch.errors);
+        }
+        if (batch.claimed < limit) {
+          break;
+        }
+      }
+
+      const statsAfter = await getNotificationOutboxStats();
+      const finishedAt = new Date().toISOString();
+      const runLog = {
+        runId,
+        startedAt,
+        finishedAt,
+        durationMs: Date.now() - startedMs,
+        lockKey: OUTBOX_WORKER_LOCK_KEY,
+        limit,
+        maxBatches,
+        batchesExecuted,
+        claimed,
+        completed,
+        retried,
+        deadLettered,
+        notificationsCreated,
+        errorsCount: errors.length,
+        queueStatsAfter: statsAfter,
+      };
+
+      console.info('[NotificationOutboxWorker]', JSON.stringify(runLog));
+
       return sendJson(res, 200, {
         success: true,
-        ...summary,
+        claimed,
+        completed,
+        retried,
+        deadLettered,
+        notificationsCreated,
+        errors,
+        batchesExecuted,
+        statsAfter,
+        runLog,
       });
     } finally {
       await lock.release();
