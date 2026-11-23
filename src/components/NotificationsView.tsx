@@ -170,21 +170,14 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
         if (!res.data) return;
 
         const remoteSettings = res.data.notification_settings;
-        const baseAlert =
-          typeof res.data.email_breaking_alerts === 'boolean'
-            ? res.data.email_breaking_alerts
-            : DEFAULT_NOTIF_SETTINGS.urgentEvents;
-
         const merged =
           remoteSettings && typeof remoteSettings === 'object'
             ? {
                 ...DEFAULT_NOTIF_SETTINGS,
-                urgentEvents: baseAlert,
                 ...remoteSettings
               }
             : {
-                ...DEFAULT_NOTIF_SETTINGS,
-                urgentEvents: baseAlert
+                ...DEFAULT_NOTIF_SETTINGS
               };
 
         setSettings(merged);
@@ -373,7 +366,6 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
     setIsSavingSettings(true);
     try {
       const res = await userService.updateUserPreferencesDetailed(currentUser.id, {
-        email_breaking_alerts: settings.urgentEvents,
         notification_settings: settings
       });
 

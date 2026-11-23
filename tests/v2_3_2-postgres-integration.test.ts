@@ -364,7 +364,26 @@ function createPgSupabaseAdapter(db: PGlite, rlsUserId?: string) {
   // Silence unused warning
   void execWithContext;
 
-  return { from };
+  const rpc = async (fnName: string, args: Record<string, any> = {}) => {
+    try {
+      const entries = Object.entries(args || {});
+      if (entries.length === 0) {
+        const res = await runSqlQuery(`SELECT public."${fnName}"() AS data`);
+        return { data: res.rows?.[0]?.data ?? null, error: null };
+      }
+      const params: any[] = [];
+      const namedArgs = entries.map(([k, v], i) => {
+        params.push(v && typeof v === 'object' && !(v instanceof Date) ? JSON.stringify(v) : v);
+        return `"${k}" := $${i + 1}`;
+      });
+      const res = await runSqlQuery(`SELECT public."${fnName}"(${namedArgs.join(', ')}) AS data`, params);
+      return { data: res.rows?.[0]?.data ?? null, error: null };
+    } catch (err: any) {
+      return { data: null, error: { code: err?.code || 'P0001', message: err?.message || String(err) } };
+    }
+  };
+
+  return { from, rpc };
 }
 
 async function setupBaselineSupabaseCompatibleSchema(db: PGlite) {
@@ -542,6 +561,23 @@ async function run() {
     'utf-8'
   );
 
+  const mig241NotifSql = fs.readFileSync(
+    path.resolve('supabase/migrations/20261122000002_v2_4_1_notifications_body_and_dedup.sql'),
+    'utf-8'
+  );
+  const mig241LocksSql = fs.readFileSync(
+    path.resolve('supabase/migrations/20261122000003_v2_4_1_distributed_locks_and_job_runs.sql'),
+    'utf-8'
+  );
+  const mig241ResendSql = fs.readFileSync(
+    path.resolve('supabase/migrations/20261122000004_v2_4_1_resend_deliveries_and_outbox.sql'),
+    'utf-8'
+  );
+  const mig241EntitiesSql = fs.readFileSync(
+    path.resolve('supabase/migrations/20261122000005_v2_4_1_entity_aliases_and_event_entities.sql'),
+    'utf-8'
+  );
+
   let migOk = true;
   let migErrMsg = '';
   try {
@@ -550,6 +586,10 @@ async function run() {
     // Testar idempotência re-executando ambas
     await db.exec(mig231Sql);
     await db.exec(mig232Sql);
+    await db.exec(mig241NotifSql);
+    await db.exec(mig241LocksSql);
+    await db.exec(mig241ResendSql);
+    await db.exec(mig241EntitiesSql);
   } catch (err: any) {
     migOk = false;
     migErrMsg = err?.message || String(err);
@@ -666,10 +706,13 @@ async function run() {
   // ---------------------------------------------------------------------------
   console.log('\n--- 3. briefingEngine contra CHECK/UNIQUE constraints reais do PostgreSQL ---');
   setNotificationEngineTestDeps({
-    isPostgresConfigured: () => false,
+    isPostgresConfigured: () => true,
+    executeSql: (sql: string, params?: any[]) => db.query(sql, params),
     getServerSupabase: () => serviceRoleAdapter as any
   });
   setBriefingEngineTestDeps({
+    isPostgresConfigured: () => true,
+    executeSql: (sql: string, params?: any[]) => db.query(sql, params),
     getServerSupabase: () => serviceRoleAdapter as any,
     getServerKeys: () => ({ RESEND: '' } as any)
   });
@@ -742,6 +785,8 @@ async function run() {
 
   // 4) Virada de dia UTC: 2026-11-24T01:30Z = 2026-11-23 22:30 BRT -> EVENING do dia 2026-11-23 com Resend 200 -> SENT
   setBriefingEngineTestDeps({
+    isPostgresConfigured: () => true,
+    executeSql: (sql: string, params?: any[]) => db.query(sql, params),
     getServerSupabase: () => serviceRoleAdapter as any,
     getServerKeys: () => ({ RESEND: 're_pg_integration' } as any),
     fetchFn: (async () => new Response(JSON.stringify({ id: 'msg-pg-1' }), { status: 200 })) as any

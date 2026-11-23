@@ -764,6 +764,24 @@ async function run() {
           }
         };
         return chain;
+      },
+      rpc: async (fnName: string, args: any) => {
+        if (fnName === 'acquire_distributed_job_lock') {
+          return {
+            data: { acquired: true, lock_key: args?.p_lock_key, owner_id: args?.p_owner_id, expires_at: new Date(Date.now() + 60_000).toISOString() },
+            error: null
+          };
+        }
+        if (fnName === 'renew_distributed_job_lock') {
+          return { data: { renewed: true }, error: null };
+        }
+        if (fnName === 'release_distributed_job_lock') {
+          return { data: true, error: null };
+        }
+        if (fnName === 'record_briefing_job_run') {
+          return { data: { recorded: true }, error: null };
+        }
+        return { data: null, error: null };
       }
     };
 
@@ -774,6 +792,7 @@ async function run() {
 
     // 5.1 Sem RESEND_API_KEY, briefing avança GENERATING -> READY (nunca SENT)
     setBriefingEngineTestDeps({
+      isPostgresConfigured: () => false,
       getServerSupabase: () => briefingDbMock as any,
       getServerKeys: () => ({ RESEND: '' } as any)
     });

@@ -233,7 +233,7 @@ export function renderSecondaryEventsHtml(eventsList: BriefingEmailEvent[], appU
 export function buildEditorialBriefingHtml(options: EditorialBriefingOptions = {}): string {
   const isEvening = options.type === 'evening';
   const brandName = options.brandName || 'FatosBR';
-  const senderEmail = options.senderEmail || 'noticias@fatosbr.com.br';
+  const senderEmail = options.senderEmail || 'briefings@fatosbr.com.br';
   const appUrl = sanitizeUrl(options.appUrl, 'https://app.fatosbr.com.br').replace(/\/+$/, '');
   const dateFormatted = options.date || new Date().toLocaleDateString('pt-BR', {
     day: '2-digit',

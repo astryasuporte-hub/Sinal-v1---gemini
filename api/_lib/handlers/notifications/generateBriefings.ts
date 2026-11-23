@@ -165,6 +165,13 @@ export default async function handler(req: any, res: any) {
       ...cycleSummary,
     });
   } catch (err: any) {
+    if (err?.code === 'LOCK_STORE_UNAVAILABLE' || err?.statusCode === 503) {
+      return sendJson(res, 503, {
+        success: false,
+        error: 'BRIEFING_LOCK_STORE_UNAVAILABLE',
+        message: 'Armazenamento de trava distribuída indisponível no momento (fail-closed).',
+      });
+    }
     return sendJson(res, 500, {
       success: false,
       error: 'BRIEFING_GENERATION_FAILED',

@@ -6,6 +6,7 @@
  */
 
 import { getServerKeys, sendJson, setCorsHeaders, maskSecret } from '../../common.js';
+import { getResendFromEmail } from '../../resendClient.js';
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);
@@ -30,12 +31,16 @@ export default async function handler(req: any, res: any) {
   }
 
   const start = Date.now();
+  const controller = new AbortController();
+  const timeoutTimer = setTimeout(() => controller.abort(), 8000);
   try {
     const checkRes = await fetch('https://api.resend.com/api-keys', {
       headers: {
         Authorization: `Bearer ${apiKey}`
-      }
+      },
+      signal: controller.signal
     });
+    clearTimeout(timeoutTimer);
     const latencyMs = Date.now() - start;
 
     return sendJson(res, 200, {
@@ -43,11 +48,12 @@ export default async function handler(req: any, res: any) {
       connected: checkRes.ok,
       provider: 'Resend',
       latencyMs,
-      sender: 'onboarding@resend.dev',
+      sender: getResendFromEmail(),
       keyMasked: maskSecret(apiKey),
       statusCode: checkRes.status
     });
   } catch (err: any) {
+    clearTimeout(timeoutTimer);
     return sendJson(res, 200, {
       ok: false,
       connected: false,

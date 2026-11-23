@@ -126,22 +126,58 @@ export const AdminBriefingOpsPanel: React.FC = () => {
             <div className="p-3.5 rounded-xl bg-[#0a0e17] border border-[#182136] space-y-1">
               <div className="text-[11px] text-zinc-400 flex items-center gap-1.5">
                 <ShieldCheck className="w-3.5 h-3.5 text-zinc-400" />
-                <span>Prontidão do Ambiente</span>
+                <span>Prontidão & Outbox</span>
               </div>
               <div className="flex flex-wrap gap-1.5 pt-1">
                 <span className={`text-[10px] font-mono px-2 py-0.5 rounded border ${snapshot.environment.resendConfigured ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30' : 'bg-amber-500/10 text-amber-300 border-amber-500/30'}`}>
                   {snapshot.environment.resendConfigured ? 'RESEND OK' : 'SEM RESEND_KEY'}
                 </span>
+                <span className={`text-[10px] font-mono px-2 py-0.5 rounded border ${snapshot.environment.resendWebhookSecretConfigured ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30' : 'bg-zinc-800 text-zinc-400 border-zinc-700'}`}>
+                  {snapshot.environment.resendWebhookSecretConfigured ? 'WEBHOOK OK' : 'SEM WEBHOOK_SEC'}
+                </span>
                 <span className={`text-[10px] font-mono px-2 py-0.5 rounded border ${snapshot.environment.cronSecretConfigured ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30' : 'bg-zinc-800 text-zinc-400 border-zinc-700'}`}>
                   {snapshot.environment.cronSecretConfigured ? 'CRON_SECRET OK' : 'SEM CRON_SECRET'}
                 </span>
               </div>
-              <div className="text-[10px] text-zinc-500 font-mono flex items-center gap-1 pt-0.5">
-                <Lock className="w-3 h-3" />
-                <span>Locks ativos: {snapshot.environment.activeLocks.length}</span>
+              <div className="text-[10px] text-zinc-500 font-mono flex flex-wrap items-center gap-2 pt-0.5">
+                <span className="inline-flex items-center gap-1">
+                  <Lock className="w-3 h-3" />
+                  <span>Locks: {snapshot.environment.activeLocks.length}</span>
+                </span>
+                {snapshot.outboxSummary && (
+                  <span>
+                    Outbox P:{snapshot.outboxSummary.pending} F:{snapshot.outboxSummary.failed} DL:{snapshot.outboxSummary.deadLetter}
+                  </span>
+                )}
               </div>
             </div>
           </div>
+
+          {/* Métricas de Entrega Resend & Próxima Janela de Execução */}
+          {(snapshot.resendSummary || snapshot.schedulesSummary.nextMorningRunUtc) && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-[11px] font-mono">
+              {snapshot.resendSummary && (
+                <div className="px-3.5 py-2.5 rounded-xl bg-[#0a0e17] border border-[#182136] flex flex-wrap items-center justify-between gap-2 text-zinc-300">
+                  <span className="text-zinc-400">Entregas Resend:</span>
+                  <span>
+                    Aceitas {snapshot.resendSummary.accepted} · Entregues {snapshot.resendSummary.delivered} · Falhas {snapshot.resendSummary.failed} · Bounce {snapshot.resendSummary.bounced}
+                  </span>
+                </div>
+              )}
+              <div className="px-3.5 py-2.5 rounded-xl bg-[#0a0e17] border border-[#182136] flex flex-wrap items-center justify-between gap-2 text-zinc-300">
+                <span className="text-zinc-400">Próxima Janela:</span>
+                <span>
+                  {snapshot.schedulesSummary.nextMorningRunUtc
+                    ? `Manhã ${new Date(snapshot.schedulesSummary.nextMorningRunUtc).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}`
+                    : '—'}
+                  {' · '}
+                  {snapshot.schedulesSummary.nextEveningRunUtc
+                    ? `Noite ${new Date(snapshot.schedulesSummary.nextEveningRunUtc).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}`
+                    : '—'}
+                </span>
+              </div>
+            </div>
+          )}
 
           {/* Histórico de Briefings Persistidos */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

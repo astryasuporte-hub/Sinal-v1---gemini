@@ -19,6 +19,7 @@ import { getServerSupabase } from '../../db.js';
 import { safeCompare } from '../../crypto.js';
 import { verifySupabaseAdminSession } from '../../adminAuth.js';
 import { executeSql, isPostgresConfigured } from '../../postgres.js';
+import { getResendFromEmail, sendResendEmailWithRetry } from '../../resendClient.js';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -181,7 +182,7 @@ export default async function handler(req: any, res: any) {
     }
   }
 
-  const verifiedDefaultSender = process.env.RESEND_FROM_EMAIL || 'FatosBR Briefing <onboarding@resend.dev>';
+  const verifiedDefaultSender = getResendFromEmail();
   const from = caller.isAdmin && typeof body.from === 'string' && body.from.trim()
     ? body.from.trim()
     : verifiedDefaultSender;
@@ -198,54 +199,45 @@ export default async function handler(req: any, res: any) {
          <p style="margin:0;color:#d4d4d8;line-height:1.6;">${String(body.summary || text).replace(/[<>&]/g, '')}</p>
        </div>`;
 
-  try {
-    const apiRes = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`
-      },
-      body: JSON.stringify({
-        from,
-        to: [toEmail],
-        subject,
-        html,
-        text
-      })
+  const idempotencyKey =
+    typeof body.idempotencyKey === 'string' && body.idempotencyKey.trim()
+      ? body.idempotencyKey.trim().slice(0, 128)
+      : undefined;
+
+  const sendResult = await sendResendEmailWithRetry({
+    apiKey,
+    from,
+    to: [toEmail],
+    subject,
+    html,
+    text,
+    idempotencyKey,
+  });
+
+  if (!sendResult.accepted) {
+    console.warn('[Resend Send] Falha na entrega via Resend API:', {
+      status: sendResult.statusCode,
+      userId: caller.userId,
+      error: sendResult.error || 'RESEND_API_ERROR'
     });
-
-    const data = await apiRes.json().catch(() => ({}));
-
-    if (!apiRes.ok) {
-      console.warn('[Resend Send] Falha na entrega via Resend API:', {
-        status: apiRes.status,
-        userId: caller.userId,
-        error: data?.message || data?.name || 'RESEND_API_ERROR'
-      });
-      return sendJson(res, apiRes.status, {
-        success: false,
-        error: data?.message || data?.error || `Falha no envio pelo provedor (HTTP ${apiRes.status})`
-      });
-    }
-
-    console.info('[Resend Send] E-mail despachado com sucesso:', {
-      id: data?.id,
-      userId: caller.userId
-    });
-
-    return sendJson(res, 200, {
-      success: true,
-      id: data?.id,
-      recipient: toEmail,
-      provider: 'Resend',
-      message: `E-mail enviado com sucesso para ${toEmail}.`
-    });
-  } catch (err: any) {
-    console.error('[Resend Send] Erro de conexão ao enviar e-mail:', err?.message);
-    return sendJson(res, 500, {
+    return sendJson(res, sendResult.statusCode || 502, {
       success: false,
-      error: 'RESEND_CONNECTION_ERROR',
-      message: err?.message || 'Erro interno ao contatar o provedor de e-mail.'
+      error: sendResult.error || `Falha no envio pelo provedor (HTTP ${sendResult.statusCode})`
     });
   }
+
+  console.info('[Resend Send] E-mail aceito pelo Resend:', {
+    id: sendResult.messageId,
+    userId: caller.userId
+  });
+
+  return sendJson(res, 200, {
+    success: true,
+    id: sendResult.messageId,
+    recipient: toEmail,
+    from,
+    provider: 'Resend',
+    deliveryStatus: 'ACCEPTED',
+    message: `E-mail aceito para entrega para ${toEmail}.`
+  });
 }

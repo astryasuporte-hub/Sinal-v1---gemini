@@ -905,6 +905,8 @@ export interface BriefingOpsSnapshotDto {
   generatedAt: string;
   environment: {
     resendConfigured: boolean;
+    resendFromEmail?: string;
+    resendWebhookSecretConfigured?: boolean;
     cronSecretConfigured: boolean;
     cronBriefingsEnabledInVercel: boolean;
     activeLocks: string[];
@@ -927,6 +929,23 @@ export interface BriefingOpsSnapshotDto {
     eligibleEveningUsers: number;
     weekendSubscribers: number;
     recipientsWithEmailCount: number;
+    nextMorningRunUtc?: string;
+    nextEveningRunUtc?: string;
+  };
+  resendSummary?: {
+    totalDeliveries: number;
+    accepted: number;
+    delivered: number;
+    failed: number;
+    bounced: number;
+    retrying: number;
+  };
+  outboxSummary?: {
+    pending: number;
+    processing: number;
+    failed: number;
+    deadLetter: number;
+    completed: number;
   };
   recentBriefings: Array<{
     id: string;

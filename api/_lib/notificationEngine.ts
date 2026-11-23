@@ -34,6 +34,7 @@ export interface CreateNotificationParams {
   type: NotificationType | 'EVENT_UPDATED' | 'OPERATIONAL_ALERT';
   title: string;
   subtitle?: string;
+  body?: string;
   category?: 'acontecimentos' | 'entidades' | 'temas' | 'fontes' | 'atualizacoes';
   eventId?: string;
   entityId?: string;
@@ -154,7 +155,7 @@ function mapPreferenceRow(userId: string, prefRow: any, settingsRow: any): UserA
   return {
     userId,
     emailBreakingAlerts: baseBreaking,
-    urgentEvents: typeof ns?.urgentEvents === 'boolean' ? ns.urgentEvents : baseBreaking,
+    urgentEvents: typeof ns?.urgentEvents === 'boolean' ? ns.urgentEvents : true,
     entityUpdates: typeof ns?.entityUpdates === 'boolean' ? ns.entityUpdates : true,
     topicAlerts: typeof ns?.topicAlerts === 'boolean' ? ns.topicAlerts : true,
     sourcesDigest: typeof ns?.sourcesDigest === 'boolean' ? ns.sourcesDigest : true,
@@ -270,6 +271,7 @@ export const notificationEngine = {
       type,
       title,
       subtitle,
+      body,
       category = 'acontecimentos',
       eventId,
       entityId,
@@ -281,34 +283,14 @@ export const notificationEngine = {
     }
 
     const canonicalType = normalizeNotificationType(type);
+    const resolvedBody = String(body || subtitle || title).trim();
+    const resolvedSubtitle = String(subtitle || resolvedBody).trim();
     const enrichedMetadata: Record<string, any> = { ...metadata, notification_type: canonicalType };
     const { executeSql: runSql, isPostgresConfigured: pgConfigured, getServerSupabase: getSb } = getDeps();
 
     // 1. Tentar persistência direta via PostgreSQL nativo se configurado
     if (pgConfigured()) {
-      try {
-        const insertRes = await runSql(
-          `INSERT INTO public.notifications (user_id, type, title, subtitle, category, read, event_id, entity_id, metadata, created_at)
-           VALUES ($1, $2, $3, $4, $5, FALSE, $6, $7, $8, NOW())
-           ON CONFLICT DO NOTHING
-           RETURNING id`,
-          [
-            userId,
-            canonicalType,
-            title,
-            subtitle || null,
-            category,
-            eventId || null,
-            entityId || null,
-            JSON.stringify(enrichedMetadata),
-          ]
-        );
-
-        if (insertRes.rows[0]?.id) {
-          return { success: true, id: insertRes.rows[0].id };
-        }
-
-        // Conflito idempotente (ON CONFLICT DO NOTHING) -> localiza registro existente
+      const findExistingPg = async (): Promise<string | undefined> => {
         if (eventId) {
           const existingRes = await runSql(
             `SELECT id FROM public.notifications
@@ -316,9 +298,7 @@ export const notificationEngine = {
              LIMIT 1`,
             [userId, eventId, category]
           );
-          if (existingRes.rows[0]?.id) {
-            return { success: true, id: existingRes.rows[0].id, duplicate: true };
-          }
+          if (existingRes.rows[0]?.id) return String(existingRes.rows[0].id);
         }
         if (enrichedMetadata?.briefingId) {
           const existingBriefing = await runSql(
@@ -327,14 +307,60 @@ export const notificationEngine = {
              LIMIT 1`,
             [userId, String(enrichedMetadata.briefingId), canonicalType]
           );
-          if (existingBriefing.rows[0]?.id) {
-            return { success: true, id: existingBriefing.rows[0].id, duplicate: true };
-          }
+          if (existingBriefing.rows[0]?.id) return String(existingBriefing.rows[0].id);
         }
-        return { success: true, duplicate: true };
+        return undefined;
+      };
+
+      const runPgInsert = async (includeBody: boolean, includeSubtitle: boolean) => {
+        const cols = ['user_id', 'type', 'title'];
+        const vals: any[] = [userId, canonicalType, title];
+        if (includeBody) {
+          cols.push('body');
+          vals.push(resolvedBody);
+        }
+        if (includeSubtitle) {
+          cols.push('subtitle');
+          vals.push(resolvedSubtitle);
+        }
+        cols.push('category', 'read', 'event_id', 'entity_id', 'metadata', 'created_at');
+        vals.push(
+          category,
+          false,
+          eventId || null,
+          entityId || null,
+          JSON.stringify(enrichedMetadata)
+        );
+        const placeholders = vals.map((_, idx) => `$${idx + 1}`).join(', ');
+        return runSql(
+          `INSERT INTO public.notifications (${cols.join(', ')})
+           VALUES (${placeholders}, NOW())
+           ON CONFLICT DO NOTHING
+           RETURNING id`,
+          vals
+        );
+      };
+
+      try {
+        let insertRes;
+        try {
+          insertRes = await runPgInsert(true, true);
+        } catch (colErr: any) {
+          if (!isMissingColumnError(colErr)) throw colErr;
+          const msg = String(colErr.message || '').toLowerCase();
+          insertRes = await runPgInsert(!msg.includes('body'), !msg.includes('subtitle'));
+        }
+
+        if (insertRes.rows[0]?.id) {
+          return { success: true, id: insertRes.rows[0].id };
+        }
+
+        const existingId = await findExistingPg();
+        return { success: true, id: existingId, duplicate: true };
       } catch (err: any) {
         if (isUniqueViolationError(err)) {
-          return { success: true, duplicate: true };
+          const existingId = await findExistingPg().catch(() => undefined);
+          return { success: true, id: existingId, duplicate: true };
         }
         console.warn('[NotificationEngine] Falha ao gravar via PostgreSQL direto:', err?.code || err?.message);
       }
@@ -358,11 +384,26 @@ export const notificationEngine = {
         }
       }
 
+      if (canonicalType === 'BRIEFING_READY' && enrichedMetadata?.briefingId) {
+        const { data: existingBr, error: brCheckErr } = await (supabase as any)
+          .from('notifications')
+          .select('id')
+          .eq('user_id', userId)
+          .eq('type', 'BRIEFING_READY')
+          .contains('metadata', { briefingId: String(enrichedMetadata.briefingId) })
+          .maybeSingle();
+
+        if (!brCheckErr && existingBr?.id) {
+          return { success: true, id: existingBr.id, duplicate: true };
+        }
+      }
+
       const rowPayload: Record<string, any> = {
         user_id: userId,
         type: canonicalType,
         title,
-        subtitle: subtitle || null,
+        body: resolvedBody,
+        subtitle: resolvedSubtitle,
         category,
         read: false,
         read_at: null,
@@ -377,16 +418,13 @@ export const notificationEngine = {
         .select('id')
         .single();
 
-      // Tolerância estrita apenas para colunas opcionais não aplicadas ainda (ex: read_at)
+      // Tolerância estrita apenas para colunas ausentes em esquemas antigos (read_at / subtitle / body)
       if (error && isMissingColumnError(error)) {
         const fallbackPayload = { ...rowPayload };
-        if (String(error.message || '').toLowerCase().includes('read_at')) {
-          delete fallbackPayload.read_at;
-        }
-        if (String(error.message || '').toLowerCase().includes('subtitle')) {
-          fallbackPayload.body = fallbackPayload.subtitle;
-          delete fallbackPayload.subtitle;
-        }
+        const msg = String(error.message || '').toLowerCase();
+        if (msg.includes('read_at')) delete fallbackPayload.read_at;
+        if (msg.includes('subtitle')) delete fallbackPayload.subtitle;
+        if (msg.includes('body')) delete fallbackPayload.body;
         const retry = await (supabase as any)
           .from('notifications')
           .insert(fallbackPayload)
@@ -476,14 +514,17 @@ export const notificationEngine = {
     }
 
     const isEvening = String(params.briefingType).toUpperCase() === 'EVENING';
+    const summaryText = `${params.eventsCount} acontecimentos consolidados no seu ${
+      isEvening ? 'resumo da noite' : 'resumo da manhã'
+    }.`;
+
     return this.createNotification({
       userId: params.userId,
       type: 'BRIEFING_READY',
       category: 'atualizacoes',
       title: params.title,
-      subtitle: `${params.eventsCount} acontecimentos consolidados no seu ${
-        isEvening ? 'resumo da noite' : 'resumo da manhã'
-      }.`,
+      body: summaryText,
+      subtitle: summaryText,
       metadata: {
         briefingId: params.briefingId,
         briefingType: isEvening ? 'EVENING' : 'MORNING',
@@ -630,8 +671,9 @@ export const notificationEngine = {
           continue;
         }
 
-        // Bloqueio global de alertas importantes
-        if (!prefs.emailBreakingAlerts || !prefs.urgentEvents) {
+        // Bloqueio in-app depende exclusivamente da preferência in-app (urgentEvents),
+        // sem acoplamento indevido com o canal de e-mail (emailBreakingAlerts).
+        if (!prefs.urgentEvents) {
           stats.skippedByPreferences++;
           continue;
         }
@@ -660,12 +702,14 @@ export const notificationEngine = {
           continue;
         }
 
+        const descriptionText = (input.summary || input.title).trim();
         const res = await this.createNotification({
           userId,
           type: canonicalType,
           category: chosenCategory,
           title: input.title,
-          subtitle: input.summary,
+          body: descriptionText,
+          subtitle: descriptionText,
           eventId: input.eventId,
           entityId: chosenEntityId,
           metadata: { relevanceScore },

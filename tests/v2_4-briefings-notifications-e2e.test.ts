@@ -330,7 +330,26 @@ function createPgSupabaseAdapter(db: PGlite, rlsUserId?: string) {
     return chain;
   };
 
-  return { from };
+  const rpc = async (fnName: string, args: Record<string, any> = {}) => {
+    try {
+      const entries = Object.entries(args || {});
+      if (entries.length === 0) {
+        const res = await runSqlQuery(`SELECT public."${fnName}"() AS data`);
+        return { data: res.rows?.[0]?.data ?? null, error: null };
+      }
+      const params: any[] = [];
+      const namedArgs = entries.map(([k, v], i) => {
+        params.push(v && typeof v === 'object' && !(v instanceof Date) ? JSON.stringify(v) : v);
+        return `"${k}" := $${i + 1}`;
+      });
+      const res = await runSqlQuery(`SELECT public."${fnName}"(${namedArgs.join(', ')}) AS data`, params);
+      return { data: res.rows?.[0]?.data ?? null, error: null };
+    } catch (err: any) {
+      return { data: null, error: { code: err?.code || 'P0001', message: err?.message || String(err) } };
+    }
+  };
+
+  return { from, rpc };
 }
 
 async function setupIsolatedSchema(db: PGlite) {
@@ -499,8 +518,28 @@ async function setupIsolatedSchema(db: PGlite) {
     path.resolve(process.cwd(), 'supabase/migrations/20261121000002_v2_3_2_briefings_period_and_items.sql'),
     'utf-8'
   );
+  const mig3 = fs.readFileSync(
+    path.resolve(process.cwd(), 'supabase/migrations/20261122000002_v2_4_1_notifications_body_and_dedup.sql'),
+    'utf-8'
+  );
+  const mig4 = fs.readFileSync(
+    path.resolve(process.cwd(), 'supabase/migrations/20261122000003_v2_4_1_distributed_locks_and_job_runs.sql'),
+    'utf-8'
+  );
+  const mig5 = fs.readFileSync(
+    path.resolve(process.cwd(), 'supabase/migrations/20261122000004_v2_4_1_resend_deliveries_and_outbox.sql'),
+    'utf-8'
+  );
+  const mig6 = fs.readFileSync(
+    path.resolve(process.cwd(), 'supabase/migrations/20261122000005_v2_4_1_entity_aliases_and_event_entities.sql'),
+    'utf-8'
+  );
   await db.exec(mig1);
   await db.exec(mig2);
+  await db.exec(mig3);
+  await db.exec(mig4);
+  await db.exec(mig5);
+  await db.exec(mig6);
 }
 
 function createMockRes() {
@@ -541,12 +580,14 @@ async function main() {
   let resendForceFailure = false;
 
   setNotificationEngineTestDeps({
-    isPostgresConfigured: () => false,
+    isPostgresConfigured: () => true,
+    executeSql: (sql: string, params?: any[]) => db.query(sql, params),
     getServerSupabase: () => serviceClient as any,
   });
 
   setBriefingEngineTestDeps({
-    isPostgresConfigured: () => false,
+    isPostgresConfigured: () => true,
+    executeSql: (sql: string, params?: any[]) => db.query(sql, params),
     getServerSupabase: () => serviceClient as any,
     getServerKeys: () => ({ RESEND: 're_test_mock_key' } as any),
     fetchFn: (async (_url: any, init?: any) => {
@@ -727,6 +768,7 @@ async function main() {
   );
   setBriefingEngineTestDeps({
     isPostgresConfigured: () => false,
+    executeSql: (sql: string, params?: any[]) => dbWithOrderIdx.query(sql, params),
     getServerSupabase: () => createPgSupabaseAdapter(dbWithOrderIdx) as any,
     getServerKeys: () => ({ RESEND: '' } as any),
   });
@@ -748,7 +790,8 @@ async function main() {
 
   // Restaura deps do db principal para os próximos blocos
   setBriefingEngineTestDeps({
-    isPostgresConfigured: () => false,
+    isPostgresConfigured: () => true,
+    executeSql: (sql: string, params?: any[]) => db.query(sql, params),
     getServerSupabase: () => serviceClient as any,
     getServerKeys: () => ({ RESEND: 're_test_mock_key' } as any),
     fetchFn: (async (_url: any, init?: any) => {
@@ -837,6 +880,8 @@ async function main() {
   // 6. Endpoint protegido Admin Center Ops (/api/admin/briefings-ops) sem PII
   console.log('\n📋 Bloco 6: Telemetria /api/admin/briefings-ops protegida e sem PII');
   setBriefingsOpsTestDeps({
+    isPostgresConfigured: () => true,
+    executeSql: (sql: string, params?: any[]) => db.query(sql, params),
     getServerSupabase: () => serviceClient as any,
   });
 

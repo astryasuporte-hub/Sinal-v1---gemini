@@ -17,7 +17,17 @@
 import { getServerSupabase } from './db.js';
 import { getServerKeys } from './common.js';
 import { notificationEngine } from './notificationEngine.js';
-import { getPostgresPool, isPostgresConfigured } from './postgres.js';
+import { executeSql, getPostgresPool, isPostgresConfigured } from './postgres.js';
+import {
+  acquireDistributedLeaseLock,
+  DistributedLockDeps,
+  listActiveDistributedLocks,
+} from './distributedLock.js';
+import {
+  buildBriefingEmailIdempotencyKey,
+  getResendFromEmail,
+  sendResendEmailWithRetry,
+} from './resendClient.js';
 
 export type BriefingEditionType = 'MORNING' | 'EVENING';
 
@@ -74,6 +84,9 @@ export interface GenerateBriefingResult {
   emailSent?: boolean;
   emailSkippedReason?: 'DISABLED_OR_NO_EMAIL' | 'OPTED_OUT' | 'ALREADY_SENT' | 'RESEND_UNCONFIGURED';
   emailError?: string;
+  providerMessageId?: string;
+  deliveryStatus?: string;
+  reconciledFromDelivery?: boolean;
   recoveredFromStatus?: string;
   error?: string;
 }
@@ -104,6 +117,7 @@ interface BriefingEngineDeps {
   fetchFn: typeof fetch;
   isPostgresConfigured: typeof isPostgresConfigured;
   getPostgresPool: typeof getPostgresPool;
+  executeSql: typeof executeSql;
 }
 
 let testDeps: BriefingEngineDeps | null = null;
@@ -119,6 +133,7 @@ export function setBriefingEngineTestDeps(deps: Partial<BriefingEngineDeps> | nu
     fetchFn: deps.fetchFn || fetch,
     isPostgresConfigured: deps.isPostgresConfigured || isPostgresConfigured,
     getPostgresPool: deps.getPostgresPool || getPostgresPool,
+    executeSql: deps.executeSql || executeSql,
   };
 }
 
@@ -130,108 +145,176 @@ function getDeps(): BriefingEngineDeps {
       fetchFn: fetch,
       isPostgresConfigured,
       getPostgresPool,
+      executeSql,
     }
   );
 }
 
-const activeBriefingLocks = new Set<string>();
 const recentRunLogs: BriefingRunLogEntry[] = [];
 const MAX_RUN_LOGS = 50;
 const STALE_GENERATING_MS = 15 * 60 * 1000;
+const BRIEFING_LOCK_TTL_MS = 5 * 60 * 1000;
 
 function sanitizeRunErrorMessage(raw: unknown): string {
   const msg = String(raw || '').trim();
   if (!msg) return '';
-  return msg.replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[email-redacted]').slice(0, 240);
+  return msg
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[email-redacted]')
+    .replace(/(Bearer\s+|re_[A-Za-z0-9_]+|whsec_[A-Za-z0-9+/=]+)/gi, '[secret-redacted]')
+    .slice(0, 240);
 }
 
-interface AcquiredLockHandle {
-  acquired: boolean;
-  lockKey: string;
-  release: () => Promise<void>;
+function getLockDepsFromEngine(): Partial<DistributedLockDeps> {
+  const d = getDeps();
+  return {
+    executeSql: d.executeSql,
+    isPostgresConfigured: d.isPostgresConfigured,
+    getServerSupabase: d.getServerSupabase,
+  };
 }
 
-async function acquireBriefingCycleLock(
-  type: BriefingEditionType,
-  localDate: string
-): Promise<AcquiredLockHandle> {
-  const lockKey = `${type}:${localDate}`;
-  if (activeBriefingLocks.has(lockKey)) {
-    return {
-      acquired: false,
-      lockKey,
-      release: async () => {},
-    };
+async function getDeliveryRecord(
+  briefingId: string
+): Promise<{
+  status?: string;
+  provider_message_id?: string | null;
+  attempt_count?: number;
+  accepted_at?: string | null;
+  next_retry_at?: string | null;
+} | null> {
+  const d = getDeps();
+  if (d.isPostgresConfigured()) {
+    try {
+      const res = await d.executeSql(`SELECT public.get_briefing_email_delivery($1) AS row`, [
+        briefingId,
+      ]);
+      return res?.rows?.[0]?.row || null;
+    } catch {
+      return null;
+    }
   }
+  try {
+    const sb = d.getServerSupabase() as any;
+    if (sb && typeof sb.rpc === 'function') {
+      const res = await sb.rpc('get_briefing_email_delivery', { p_briefing_id: briefingId });
+      if (!res?.error && res?.data) return res.data;
+    }
+  } catch {}
+  return null;
+}
 
-  activeBriefingLocks.add(lockKey);
-  let pgClient: any = null;
-  let pgLockHeld = false;
+async function persistDeliveryRecord(params: {
+  briefingId: string;
+  userId: string;
+  editionType: BriefingEditionType;
+  idempotencyKey: string;
+  fromEmail: string;
+  status: 'PENDING' | 'SENDING' | 'ACCEPTED' | 'DELIVERED' | 'FAILED' | 'BOUNCED' | 'COMPLAINED' | 'DELAYED';
+  providerMessageId?: string | null;
+  lastHttpStatus?: number | null;
+  lastError?: string | null;
+  incrementAttempt?: boolean;
+  nextRetryAt?: string | null;
+}): Promise<void> {
+  const d = getDeps();
+  const safeError = params.lastError ? sanitizeRunErrorMessage(params.lastError) : null;
+
+  if (d.isPostgresConfigured()) {
+    try {
+      await d.executeSql(
+        `SELECT public.upsert_briefing_email_delivery($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+        [
+          params.briefingId,
+          params.userId,
+          params.editionType,
+          params.idempotencyKey,
+          params.fromEmail,
+          params.status,
+          params.providerMessageId || null,
+          params.lastHttpStatus ?? null,
+          safeError,
+          Boolean(params.incrementAttempt),
+          params.nextRetryAt || null,
+        ]
+      );
+      return;
+    } catch {}
+  }
 
   try {
-    const { isPostgresConfigured: pgConfigured, getPostgresPool: getPool } = getDeps();
-    if (pgConfigured()) {
-      const pool = getPool();
-      pgClient = await pool.connect();
-      try {
-        const res = await pgClient.query(
-          `SELECT pg_try_advisory_lock(hashtext($1)) AS acquired`,
-          [`fatosbr:briefing:${lockKey}`]
-        );
-        const acquired = Boolean(res?.rows?.[0]?.acquired);
-        if (!acquired) {
-          activeBriefingLocks.delete(lockKey);
-          try {
-            pgClient.release();
-          } catch {}
-          return {
-            acquired: false,
-            lockKey,
-            release: async () => {},
-          };
-        }
-        pgLockHeld = true;
-      } catch {
-        // Caso o ambiente (ex: PGlite sem extensão específica ou mock mínimo) não suporte advisory lock,
-        // mantém o mutex em memória já adquirido sem derrubar o ciclo.
-        try {
-          pgClient.release();
-        } catch {}
-        pgClient = null;
-      }
+    const sb = d.getServerSupabase() as any;
+    if (sb && typeof sb.rpc === 'function') {
+      await sb.rpc('upsert_briefing_email_delivery', {
+        p_briefing_id: params.briefingId,
+        p_user_id: params.userId,
+        p_edition_type: params.editionType,
+        p_idempotency_key: params.idempotencyKey,
+        p_from_email: params.fromEmail,
+        p_status: params.status,
+        p_provider_message_id: params.providerMessageId || null,
+        p_last_http_status: params.lastHttpStatus ?? null,
+        p_last_error: safeError,
+        p_increment_attempt: Boolean(params.incrementAttempt),
+        p_next_retry_at: params.nextRetryAt || null,
+      });
     }
-  } catch {
-    if (pgClient) {
-      try {
-        pgClient.release();
-      } catch {}
-      pgClient = null;
-    }
+  } catch {}
+}
+
+async function persistJobRunToStore(entry: BriefingRunLogEntry): Promise<void> {
+  const d = getDeps();
+  if (d.isPostgresConfigured()) {
+    try {
+      await d.executeSql(
+        `SELECT public.record_briefing_job_run($1,$2,$3,$4::date,$5::timestamptz,$6::timestamptz,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+        [
+          entry.runId,
+          entry.mode,
+          entry.type,
+          entry.localDate,
+          entry.startedAt,
+          entry.finishedAt,
+          entry.durationMs,
+          entry.eligibleUsers,
+          entry.ready,
+          entry.sent,
+          entry.skippedDuplicates,
+          entry.skippedNoEvents,
+          entry.failed,
+          entry.locked,
+          entry.sendEmail,
+          entry.respectScheduleWindow,
+          entry.error || null,
+        ]
+      );
+      return;
+    } catch {}
   }
 
-  let released = false;
-  return {
-    acquired: true,
-    lockKey,
-    release: async () => {
-      if (released) return;
-      released = true;
-      activeBriefingLocks.delete(lockKey);
-      if (pgClient && pgLockHeld) {
-        try {
-          await pgClient.query(`SELECT pg_advisory_unlock(hashtext($1))`, [
-            `fatosbr:briefing:${lockKey}`,
-          ]);
-        } catch {}
-      }
-      if (pgClient) {
-        try {
-          pgClient.release();
-        } catch {}
-        pgClient = null;
-      }
-    },
-  };
+  try {
+    const sb = d.getServerSupabase() as any;
+    if (sb && typeof sb.rpc === 'function') {
+      await sb.rpc('record_briefing_job_run', {
+        p_run_id: entry.runId,
+        p_mode: entry.mode,
+        p_edition_type: entry.type,
+        p_local_date: entry.localDate,
+        p_started_at: entry.startedAt,
+        p_finished_at: entry.finishedAt,
+        p_duration_ms: entry.durationMs,
+        p_eligible_users: entry.eligibleUsers,
+        p_ready_count: entry.ready,
+        p_sent_count: entry.sent,
+        p_skipped_duplicates: entry.skippedDuplicates,
+        p_skipped_no_events: entry.skippedNoEvents,
+        p_failed_count: entry.failed,
+        p_locked: entry.locked,
+        p_send_email: entry.sendEmail,
+        p_respect_schedule: entry.respectScheduleWindow,
+        p_error_message: entry.error || null,
+      });
+    }
+  } catch {}
 }
 
 function isMissingColumnError(err: any): boolean {
@@ -475,7 +558,28 @@ export function isUserWithinScheduleWindow(
   const targetMinutes = parseTimeToMinutes(
     type === 'EVENING' ? user.eveningTime : user.morningTime
   );
+  // Catch-up seguro: após o horário programado do dia local do usuário,
+  // o ciclo garante entrega uma única vez para (user_id, type, local_date).
   return currentLocalMinutes >= targetMinutes;
+}
+
+export function computeNextUserBriefingAt(
+  user: Pick<EligibleBriefingUser, 'timezone' | 'morningTime' | 'eveningTime' | 'weekendEdition'>,
+  type: BriefingEditionType,
+  referenceDate = new Date()
+): string {
+  const tz = resolveTimezone(user.timezone);
+  const targetTime = type === 'EVENING' ? user.eveningTime : user.morningTime;
+  const zonedNow = getZonedDateParts(referenceDate, tz);
+
+  for (let offset = 0; offset <= 7; offset++) {
+    const candidateDate = shiftLocalDate(zonedNow.localDate, offset);
+    const candidateInstant = zonedWallTimeToUtcDate(candidateDate, targetTime, tz, 0, 0);
+    if (candidateInstant.getTime() <= referenceDate.getTime()) continue;
+    if (!user.weekendEdition && isWeekendInTimezone(candidateInstant, tz)) continue;
+    return candidateInstant.toISOString();
+  }
+  return zonedWallTimeToUtcDate(shiftLocalDate(zonedNow.localDate, 1), targetTime, tz, 0, 0).toISOString();
 }
 
 /**
@@ -907,6 +1011,7 @@ export const briefingEngine = {
     timezone?: string | null;
     morningTime?: string | null;
     eveningTime?: string | null;
+    retryDelayBaseMs?: number;
   }): Promise<GenerateBriefingResult> {
     const { getServerSupabase: getSb, getServerKeys: getKeys, fetchFn } = getDeps();
     const supabase = getSb();
@@ -1018,7 +1123,33 @@ export const briefingEngine = {
         (existing.status === 'FAILED' || existing.status === 'CANCELED' || isStaleGenerating)
     );
 
-    if (existing?.id && !isRecoverableExisting) {
+    let prefetchedDelivery: Awaited<ReturnType<typeof getDeliveryRecord>> = null;
+    let isReconcilingReadyEmail = false;
+
+    if (existing?.id && existing.status === 'READY' && params.sendEmail === true) {
+      prefetchedDelivery = await getDeliveryRecord(String(existing.id));
+      if (!prefetchedDelivery || prefetchedDelivery.status === 'PENDING') {
+        // Briefing estava READY sem envio prévio por e-mail
+        isReconcilingReadyEmail = true;
+      } else if (
+        prefetchedDelivery.status === 'ACCEPTED' ||
+        prefetchedDelivery.status === 'DELIVERED'
+      ) {
+        // Resend aceitou (2xx), porém atualização de public.briefings para SENT falhou anteriormente
+        isReconcilingReadyEmail = true;
+      } else if (prefetchedDelivery.status === 'FAILED') {
+        // Só retenta envio automático se a janela de backoff (next_retry_at) já tiver expirado
+        const nextRetryMs = prefetchedDelivery.next_retry_at
+          ? new Date(prefetchedDelivery.next_retry_at).getTime()
+          : Number.POSITIVE_INFINITY;
+        isReconcilingReadyEmail = Number.isFinite(nextRetryMs) && nextRetryMs <= Date.now();
+      } else {
+        // SENDING / BOUNCED / COMPLAINED / DELAYED: evita reenvio imediato duplicado
+        isReconcilingReadyEmail = false;
+      }
+    }
+
+    if (existing?.id && !isRecoverableExisting && !isReconcilingReadyEmail) {
       return {
         userId: params.userId,
         type: params.type,
@@ -1035,7 +1166,7 @@ export const briefingEngine = {
     const selectedEvents = await this.selectEventsForUser(params.userId, {
       referenceDate: refDate,
     });
-    if (selectedEvents.length === 0) {
+    if (selectedEvents.length === 0 && !isReconcilingReadyEmail) {
       return {
         userId: params.userId,
         type: params.type,
@@ -1056,11 +1187,13 @@ export const briefingEngine = {
         ? 'O fechamento dos principais acontecimentos apurados ao longo do dia.'
         : 'Os principais acontecimentos consolidados para iniciar o dia.';
 
-    // Etapa 2: Criação do registro (ou recuperação segura de slot FAILED / CANCELED / GENERATING expirado)
+    // Etapa 2: Criação do registro (ou recuperação / reconciliação de envio)
     let briefingId = '';
     const recoveredFromStatus = isRecoverableExisting ? String(existing?.status || '') : undefined;
 
-    if (isRecoverableExisting && existing?.id) {
+    if (isReconcilingReadyEmail && existing?.id) {
+      briefingId = String(existing.id);
+    } else if (isRecoverableExisting && existing?.id) {
       briefingId = String(existing.id);
 
       // Limpa itens órfãos anteriores desse mesmo briefing antes de reescrever
@@ -1200,79 +1333,83 @@ export const briefingEngine = {
       briefingId = String(createdRow.id);
     }
 
-    // Etapa 3: Persistir itens ordenados em public.briefing_items
-    // Popula position (e order_index quando a coluna existe no esquema) com section canônico
-    const itemsWithDualOrder = selectedEvents.map((ev, index) => ({
-      briefing_id: briefingId,
-      event_id: ev.id,
-      position: index + 1,
-      order_index: index + 1,
-      section: classifyBriefingItemSection(ev, index, selectedEvents.length),
-    }));
+    let notifCreated = false;
+    if (!isReconcilingReadyEmail) {
+      // Etapa 3: Persistir itens ordenados em public.briefing_items
+      // Popula position (e order_index quando a coluna existe no esquema) com section canônico
+      const itemsWithDualOrder = selectedEvents.map((ev, index) => ({
+        briefing_id: briefingId,
+        event_id: ev.id,
+        position: index + 1,
+        order_index: index + 1,
+        section: classifyBriefingItemSection(ev, index, selectedEvents.length),
+      }));
 
-    let { error: itemsErr } = await (supabase as any).from('briefing_items').insert(itemsWithDualOrder);
+      let { error: itemsErr } = await (supabase as any).from('briefing_items').insert(itemsWithDualOrder);
 
-    if (itemsErr && isMissingColumnError(itemsErr)) {
-      const errMsg = String(itemsErr.message || '').toLowerCase();
-      if (errMsg.includes('position') && !errMsg.includes('order_index')) {
-        const onlyOrderIndex = itemsWithDualOrder.map(({ position: _p, ...rest }) => rest);
-        const retry = await (supabase as any).from('briefing_items').insert(onlyOrderIndex);
-        itemsErr = retry.error;
-      } else {
-        const onlyPosition = itemsWithDualOrder.map(({ order_index: _o, ...rest }) => rest);
-        const retry = await (supabase as any).from('briefing_items').insert(onlyPosition);
-        itemsErr = retry.error;
+      if (itemsErr && isMissingColumnError(itemsErr)) {
+        const errMsg = String(itemsErr.message || '').toLowerCase();
+        if (errMsg.includes('position') && !errMsg.includes('order_index')) {
+          const onlyOrderIndex = itemsWithDualOrder.map(({ position: _p, ...rest }) => rest);
+          const retry = await (supabase as any).from('briefing_items').insert(onlyOrderIndex);
+          itemsErr = retry.error;
+        } else {
+          const onlyPosition = itemsWithDualOrder.map(({ order_index: _o, ...rest }) => rest);
+          const retry = await (supabase as any).from('briefing_items').insert(onlyPosition);
+          itemsErr = retry.error;
+        }
       }
-    }
 
-    if (itemsErr) {
-      await (supabase as any)
+      if (itemsErr) {
+        await (supabase as any)
+          .from('briefings')
+          .update({ status: 'FAILED', updated_at: new Date().toISOString() })
+          .eq('id', briefingId);
+        return {
+          userId: params.userId,
+          type: params.type,
+          status: 'FAILED',
+          briefingId,
+          localDate,
+          periodStart,
+          periodEnd,
+          eventsCount: 0,
+          recoveredFromStatus,
+          error: sanitizeRunErrorMessage(`Falha ao persistir itens do briefing: ${itemsErr.message}`),
+        };
+      }
+
+      // Etapa 4: Atualizar para READY
+      const { error: readyErr } = await (supabase as any)
         .from('briefings')
-        .update({ status: 'FAILED', updated_at: new Date().toISOString() })
+        .update({ status: 'READY', updated_at: new Date().toISOString() })
         .eq('id', briefingId);
-      return {
-        userId: params.userId,
-        type: params.type,
-        status: 'FAILED',
-        briefingId,
-        localDate,
-        periodStart,
-        periodEnd,
-        eventsCount: 0,
-        recoveredFromStatus,
-        error: sanitizeRunErrorMessage(`Falha ao persistir itens do briefing: ${itemsErr.message}`),
-      };
-    }
 
-    // Etapa 4: Atualizar para READY
-    const { error: readyErr } = await (supabase as any)
-      .from('briefings')
-      .update({ status: 'READY', updated_at: new Date().toISOString() })
-      .eq('id', briefingId);
+      if (readyErr) {
+        return {
+          userId: params.userId,
+          type: params.type,
+          status: 'FAILED',
+          briefingId,
+          localDate,
+          periodStart,
+          periodEnd,
+          eventsCount: selectedEvents.length,
+          recoveredFromStatus,
+          error: sanitizeRunErrorMessage(`Itens salvos, mas falhou atualização para READY: ${readyErr.message}`),
+        };
+      }
 
-    if (readyErr) {
-      return {
+      // Etapa 5: Criar notificação BRIEFING_READY (respeitando preferência dailyBriefings)
+      const notifRes = await notificationEngine.createBriefingReadyNotification({
         userId: params.userId,
-        type: params.type,
-        status: 'FAILED',
         briefingId,
-        localDate,
-        periodStart,
-        periodEnd,
+        briefingType: params.type,
+        title,
         eventsCount: selectedEvents.length,
-        recoveredFromStatus,
-        error: sanitizeRunErrorMessage(`Itens salvos, mas falhou atualização para READY: ${readyErr.message}`),
-      };
+      });
+      notifCreated = Boolean(notifRes.success && !notifRes.skipped);
     }
-
-    // Etapa 5: Criar notificação BRIEFING_READY (respeitando preferência dailyBriefings)
-    const notifRes = await notificationEngine.createBriefingReadyNotification({
-      userId: params.userId,
-      briefingId,
-      briefingType: params.type,
-      title,
-      eventsCount: selectedEvents.length,
-    });
 
     // Etapas 6 & 7: Envio por e-mail somente se solicitado, opt-in ativo, não enviado antes e Resend operacional
     if (!params.sendEmail || !resolvedEmail) {
@@ -1285,7 +1422,7 @@ export const briefingEngine = {
         periodStart,
         periodEnd,
         eventsCount: selectedEvents.length,
-        notificationCreated: Boolean(notifRes.success && !notifRes.skipped),
+        notificationCreated: notifCreated,
         emailSent: false,
         emailSkippedReason: 'DISABLED_OR_NO_EMAIL',
         recoveredFromStatus,
@@ -1302,14 +1439,14 @@ export const briefingEngine = {
         periodStart,
         periodEnd,
         eventsCount: selectedEvents.length,
-        notificationCreated: Boolean(notifRes.success && !notifRes.skipped),
+        notificationCreated: notifCreated,
         emailSent: false,
         emailSkippedReason: 'OPTED_OUT',
         recoveredFromStatus,
       };
     }
 
-    // Proteção extra anti-reenvio em caso de corrida antes da confirmação de envio
+    // Proteção extra anti-reenvio + reconciliação de entrega já aceita em internal.briefing_email_deliveries
     try {
       const { data: sendCheck } = await (supabase as any)
         .from('briefings')
@@ -1326,13 +1463,40 @@ export const briefingEngine = {
           periodStart,
           periodEnd,
           eventsCount: selectedEvents.length,
-          notificationCreated: Boolean(notifRes.success && !notifRes.skipped),
+          notificationCreated: notifCreated,
           emailSent: false,
           emailSkippedReason: 'ALREADY_SENT',
           recoveredFromStatus,
         };
       }
     } catch {}
+
+    const priorDelivery = prefetchedDelivery || (await getDeliveryRecord(briefingId));
+    if (priorDelivery && (priorDelivery.status === 'ACCEPTED' || priorDelivery.status === 'DELIVERED')) {
+      const reconciledAt = priorDelivery.accepted_at || new Date().toISOString();
+      await (supabase as any)
+        .from('briefings')
+        .update({ status: 'SENT', sent_at: reconciledAt, updated_at: new Date().toISOString() })
+        .eq('id', briefingId);
+
+      return {
+        userId: params.userId,
+        type: params.type,
+        status: 'SENT',
+        briefingId,
+        localDate,
+        periodStart,
+        periodEnd,
+        eventsCount: selectedEvents.length,
+        notificationCreated: notifCreated,
+        emailSent: false,
+        emailSkippedReason: 'ALREADY_SENT',
+        providerMessageId: priorDelivery.provider_message_id || undefined,
+        deliveryStatus: priorDelivery.status,
+        reconciledFromDelivery: true,
+        recoveredFromStatus,
+      };
+    }
 
     const apiKey = getKeys().RESEND;
     if (!apiKey) {
@@ -1345,7 +1509,7 @@ export const briefingEngine = {
         periodStart,
         periodEnd,
         eventsCount: selectedEvents.length,
-        notificationCreated: Boolean(notifRes.success && !notifRes.skipped),
+        notificationCreated: notifCreated,
         emailSent: false,
         emailSkippedReason: 'RESEND_UNCONFIGURED',
         emailError: 'RESEND_API_KEY não configurada no servidor.',
@@ -1353,70 +1517,54 @@ export const briefingEngine = {
       };
     }
 
-    try {
-      const from = process.env.RESEND_FROM_EMAIL || 'FatosBR Briefing <onboarding@resend.dev>';
-      const html = renderBriefingEmailHtml({
-        title,
-        description,
-        type: params.type,
-        events: selectedEvents,
-      });
+    const from = getResendFromEmail();
+    const idempotencyKey = buildBriefingEmailIdempotencyKey(briefingId, params.type, localDate);
 
-      const resendRes = await fetchFn('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          from,
-          to: [resolvedEmail],
-          subject: `FatosBR • ${title}`,
-          html,
-          text: `${title} — ${description}`,
-        }),
-      });
+    await persistDeliveryRecord({
+      briefingId,
+      userId: params.userId,
+      editionType: params.type,
+      idempotencyKey,
+      fromEmail: from,
+      status: 'SENDING',
+      incrementAttempt: true,
+    });
 
-      if (!resendRes.ok) {
-        const errPayload = await resendRes.json().catch(() => ({}));
-        const sanitizedErr = sanitizeRunErrorMessage(errPayload?.message || `Resend HTTP ${resendRes.status}`);
-        return {
-          userId: params.userId,
-          type: params.type,
-          status: 'READY',
-          briefingId,
-          localDate,
-          periodStart,
-          periodEnd,
-          eventsCount: selectedEvents.length,
-          notificationCreated: Boolean(notifRes.success && !notifRes.skipped),
-          emailSent: false,
-          emailError: sanitizedErr,
-          recoveredFromStatus,
-        };
-      }
+    const html = renderBriefingEmailHtml({
+      title,
+      description,
+      type: params.type,
+      events: selectedEvents,
+    });
 
-      // Somente marca SENT após confirmação 2xx do Resend
-      const nowIso = new Date().toISOString();
-      await (supabase as any)
-        .from('briefings')
-        .update({ status: 'SENT', sent_at: nowIso, updated_at: nowIso })
-        .eq('id', briefingId);
+    const sendRes = await sendResendEmailWithRetry({
+      apiKey,
+      from,
+      to: [resolvedEmail],
+      subject: `FatosBR • ${title}`,
+      html,
+      text: `${title} — ${description}`,
+      idempotencyKey,
+      fetchFn,
+      retryDelayBaseMs: params.retryDelayBaseMs ?? 150,
+    });
 
-      return {
-        userId: params.userId,
-        type: params.type,
-        status: 'SENT',
+    if (!sendRes.accepted) {
+      const nextRetryAt = sendRes.retryable
+        ? new Date(Date.now() + 60_000).toISOString()
+        : null;
+      await persistDeliveryRecord({
         briefingId,
-        localDate,
-        periodStart,
-        periodEnd,
-        eventsCount: selectedEvents.length,
-        notificationCreated: Boolean(notifRes.success && !notifRes.skipped),
-        emailSent: true,
-        recoveredFromStatus,
-      };
-    } catch (sendErr: any) {
+        userId: params.userId,
+        editionType: params.type,
+        idempotencyKey,
+        fromEmail: from,
+        status: 'FAILED',
+        lastHttpStatus: sendRes.statusCode,
+        lastError: sendRes.error || 'RESEND_SEND_FAILED',
+        nextRetryAt,
+      });
+
       return {
         userId: params.userId,
         type: params.type,
@@ -1426,15 +1574,76 @@ export const briefingEngine = {
         periodStart,
         periodEnd,
         eventsCount: selectedEvents.length,
-        notificationCreated: Boolean(notifRes.success && !notifRes.skipped),
+        notificationCreated: notifCreated,
         emailSent: false,
-        emailError: sanitizeRunErrorMessage(sendErr?.message || 'Erro de rede ao enviar briefing por e-mail.'),
+        deliveryStatus: 'FAILED',
+        emailError: sanitizeRunErrorMessage(sendRes.error || `Resend HTTP ${sendRes.statusCode}`),
         recoveredFromStatus,
       };
     }
+
+    // Resend aceitou (HTTP 2xx): registra imediatamente ACCEPTED em internal.briefing_email_deliveries
+    await persistDeliveryRecord({
+      briefingId,
+      userId: params.userId,
+      editionType: params.type,
+      idempotencyKey,
+      fromEmail: from,
+      status: 'ACCEPTED',
+      providerMessageId: sendRes.messageId || null,
+      lastHttpStatus: sendRes.statusCode,
+    });
+
+    // Atualiza public.briefings para SENT apenas após 2xx; se o UPDATE no banco falhar agora,
+    // a tentativa permanece ACCEPTED em briefing_email_deliveries evitando reenvio duplicado.
+    const nowIso = new Date().toISOString();
+    const { error: sentUpdateErr } = await (supabase as any)
+      .from('briefings')
+      .update({ status: 'SENT', sent_at: nowIso, updated_at: nowIso })
+      .eq('id', briefingId);
+
+    if (sentUpdateErr) {
+      return {
+        userId: params.userId,
+        type: params.type,
+        status: 'READY',
+        briefingId,
+        localDate,
+        periodStart,
+        periodEnd,
+        eventsCount: selectedEvents.length,
+        notificationCreated: notifCreated,
+        emailSent: true,
+        providerMessageId: sendRes.messageId,
+        deliveryStatus: 'ACCEPTED',
+        emailError: sanitizeRunErrorMessage(
+          `E-mail aceito pelo Resend, mas falhou persistência de SENT em public.briefings: ${sentUpdateErr.message}`
+        ),
+        recoveredFromStatus,
+      };
+    }
+
+    return {
+      userId: params.userId,
+      type: params.type,
+      status: 'SENT',
+      briefingId,
+      localDate,
+      periodStart,
+      periodEnd,
+      eventsCount: selectedEvents.length,
+      notificationCreated: notifCreated,
+      emailSent: true,
+      providerMessageId: sendRes.messageId,
+      deliveryStatus: 'ACCEPTED',
+      recoveredFromStatus,
+    };
   },
 
-  recordRunLog(entry: Omit<BriefingRunLogEntry, 'runId'>): BriefingRunLogEntry {
+  recordRunLog(
+    entry: Omit<BriefingRunLogEntry, 'runId'>,
+    options?: { skipDbPersist?: boolean }
+  ): BriefingRunLogEntry {
     const fullEntry: BriefingRunLogEntry = {
       ...entry,
       runId: `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
@@ -1444,6 +1653,9 @@ export const briefingEngine = {
     if (recentRunLogs.length > MAX_RUN_LOGS) {
       recentRunLogs.length = MAX_RUN_LOGS;
     }
+    if (!options?.skipDbPersist) {
+      void persistJobRunToStore(fullEntry);
+    }
     return fullEntry;
   },
 
@@ -1451,13 +1663,17 @@ export const briefingEngine = {
     return recentRunLogs.map((l) => ({ ...l }));
   },
 
+  async listActiveLocks(): Promise<Array<{ lockKey: string; expiresAt: string; heartbeatAt: string }>> {
+    return listActiveDistributedLocks(getLockDepsFromEngine());
+  },
+
   getActiveLocks(): string[] {
-    return Array.from(activeBriefingLocks);
+    return [];
   },
 
   /**
    * Executa um ciclo completo de geração para todos os usuários elegíveis,
-   * protegido por trava contra execução concorrente do mesmo slot (type + localDate).
+   * protegido por trava distribuída persistente fail-closed (internal.distributed_job_locks).
    */
   async runGenerationCycle(options: {
     type: BriefingEditionType;
@@ -1479,27 +1695,39 @@ export const briefingEngine = {
     const startedAt = new Date(startedMs).toISOString();
     const refDate = options.referenceDate || new Date();
     const brParts = getZonedDateParts(refDate, DEFAULT_BRIEFING_TIMEZONE);
-    const lock = await acquireBriefingCycleLock(options.type, brParts.localDate);
+    const lockKey = `fatosbr:briefing:${options.type}:${brParts.localDate}`;
+
+    // Fail-closed: lança DistributedLockUnavailableError (HTTP 503) se o armazenamento de lock estiver indisponível
+    const lock = await acquireDistributedLeaseLock({
+      lockKey,
+      ttlMs: BRIEFING_LOCK_TTL_MS,
+      metadata: { type: options.type, localDate: brParts.localDate },
+      deps: getLockDepsFromEngine(),
+    });
 
     if (!lock.acquired) {
-      this.recordRunLog({
-        mode: 'BATCH_CYCLE',
-        type: options.type,
-        localDate: brParts.localDate,
-        startedAt,
-        finishedAt: new Date().toISOString(),
-        durationMs: Date.now() - startedMs,
-        eligibleUsers: 0,
-        ready: 0,
-        sent: 0,
-        skippedDuplicates: 0,
-        skippedNoEvents: 0,
-        failed: 0,
-        locked: true,
-        sendEmail: Boolean(options.sendEmail),
-        respectScheduleWindow: Boolean(options.respectScheduleWindow),
-        error: `Ciclo concorrente bloqueado (${lock.lockKey}).`,
-      });
+      const lockedEntry = this.recordRunLog(
+        {
+          mode: 'BATCH_CYCLE',
+          type: options.type,
+          localDate: brParts.localDate,
+          startedAt,
+          finishedAt: new Date().toISOString(),
+          durationMs: Date.now() - startedMs,
+          eligibleUsers: 0,
+          ready: 0,
+          sent: 0,
+          skippedDuplicates: 0,
+          skippedNoEvents: 0,
+          failed: 0,
+          locked: true,
+          sendEmail: Boolean(options.sendEmail),
+          respectScheduleWindow: Boolean(options.respectScheduleWindow),
+          error: `Ciclo concorrente bloqueado (${lock.lockKey}).`,
+        },
+        { skipDbPersist: true }
+      );
+      await persistJobRunToStore(lockedEntry);
       return {
         locked: true,
         lockKey: lock.lockKey,
@@ -1545,23 +1773,27 @@ export const briefingEngine = {
         else if (res.status === 'FAILED') failed++;
       }
 
-      this.recordRunLog({
-        mode: 'BATCH_CYCLE',
-        type: options.type,
-        localDate: brParts.localDate,
-        startedAt,
-        finishedAt: new Date().toISOString(),
-        durationMs: Date.now() - startedMs,
-        eligibleUsers: eligible.length,
-        ready,
-        sent,
-        skippedDuplicates,
-        skippedNoEvents,
-        failed,
-        locked: false,
-        sendEmail: Boolean(options.sendEmail),
-        respectScheduleWindow: Boolean(options.respectScheduleWindow),
-      });
+      const successEntry = this.recordRunLog(
+        {
+          mode: 'BATCH_CYCLE',
+          type: options.type,
+          localDate: brParts.localDate,
+          startedAt,
+          finishedAt: new Date().toISOString(),
+          durationMs: Date.now() - startedMs,
+          eligibleUsers: eligible.length,
+          ready,
+          sent,
+          skippedDuplicates,
+          skippedNoEvents,
+          failed,
+          locked: false,
+          sendEmail: Boolean(options.sendEmail),
+          respectScheduleWindow: Boolean(options.respectScheduleWindow),
+        },
+        { skipDbPersist: true }
+      );
+      await persistJobRunToStore(successEntry);
 
       return {
         locked: false,
@@ -1575,24 +1807,28 @@ export const briefingEngine = {
         results,
       };
     } catch (err: any) {
-      this.recordRunLog({
-        mode: 'BATCH_CYCLE',
-        type: options.type,
-        localDate: brParts.localDate,
-        startedAt,
-        finishedAt: new Date().toISOString(),
-        durationMs: Date.now() - startedMs,
-        eligibleUsers: 0,
-        ready: 0,
-        sent: 0,
-        skippedDuplicates: 0,
-        skippedNoEvents: 0,
-        failed: 1,
-        locked: false,
-        sendEmail: Boolean(options.sendEmail),
-        respectScheduleWindow: Boolean(options.respectScheduleWindow),
-        error: err?.message || 'Erro no ciclo de geração.',
-      });
+      const failedEntry = this.recordRunLog(
+        {
+          mode: 'BATCH_CYCLE',
+          type: options.type,
+          localDate: brParts.localDate,
+          startedAt,
+          finishedAt: new Date().toISOString(),
+          durationMs: Date.now() - startedMs,
+          eligibleUsers: 0,
+          ready: 0,
+          sent: 0,
+          skippedDuplicates: 0,
+          skippedNoEvents: 0,
+          failed: 1,
+          locked: false,
+          sendEmail: Boolean(options.sendEmail),
+          respectScheduleWindow: Boolean(options.respectScheduleWindow),
+          error: err?.message || 'Erro no ciclo de geração.',
+        },
+        { skipDbPersist: true }
+      );
+      await persistJobRunToStore(failedEntry);
       throw err;
     } finally {
       await lock.release();

@@ -16,7 +16,14 @@
 import crypto from 'crypto';
 import { executeSql, withTransaction, isPostgresConfigured } from './postgres.js';
 import { getServerKeys, isAllowedDomain } from './common.js';
-import { notificationEngine, SegmentedEventDispatchInput } from './notificationEngine.js';
+import { SegmentedEventDispatchInput } from './notificationEngine.js';
+import {
+  compileEntityMatchers,
+  linkEventEntities,
+  loadActiveEntityCatalog,
+  matchCompiledEntities,
+} from './entityMatcher.js';
+import { enqueueNotificationOutbox } from './notificationOutbox.js';
 
 // Namespace fixo oficial para UUID v5 (FatosBR News Engine)
 const FATOSBR_NAMESPACE_UUID = '8f4c2c10-9b42-5f8e-a612-4f81023a845d';
@@ -44,6 +51,8 @@ export interface IngestionResult {
   eventsCreated: number;
   eventsUpdated: number;
   sourcesUpserted: number;
+  entityLinksCreated?: number;
+  outboxEnqueued?: number;
   notificationsCreated?: number;
   durationMs: number;
   providers: Record<string, { configured: boolean; count: number; error?: string }>;
@@ -481,11 +490,16 @@ export async function runServerSideIngestion(options?: {
     let articlesPersisted = 0;
     let eventsCreated = 0;
     let eventsUpdated = 0;
-    let notificationsCreated = 0;
+    let entityLinksCreated = 0;
+    let outboxEnqueued = 0;
+    const notificationsCreated = 0;
     const eventsToNotify: SegmentedEventDispatchInput[] = [];
 
     // 3. Execução em Transação Atômica Parametrizada
     await withTransaction(async (client) => {
+      const entityCatalog = await loadActiveEntityCatalog((q, p) => client.query(q, p));
+      const entityMatchers = compileEntityMatchers(entityCatalog);
+
       // 3.1 Resolução Canônica de Tópicos em public.topics
       // O esquema real confirmado no Supabase é:
       // (id UUID, name TEXT, slug TEXT UNIQUE, description, icon, image_url, is_active, is_featured, created_at, updated_at)
@@ -785,6 +799,29 @@ export async function runServerSideIngestion(options?: {
           [eventUuid, realTopicId]
         );
 
+        // Vincular Entidades Reais já cadastradas em public.entities via public.event_entities
+        const matchCorpus = [
+          primary.article.title,
+          summary,
+          whyItMatters,
+          ...cl.relatedArticles.map((r) => `${r.record.article.title} ${r.record.article.description || ''}`),
+        ].join(' • ');
+        const matchedEntityIds = matchCompiledEntities(matchCorpus, entityMatchers);
+
+        if (matchedEntityIds.length > 0) {
+          await client.query(`SAVEPOINT sp_event_entities`);
+          try {
+            entityLinksCreated += await linkEventEntities(
+              (q, p) => client.query(q, p),
+              eventUuid,
+              matchedEntityIds
+            );
+            await client.query(`RELEASE SAVEPOINT sp_event_entities`);
+          } catch {
+            await client.query(`ROLLBACK TO SAVEPOINT sp_event_entities`);
+          }
+        }
+
         const clusterSourceIds = Array.from(
           new Set(
             cl.relatedArticles
@@ -797,6 +834,7 @@ export async function runServerSideIngestion(options?: {
           title: primary.article.title,
           summary,
           relevanceScore,
+          entityIds: matchedEntityIds,
           topicIds: realTopicId ? [realTopicId] : [],
           sourceIds: clusterSourceIds,
           type: existingEvt.rows.length === 0 ? 'NEWS_HIGH_RELEVANCE' : 'EVENT_UPDATED',
@@ -804,16 +842,23 @@ export async function runServerSideIngestion(options?: {
       }
     });
 
-    // Passo 4: Disparo pós-commit de alertas segmentados (isolado de falhas transacionais)
-    if (eventsToNotify.length > 0 && process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    // Passo 4: Enfileiramento pós-commit na outbox durável (desacoplado da transação de ingestão)
+    if (eventsToNotify.length > 0) {
       for (const evtInput of eventsToNotify) {
         try {
-          const dispatchRes = await notificationEngine.dispatchSegmentedNotificationsForEvent(evtInput);
-          notificationsCreated += dispatchRes.created || 0;
-        } catch (dispatchErr: any) {
+          const queueRes = await enqueueNotificationOutbox(evtInput);
+          if (queueRes.enqueued) {
+            outboxEnqueued++;
+          } else if (queueRes.error) {
+            console.warn(
+              `[Ingest Engine ${executionId}] Aviso ao enfileirar evento ${evtInput.eventId} na notification_outbox:`,
+              queueRes.error
+            );
+          }
+        } catch (queueErr: any) {
           console.warn(
-            `[Ingest Engine ${executionId}] Aviso ao segmentar alertas pós-ingestão:`,
-            dispatchErr?.message || dispatchErr
+            `[Ingest Engine ${executionId}] Exceção ao enfileirar evento na outbox:`,
+            queueErr?.message || queueErr
           );
         }
       }
@@ -821,7 +866,8 @@ export async function runServerSideIngestion(options?: {
 
     console.log(`[Ingest Engine ${executionId}] Persistência concluída com sucesso em ${Date.now() - startTime}ms: ` +
       `${articlesPersisted} matérias persistidas, ${sourcesUpserted} fontes atualizadas, ` +
-      `${eventsCreated} eventos criados, ${eventsUpdated} eventos atualizados.`);
+      `${eventsCreated} eventos criados, ${eventsUpdated} eventos atualizados, ` +
+      `${entityLinksCreated} vínculos event_entities, ${outboxEnqueued} itens na outbox.`);
 
     return {
       executionId,
@@ -832,6 +878,8 @@ export async function runServerSideIngestion(options?: {
       eventsCreated,
       eventsUpdated,
       sourcesUpserted,
+      entityLinksCreated,
+      outboxEnqueued,
       notificationsCreated,
       durationMs: Date.now() - startTime,
       providers

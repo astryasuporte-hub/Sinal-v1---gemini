@@ -6,8 +6,9 @@
  */
 
 import { getServerKeys, sendJson, setCorsHeaders, readJsonBody, maskSecret } from '../../common.js';
+import { getResendFromEmail } from '../../resendClient.js';
 
-let customSender = 'FatosBR Briefing <onboarding@resend.dev>';
+let customSender = getResendFromEmail();
 
 export default async function handler(req: any, res: any) {
   setCorsHeaders(res);
