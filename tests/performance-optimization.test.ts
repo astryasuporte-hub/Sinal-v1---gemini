@@ -335,9 +335,13 @@ async function runTests() {
         name TEXT NOT NULL,
         slug TEXT,
         domain TEXT,
-        category TEXT,
         logo_url TEXT,
-        brand_color TEXT
+        country_code TEXT,
+        language_code TEXT,
+        authority_score INTEGER DEFAULT 80,
+        is_active BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
       );
       CREATE TABLE IF NOT EXISTS public.articles (
         id TEXT PRIMARY KEY,
@@ -364,18 +368,17 @@ async function runTests() {
       );
       CREATE TABLE IF NOT EXISTS public.entities (
         id TEXT PRIMARY KEY,
+        type TEXT,
         name TEXT NOT NULL,
         slug TEXT,
-        type TEXT,
         description TEXT,
-        sector TEXT,
-        role TEXT,
-        organization TEXT,
-        website TEXT,
         image_url TEXT,
-        logo_url TEXT,
-        avatar_url TEXT,
-        brand_color TEXT
+        website_url TEXT,
+        country_code TEXT,
+        is_verified BOOLEAN DEFAULT FALSE,
+        is_active BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
       );
       CREATE TABLE IF NOT EXISTS public.event_entities (
         event_id TEXT NOT NULL,

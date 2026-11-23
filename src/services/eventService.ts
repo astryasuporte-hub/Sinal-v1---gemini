@@ -5,20 +5,23 @@
 
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
 import { Event, Topic, Source, Entity, SourceReference } from '../types/sinal';
-import { dedupInFlight, fetchWithTimeoutAndRetry, swrFetch } from './requestCache';
+import { dedupInFlight, fetchWithTimeoutAndRetry, invalidateRequestCache, swrFetch } from './requestCache';
 import { performanceMonitor } from './performanceMonitor';
 
 const EVENT_COLUMNS = 'id, title, summary, what_happened, why_it_matters, category, published_at, updated_at, image_url, relevance_score';
 const EVENT_SOURCE_COLUMNS = 'event_id, source_id, source_name, domain, logo_url, headline, url, published_at';
 const TOPIC_COLUMNS = 'id, name, slug, description, category, brand_color';
-const SOURCE_COLUMNS = 'id, name, slug, domain, category, logo_url, brand_color';
-const ENTITY_COLUMNS = 'id, name, slug, type, description, sector, role, organization, website, image_url, logo_url, avatar_url, brand_color';
+const SOURCE_COLUMNS = 'id, name, slug, domain, logo_url, country_code, language_code, authority_score, is_active';
+const ENTITY_COLUMNS = 'id, type, name, slug, description, image_url, website_url, country_code, is_verified, is_active';
 
 function mapEntityRow(e: any): Entity {
   const normType = String(e.type || 'company').trim().toLowerCase();
   const type: Entity['type'] =
     normType === 'person' ? 'person' : normType === 'organization' ? 'organization' : 'company';
-  const resolvedImage = e.image_url || e.logo_url || e.avatar_url || undefined;
+  const resolvedImage = e.image_url || undefined;
+  const resolvedWebsite = e.website_url || e.website || undefined;
+  const defaultBrandColor =
+    type === 'person' ? '#8b5cf6' : type === 'organization' ? '#3b82f6' : '#10b981';
 
   return {
     id: String(e.id),
@@ -26,15 +29,12 @@ function mapEntityRow(e: any): Entity {
     slug: e.slug || undefined,
     type,
     description: e.description || '',
-    sector: e.sector || undefined,
-    role: e.role || undefined,
-    organization: e.organization || undefined,
-    website: e.website || undefined,
+    website: resolvedWebsite,
     imageUrl: resolvedImage,
-    avatarUrl: type === 'person' ? resolvedImage : e.avatar_url || undefined,
+    avatarUrl: type === 'person' ? resolvedImage : undefined,
     logoUrl: resolvedImage,
     isFollowed: false,
-    brandColor: e.brand_color || '#10b981'
+    brandColor: defaultBrandColor
   };
 }
 
@@ -47,7 +47,7 @@ function mapSourceRow(s: any): Source {
     category: s.category || 'Notícias',
     logoUrl: s.logo_url || undefined,
     isFollowed: false,
-    brandColor: s.brand_color || '#64748b'
+    brandColor: '#64748b'
   };
 }
 
@@ -92,8 +92,8 @@ function mapEventRow(row: any, sourcesMap: Record<string, SourceReference[]>): E
   };
 }
 
-async function fetchCatalogFromProxy(): Promise<{ entities?: Entity[]; sources?: Source[] }> {
-  return swrFetch('catalog:proxy', 45_000, async () => {
+async function fetchCatalogFromProxy(): Promise<{ entities?: Entity[]; sources?: Source[]; unavailable?: boolean }> {
+  const result = await swrFetch('catalog:proxy', 45_000, async () => {
     const start = performance.now();
     try {
       const res = await fetchWithTimeoutAndRetry('/api/proxy/catalog', { timeoutMs: 8000, retries: 1 }).catch(() => null);
@@ -101,9 +101,17 @@ async function fetchCatalogFromProxy(): Promise<{ entities?: Entity[]; sources?:
       if (res && res.ok) {
         return await res.json();
       }
+      if (res && res.status >= 500) {
+        return { unavailable: true };
+      }
     } catch {}
-    return {};
+    return { unavailable: true };
   });
+
+  if (result?.unavailable) {
+    invalidateRequestCache('catalog:proxy');
+  }
+  return result || {};
 }
 
 export const eventService = {
@@ -226,20 +234,7 @@ export const eventService = {
    * Busca fontes canônicas (public.news_sources com logo_url do Supabase Storage).
    */
   async getSources(): Promise<Source[]> {
-    return swrFetch('catalog:sources', 60_000, async () => {
-      if (isSupabaseConfigured) {
-        try {
-          const { data: newsSourcesData, error } = await supabase
-            .from('news_sources')
-            .select(SOURCE_COLUMNS)
-            .order('name');
-
-          if (!error && Array.isArray(newsSourcesData) && newsSourcesData.length > 0) {
-            return newsSourcesData.map(mapSourceRow);
-          }
-        } catch {}
-      }
-
+    const result = await swrFetch('catalog:sources', 60_000, async () => {
       const proxyCatalog = await fetchCatalogFromProxy();
       if (Array.isArray(proxyCatalog.sources) && proxyCatalog.sources.length > 0) {
         return proxyCatalog.sources;
@@ -247,41 +242,59 @@ export const eventService = {
 
       if (isSupabaseConfigured) {
         try {
-          const { data, error } = await supabase.from('sources').select(SOURCE_COLUMNS).order('name');
-          if (!error && Array.isArray(data)) {
-            return data.map(mapSourceRow);
+          const { data: newsSourcesData, error } = await supabase
+            .from('news_sources')
+            .select(SOURCE_COLUMNS)
+            .or('is_active.is.null,is_active.eq.true')
+            .order('name');
+
+          if (!error && Array.isArray(newsSourcesData)) {
+            return newsSourcesData.map(mapSourceRow);
           }
         } catch {}
       }
 
-      return [];
+      return null;
     });
+
+    if (result === null) {
+      invalidateRequestCache('catalog:sources');
+      return [];
+    }
+    return result;
   },
 
   /**
    * Busca entidades canônicas (public.entities com image_url do Supabase Storage).
    */
   async getEntities(): Promise<Entity[]> {
-    return swrFetch('catalog:entities', 60_000, async () => {
-      if (isSupabaseConfigured) {
-        try {
-          const { data, error } = await supabase
-            .from('entities')
-            .select(ENTITY_COLUMNS)
-            .order('name');
-
-          if (!error && Array.isArray(data) && data.length > 0) {
-            return data.map(mapEntityRow);
-          }
-        } catch {}
-      }
-
+    const result = await swrFetch('catalog:entities', 60_000, async () => {
       const proxyCatalog = await fetchCatalogFromProxy();
       if (Array.isArray(proxyCatalog.entities) && proxyCatalog.entities.length > 0) {
         return proxyCatalog.entities;
       }
 
-      return [];
+      if (isSupabaseConfigured) {
+        try {
+          const { data, error } = await supabase
+            .from('entities')
+            .select(ENTITY_COLUMNS)
+            .or('is_active.is.null,is_active.eq.true')
+            .order('name');
+
+          if (!error && Array.isArray(data)) {
+            return data.map(mapEntityRow);
+          }
+        } catch {}
+      }
+
+      return null;
     });
+
+    if (result === null) {
+      invalidateRequestCache('catalog:entities');
+      return [];
+    }
+    return result;
   }
 };

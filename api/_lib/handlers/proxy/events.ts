@@ -50,6 +50,64 @@ export function decodeEventCursor(raw: string | null): { publishedAt: string; id
   }
 }
 
+const ENTITY_SELECT_COLUMNS =
+  'id, type, name, slug, description, image_url, website_url, country_code, is_verified, is_active, created_at, updated_at';
+
+const NEWS_SOURCE_SELECT_COLUMNS =
+  'id, name, slug, domain, logo_url, country_code, language_code, authority_score, is_active, created_at, updated_at';
+
+const EVENT_ENTITY_SELECT_COLUMNS =
+  'ent.id, ent.type, ent.name, ent.slug, ent.description, ent.image_url, ent.website_url, ent.country_code, ent.is_verified, ent.is_active';
+
+function mapEntityRecord(row: any) {
+  const normTypeRaw = String(row?.type || 'company').trim().toLowerCase();
+  const type =
+    normTypeRaw === 'person'
+      ? 'person'
+      : normTypeRaw === 'organization'
+        ? 'organization'
+        : 'company';
+  const imageUrl = row?.image_url || undefined;
+  const website = row?.website_url || undefined;
+  const brandColor =
+    type === 'person' ? '#8b5cf6' : type === 'organization' ? '#3b82f6' : '#10b981';
+
+  return {
+    id: String(row.id),
+    name: row.name,
+    slug: row.slug || undefined,
+    type,
+    description: row.description || '',
+    website,
+    websiteUrl: website,
+    countryCode: row.country_code || undefined,
+    isVerified: typeof row.is_verified === 'boolean' ? row.is_verified : undefined,
+    isActive: typeof row.is_active === 'boolean' ? row.is_active : true,
+    imageUrl,
+    logoUrl: imageUrl,
+    avatarUrl: type === 'person' ? imageUrl : undefined,
+    brandColor,
+    isFollowed: false
+  };
+}
+
+function mapSourceRecord(row: any) {
+  return {
+    id: String(row.id),
+    name: row.name,
+    slug: row.slug || undefined,
+    domain: row.domain,
+    category: 'Notícias',
+    logoUrl: row.logo_url || undefined,
+    countryCode: row.country_code || undefined,
+    languageCode: row.language_code || undefined,
+    authorityScore: typeof row.authority_score === 'number' ? row.authority_score : undefined,
+    isActive: typeof row.is_active === 'boolean' ? row.is_active : true,
+    brandColor: '#64748b',
+    isFollowed: false
+  };
+}
+
 export default async function handler(req: any, res: any) {
   const traceCtx = createTraceContext(req);
   setCorsHeaders(res);
@@ -170,113 +228,132 @@ export default async function handler(req: any, res: any) {
     try {
       let entities: any[] = [];
       let sources: any[] = [];
+      let entitiesOk = false;
+      let sourcesOk = false;
 
       if (isPostgresConfigured()) {
-        try {
-          const [entRes, srcRes] = await withSpan(traceCtx, 'db_catalog', () =>
-            Promise.all([
-              executeSql(
-                `SELECT id, name, slug, type, description, sector, role, organization, website, image_url, logo_url, avatar_url, brand_color
-                 FROM public.entities
-                 ORDER BY name ASC`
-              ),
-              executeSql(
-                `SELECT id, name, slug, domain, category, logo_url, brand_color
-                 FROM public.news_sources
-                 ORDER BY name ASC`
-              )
-            ])
-          );
-          entities = (entRes.rows || []).map((e: any) => {
-            const normType = String(e.type || 'company').trim().toLowerCase();
-            const imageUrl = e.image_url || e.logo_url || e.avatar_url || undefined;
-            return {
-              id: String(e.id),
-              name: e.name,
-              slug: e.slug || undefined,
-              type: normType === 'person' ? 'person' : normType === 'organization' ? 'organization' : 'company',
-              description: e.description || '',
-              sector: e.sector || undefined,
-              role: e.role || undefined,
-              organization: e.organization || undefined,
-              website: e.website || undefined,
-              imageUrl,
-              logoUrl: imageUrl,
-              avatarUrl: normType === 'person' ? imageUrl : e.avatar_url || undefined,
-              brandColor: e.brand_color || '#10b981',
-              isFollowed: false
-            };
-          });
-          sources = (srcRes.rows || []).map((s: any) => ({
-            id: String(s.id),
-            name: s.name,
-            slug: s.slug || undefined,
-            domain: s.domain,
-            category: s.category || 'Notícias',
-            logoUrl: s.logo_url || undefined,
-            brandColor: s.brand_color || '#64748b',
-            isFollowed: false
-          }));
-        } catch (pgErr: any) {
-          console.warn('[Catalog API] Erro PostgreSQL:', pgErr?.message);
+        const [entSettled, srcSettled] = await withSpan(traceCtx, 'db_catalog', () =>
+          Promise.allSettled([
+            executeSql(
+              `SELECT ${ENTITY_SELECT_COLUMNS}
+               FROM public.entities
+               WHERE COALESCE(is_active, TRUE) = TRUE
+               ORDER BY name ASC`
+            ),
+            executeSql(
+              `SELECT ${NEWS_SOURCE_SELECT_COLUMNS}
+               FROM public.news_sources
+               WHERE COALESCE(is_active, TRUE) = TRUE
+               ORDER BY name ASC`
+            )
+          ])
+        );
+
+        if (entSettled.status === 'fulfilled') {
+          entitiesOk = true;
+          entities = (entSettled.value.rows || []).map(mapEntityRecord);
+        } else {
+          console.error('[Catalog API][PG entities] Falha na consulta:', entSettled.reason?.message || entSettled.reason);
+        }
+
+        if (srcSettled.status === 'fulfilled') {
+          sourcesOk = true;
+          sources = (srcSettled.value.rows || []).map(mapSourceRecord);
+        } else {
+          console.error('[Catalog API][PG news_sources] Falha na consulta:', srcSettled.reason?.message || srcSettled.reason);
         }
       }
 
-      if (entities.length === 0 && sources.length === 0) {
+      if (!entitiesOk || !sourcesOk) {
         try {
           const client = getServerSupabase();
           const [entRes, srcRes] = await withSpan(traceCtx, 'sb_catalog', () =>
             Promise.all([
-              client
-                .from('entities')
-                .select('id, name, slug, type, description, sector, role, organization, website, image_url, logo_url, avatar_url, brand_color')
-                .order('name'),
-              client
-                .from('news_sources')
-                .select('id, name, slug, domain, category, logo_url, brand_color')
-                .order('name')
+              !entitiesOk
+                ? client
+                    .from('entities')
+                    .select(ENTITY_SELECT_COLUMNS)
+                    .or('is_active.is.null,is_active.eq.true')
+                    .order('name')
+                : Promise.resolve(null),
+              !sourcesOk
+                ? client
+                    .from('news_sources')
+                    .select(NEWS_SOURCE_SELECT_COLUMNS)
+                    .or('is_active.is.null,is_active.eq.true')
+                    .order('name')
+                : Promise.resolve(null)
             ])
           );
-          entities = (entRes.data || []).map((e: any) => {
-            const normType = String(e.type || 'company').trim().toLowerCase();
-            const imageUrl = e.image_url || e.logo_url || e.avatar_url || undefined;
-            return {
-              id: String(e.id),
-              name: e.name,
-              slug: e.slug || undefined,
-              type: normType === 'person' ? 'person' : normType === 'organization' ? 'organization' : 'company',
-              description: e.description || '',
-              sector: e.sector || undefined,
-              role: e.role || undefined,
-              organization: e.organization || undefined,
-              website: e.website || undefined,
-              imageUrl,
-              logoUrl: imageUrl,
-              avatarUrl: normType === 'person' ? imageUrl : e.avatar_url || undefined,
-              brandColor: e.brand_color || '#10b981',
-              isFollowed: false
-            };
-          });
-          sources = (srcRes.data || []).map((s: any) => ({
-            id: String(s.id),
-            name: s.name,
-            slug: s.slug || undefined,
-            domain: s.domain,
-            category: s.category || 'Notícias',
-            logoUrl: s.logo_url || undefined,
-            brandColor: s.brand_color || '#64748b',
-            isFollowed: false
-          }));
-        } catch {}
+
+          if (entRes) {
+            if (entRes.error) {
+              console.error('[Catalog API][Supabase entities] Erro na consulta:', entRes.error.code || '', entRes.error.message || entRes.error);
+            } else if (Array.isArray(entRes.data)) {
+              entitiesOk = true;
+              entities = entRes.data.map(mapEntityRecord);
+            }
+          }
+
+          if (srcRes) {
+            if (srcRes.error) {
+              console.error('[Catalog API][Supabase news_sources] Erro na consulta:', srcRes.error.code || '', srcRes.error.message || srcRes.error);
+            } else if (Array.isArray(srcRes.data)) {
+              sourcesOk = true;
+              sources = srcRes.data.map(mapSourceRecord);
+            }
+          }
+        } catch (sbErr: any) {
+          console.error('[Catalog API][Supabase Fallback] Erro ao inicializar cliente:', sbErr?.message || sbErr);
+        }
+      }
+
+      attachTelemetryHeaders(res, traceCtx);
+
+      if (!entitiesOk && !sourcesOk) {
+        return sendJson(
+          res,
+          503,
+          {
+            success: false,
+            error: 'CATALOG_UNAVAILABLE',
+            code: 'CATALOG_UNAVAILABLE',
+            message: 'Catálogo temporariamente indisponível. Tente novamente em instantes.',
+            entities: [],
+            sources: []
+          },
+          {
+            'Cache-Control': 'no-store'
+          }
+        );
+      }
+
+      if (!entitiesOk || !sourcesOk) {
+        const degraded = [!entitiesOk ? 'entities' : null, !sourcesOk ? 'sources' : null].filter(Boolean);
+        return sendJson(
+          res,
+          200,
+          {
+            success: true,
+            partial: true,
+            code: 'CATALOG_PARTIAL_UNAVAILABLE',
+            degraded,
+            warning: 'Parte do catálogo está temporariamente indisponível.',
+            entities,
+            sources
+          },
+          {
+            'Cache-Control': 'no-store'
+          }
+        );
       }
 
       const catalogEtag = computeWeakEtag(
         JSON.stringify({
-          e: entities.map((x) => `${x.id}:${x.imageUrl || ''}`),
+          e: entities.map((x) => `${x.id}:${x.imageUrl || ''}:${x.website || ''}`),
           s: sources.map((x) => `${x.id}:${x.logoUrl || ''}`),
         })
       );
-      attachTelemetryHeaders(res, traceCtx);
       const ifNoneMatch = String(req.headers?.['if-none-match'] || '').trim();
       if (ifNoneMatch && ifNoneMatch === catalogEtag) {
         res.setHeader('ETag', catalogEtag);
@@ -291,6 +368,7 @@ export default async function handler(req: any, res: any) {
         200,
         {
           success: true,
+          partial: false,
           entities,
           sources
         },
@@ -300,13 +378,23 @@ export default async function handler(req: any, res: any) {
         }
       );
     } catch (err: any) {
+      console.error('[Catalog API Critical Error]', err?.message || err);
       attachTelemetryHeaders(res, traceCtx);
-      return sendJson(res, 200, {
-        success: true,
-        entities: [],
-        sources: [],
-        warning: err?.message
-      });
+      return sendJson(
+        res,
+        503,
+        {
+          success: false,
+          error: 'CATALOG_UNAVAILABLE',
+          code: 'CATALOG_UNAVAILABLE',
+          message: 'Catálogo temporariamente indisponível. Tente novamente em instantes.',
+          entities: [],
+          sources: []
+        },
+        {
+          'Cache-Control': 'no-store'
+        }
+      );
     }
   }
 
@@ -438,44 +526,31 @@ export default async function handler(req: any, res: any) {
           const lastRow = pageRows.length > 0 ? pageRows[pageRows.length - 1] : null;
           const nextCursor = hasMore && lastRow ? encodeEventCursor(lastRow.published_at, String(lastRow.id)) : null;
 
-          // Carregar event_entities separadamente para não falhar caso a tabela/colunas variem
+          // Carregar event_entities separadamente usando apenas colunas reais de public.entities
           const entitiesByEventId = new Map<string, any[]>();
           try {
             const eventIds = pageRows.map((r: any) => String(r.id));
             if (eventIds.length > 0) {
               const eeRes = await withSpan(traceCtx, 'db_event_entities', () =>
                 executeSql(
-                  `SELECT ee.event_id, ent.id, ent.name, ent.slug, ent.type, ent.description, ent.sector, ent.role, ent.website, ent.image_url, ent.logo_url, ent.avatar_url, ent.brand_color
+                  `SELECT ee.event_id, ${EVENT_ENTITY_SELECT_COLUMNS}
                    FROM public.event_entities ee
                    JOIN public.entities ent ON ent.id::text = ee.entity_id::text
-                   WHERE ee.event_id::text = ANY($1::text[])`,
+                   WHERE ee.event_id::text = ANY($1::text[])
+                     AND COALESCE(ent.is_active, TRUE) = TRUE`,
                   [eventIds]
                 )
               );
               for (const row of eeRes.rows || []) {
                 const evKey = String(row.event_id);
-                const normType = String(row.type || 'company').trim().toLowerCase();
-                const imageUrl = row.image_url || row.logo_url || row.avatar_url || undefined;
                 const list = entitiesByEventId.get(evKey) || [];
-                list.push({
-                  id: String(row.id),
-                  name: row.name,
-                  slug: row.slug || undefined,
-                  type: normType === 'person' ? 'person' : normType === 'organization' ? 'organization' : 'company',
-                  description: row.description || '',
-                  sector: row.sector || undefined,
-                  role: row.role || undefined,
-                  website: row.website || undefined,
-                  imageUrl,
-                  logoUrl: imageUrl,
-                  avatarUrl: normType === 'person' ? imageUrl : row.avatar_url || undefined,
-                  brandColor: row.brand_color || '#10b981',
-                  isFollowed: false
-                });
+                list.push(mapEntityRecord(row));
                 entitiesByEventId.set(evKey, list);
               }
             }
-          } catch {}
+          } catch (eeErr: any) {
+            console.warn('[Events API] Falha ao carregar event_entities:', eeErr?.message || eeErr);
+          }
 
           const mapped = pageRows.map((row: any) => {
             const sources = Array.isArray(row.sources) ? row.sources : [];
@@ -550,28 +625,108 @@ export default async function handler(req: any, res: any) {
         }
       }
 
-      // 2. Fallback via Supabase Client server-side
+      // 2. Fallback via Supabase Client server-side (com hidratação de entidades e fontes com colunas válidas)
       try {
         const client = getServerSupabase();
-          let sbQuery = client
-            .from('events')
-            .select('id, title, slug, summary, why_it_matters, published_at, updated_at, relevance_score, article_count')
-            .order('published_at', { ascending: false });
+        let sbQuery = client
+          .from('events')
+          .select('id, title, slug, summary, why_it_matters, published_at, updated_at, relevance_score, article_count')
+          .order('published_at', { ascending: false });
 
-          if (decodedCursor) {
-            sbQuery = sbQuery.lt('published_at', decodedCursor.publishedAt).limit(queryLimit);
-          } else {
-            sbQuery = sbQuery.range(offset, offset + queryLimit - 1);
+        if (decodedCursor) {
+          sbQuery = sbQuery.lt('published_at', decodedCursor.publishedAt).limit(queryLimit);
+        } else {
+          sbQuery = sbQuery.range(offset, offset + queryLimit - 1);
+        }
+
+        const { data, error } = await withSpan(traceCtx, 'sb_events', async () => sbQuery);
+
+        if (!error && Array.isArray(data)) {
+          const hasMore = data.length > limit;
+          const pageData = hasMore ? data.slice(0, limit) : data;
+          const lastRow = pageData.length > 0 ? pageData[pageData.length - 1] : null;
+          const nextCursor = hasMore && lastRow ? encodeEventCursor(lastRow.published_at, String(lastRow.id)) : null;
+
+          const sbEntitiesByEvent = new Map<string, any[]>();
+          const sbSourcesByEvent = new Map<string, any[]>();
+          const sbImageByEvent = new Map<string, string>();
+          const eventIds = pageData.map((r: any) => String(r.id)).filter(Boolean);
+
+          if (eventIds.length > 0) {
+            try {
+              const [eeLinksRes, eaLinksRes] = await Promise.all([
+                client.from('event_entities').select('event_id, entity_id').in('event_id', eventIds),
+                client.from('event_articles').select('event_id, article_id, is_primary').in('event_id', eventIds),
+              ]);
+
+              const eeLinks = Array.isArray(eeLinksRes?.data) ? eeLinksRes.data : [];
+              const entityIds = Array.from(new Set(eeLinks.map((l: any) => String(l.entity_id)).filter(Boolean)));
+              if (entityIds.length > 0) {
+                const { data: entRows } = await client
+                  .from('entities')
+                  .select(ENTITY_SELECT_COLUMNS)
+                  .in('id', entityIds)
+                  .or('is_active.is.null,is_active.eq.true');
+                const entById = new Map((entRows || []).map((e: any) => [String(e.id), mapEntityRecord(e)]));
+                for (const link of eeLinks) {
+                  const mappedEnt = entById.get(String(link.entity_id));
+                  if (mappedEnt) {
+                    const list = sbEntitiesByEvent.get(String(link.event_id)) || [];
+                    list.push(mappedEnt);
+                    sbEntitiesByEvent.set(String(link.event_id), list);
+                  }
+                }
+              }
+
+              const eaLinks = Array.isArray(eaLinksRes?.data) ? eaLinksRes.data : [];
+              const articleIds = Array.from(new Set(eaLinks.map((l: any) => String(l.article_id)).filter(Boolean)));
+              if (articleIds.length > 0) {
+                const { data: artRows } = await client
+                  .from('articles')
+                  .select('id, source_id, title, url, canonical_url, description, published_at, image_url')
+                  .in('id', articleIds);
+                const artList = Array.isArray(artRows) ? artRows : [];
+                const sourceIds = Array.from(new Set(artList.map((a: any) => String(a.source_id)).filter(Boolean)));
+                let srcById = new Map<string, any>();
+                if (sourceIds.length > 0) {
+                  const { data: srcRows } = await client
+                    .from('news_sources')
+                    .select(NEWS_SOURCE_SELECT_COLUMNS)
+                    .in('id', sourceIds);
+                  srcById = new Map((srcRows || []).map((s: any) => [String(s.id), s]));
+                }
+                const artById = new Map(artList.map((a: any) => [String(a.id), a]));
+                for (const link of eaLinks) {
+                  const art = artById.get(String(link.article_id));
+                  if (!art) continue;
+                  const src = srcById.get(String(art.source_id));
+                  const evId = String(link.event_id);
+                  if (art.image_url && !sbImageByEvent.has(evId)) {
+                    sbImageByEvent.set(evId, art.image_url);
+                  }
+                  const list = sbSourcesByEvent.get(evId) || [];
+                  list.push({
+                    id: src?.id || art.source_id,
+                    sourceName: src?.name || src?.domain || 'Fonte Verificada',
+                    domain: src?.domain,
+                    logoUrl: src?.logo_url || undefined,
+                    headline: art.title,
+                    url: art.url,
+                    description: art.description,
+                    publishedAt: art.published_at
+                  });
+                  sbSourcesByEvent.set(evId, list);
+                }
+              }
+            } catch (hydrateErr: any) {
+              console.warn('[Events API][Supabase fallback] Falha ao hidratar entidades/fontes:', hydrateErr?.message);
+            }
           }
 
-          const { data, error } = await withSpan(traceCtx, 'sb_events', async () => sbQuery);
-
-          if (!error && Array.isArray(data)) {
-            const hasMore = data.length > limit;
-            const pageData = hasMore ? data.slice(0, limit) : data;
-            const lastRow = pageData.length > 0 ? pageData[pageData.length - 1] : null;
-            const nextCursor = hasMore && lastRow ? encodeEventCursor(lastRow.published_at, String(lastRow.id)) : null;
-            const events = pageData.map((row: any) => ({
+          const events = pageData.map((row: any) => {
+            const evId = String(row.id);
+            const sources = sbSourcesByEvent.get(evId) || [];
+            return {
               id: row.id,
               title: row.title,
               slug: row.slug || `evento-${row.id}`,
@@ -580,30 +735,31 @@ export default async function handler(req: any, res: any) {
               whyItMatters: row.why_it_matters || 'Fato em acompanhamento editorial.',
               category: 'Brasil',
               relevanceScore: row.relevance_score || 90,
-              imageUrl: null,
+              imageUrl: sbImageByEvent.get(evId) || null,
               publishedAt: row.published_at,
               updatedAt: row.updated_at,
               relativeTime: 'Recente',
-              sourceCountText: `${row.article_count || 1} fonte(s)`,
-              entities: [],
-              sources: []
-            }));
+              sourceCountText: `${sources.length || row.article_count || 1} fonte(s)`,
+              entities: sbEntitiesByEvent.get(evId) || [],
+              sources
+            };
+          });
 
-            attachTelemetryHeaders(res, traceCtx);
-            return sendJson(res, 200, {
-              success: true,
-              count: events.length,
-              limit,
-              offset,
-              hasMore,
-              nextCursor,
-              events,
-              source: 'supabase_client'
-            });
-          }
-        } catch (sbErr: any) {
-          console.warn('[Events API] Supabase fallback falhou:', sbErr?.message);
+          attachTelemetryHeaders(res, traceCtx);
+          return sendJson(res, 200, {
+            success: true,
+            count: events.length,
+            limit,
+            offset,
+            hasMore,
+            nextCursor,
+            events,
+            source: 'supabase_client'
+          });
         }
+      } catch (sbErr: any) {
+        console.warn('[Events API] Supabase fallback falhou:', sbErr?.message);
+      }
 
       // 3. Resposta segura HTTP 200 sem erro 500 para base em inicialização ou vazia
       attachTelemetryHeaders(res, traceCtx);
