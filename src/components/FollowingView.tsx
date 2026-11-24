@@ -20,16 +20,26 @@ import {
   GraduationCap,
   Layers,
   ArrowRight,
-  AlertTriangle
+  AlertTriangle,
+  RefreshCw
 } from 'lucide-react';
 import { CompanyLogoBadge } from './CompanyLogoBadge';
 import { HorizontalFilterTabs } from './HorizontalFilterTabs';
 import { useDebounce } from '../hooks/useDebounce';
 
+interface CatalogStatusProp {
+  loading?: boolean;
+  error?: string | null;
+  partial?: boolean;
+  warning?: string | null;
+}
+
 interface FollowingViewProps {
   entities: Entity[];
   topics: Topic[];
   sources: Source[];
+  catalogStatus?: CatalogStatusProp;
+  onRetryCatalog?: () => void;
   onToggleFollowEntity: (id: string) => void;
   onToggleFollowTopic: (id: string) => void;
   onToggleFollowSource: (id: string) => void;
@@ -61,6 +71,8 @@ export const FollowingView: React.FC<FollowingViewProps> = ({
   entities,
   topics,
   sources,
+  catalogStatus,
+  onRetryCatalog,
   onToggleFollowEntity,
   onToggleFollowTopic,
   onToggleFollowSource,
@@ -301,6 +313,36 @@ export const FollowingView: React.FC<FollowingViewProps> = ({
         onSelectTab={(id) => setActiveTypeFilter(id as any)}
         ariaLabel="Filtros por tipo de item seguido"
       />
+
+      {/* Aviso explícito de indisponibilidade ou degradação parcial do catálogo */}
+      {(catalogStatus?.error || catalogStatus?.partial) && (
+        <div
+          role="alert"
+          className={`rounded-2xl border px-4 py-3 text-xs flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 ${
+            catalogStatus?.error
+              ? 'border-red-900/60 bg-red-950/30 text-red-200'
+              : 'border-amber-800/60 bg-amber-950/25 text-amber-200'
+          }`}
+        >
+          <div className="flex items-start gap-2.5">
+            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+            <span className="leading-snug">
+              {catalogStatus.error || catalogStatus.warning || 'Parte do catálogo está temporariamente indisponível.'}
+            </span>
+          </div>
+          {onRetryCatalog && (
+            <button
+              type="button"
+              onClick={onRetryCatalog}
+              disabled={catalogStatus.loading}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white text-black text-xs font-bold hover:bg-zinc-200 transition cursor-pointer shrink-0 self-start sm:self-auto disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${catalogStatus.loading ? 'animate-spin' : ''}`} />
+              <span>{catalogStatus.loading ? 'Atualizando...' : 'Tentar novamente'}</span>
+            </button>
+          )}
+        </div>
+      )}
 
       {/* 4. Resumo de Contadores Desktop (6 Cards Estatísticos no Mockup 02) */}
       <div className="hidden sm:grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">

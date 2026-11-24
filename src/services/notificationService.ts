@@ -381,8 +381,77 @@ class NotificationService {
       code === 'PGRST301' ||
       msg.includes('jwt expired') ||
       msg.includes('invalid jwt') ||
-      msg.includes('session not found')
+      msg.includes('session not found') ||
+      msg.includes('refresh_token')
     );
+  }
+
+  private isPermissionDeniedError(err: any): boolean {
+    if (!err) return false;
+    const msg = String(err?.message || '').toLowerCase();
+    const code = String(err?.code || '').toUpperCase();
+    const status = Number(err?.status || 0);
+    return (
+      code === '42501' ||
+      status === 403 ||
+      msg.includes('permission denied') ||
+      msg.includes('insufficient_privilege') ||
+      msg.includes('row-level security')
+    );
+  }
+
+  private async ensureAuthenticatedSession(
+    client: any,
+    userId: string
+  ): Promise<{ ok: boolean; sessionExpired?: boolean; error?: string }> {
+    if (typeof client?.auth?.getSession !== 'function') {
+      return { ok: true };
+    }
+
+    try {
+      const { data, error } = await client.auth.getSession();
+      let session = data?.session || null;
+      const isNearExpiry =
+        typeof session?.expires_at === 'number' &&
+        session.expires_at * 1000 <= Date.now() + 30_000;
+
+      if (error || !session?.access_token || isNearExpiry) {
+        if (typeof client.auth.refreshSession === 'function') {
+          const refreshed = await client.auth.refreshSession();
+          if (!refreshed.error && refreshed.data?.session?.access_token) {
+            session = refreshed.data.session;
+          } else {
+            return {
+              ok: false,
+              sessionExpired: true,
+              error: 'Sua sessão expirou. Faça login novamente para sincronizar seus alertas.'
+            };
+          }
+        } else {
+          return {
+            ok: false,
+            sessionExpired: true,
+            error: 'Sua sessão expirou. Faça login novamente para sincronizar seus alertas.'
+          };
+        }
+      }
+
+      if (session?.user?.id && session.user.id !== userId) {
+        return {
+          ok: false,
+          sessionExpired: true,
+          error: 'Sessão divergente do usuário atual. Faça login novamente.'
+        };
+      }
+
+      return { ok: true };
+    } catch {
+      return {
+        ok: false,
+        sessionExpired: true,
+        error: 'Não foi possível validar sua sessão. Faça login novamente.'
+      };
+    }
   }
 
   private mapDbNotificationRow(n: any) {
@@ -441,7 +510,7 @@ class NotificationService {
 
   /**
    * Consulta paginada das notificações reais do usuário autenticado no Supabase,
-   * diferenciando estado vazio legítimo de falha de rede ou sessão expirada.
+   * diferenciando estado vazio legítimo de falha de permissão, rede ou sessão expirada.
    */
   public async getUserNotificationsDetailed(
     userId: string,
@@ -451,10 +520,21 @@ class NotificationService {
     hasMore: boolean;
     error?: string;
     sessionExpired?: boolean;
+    permissionDenied?: boolean;
   }> {
     const { client, configured } = this.getDb();
     if (!configured || !userId) {
       return { items: [], hasMore: false };
+    }
+
+    const sessionCheck = await this.ensureAuthenticatedSession(client, userId);
+    if (!sessionCheck.ok) {
+      return {
+        items: [],
+        hasMore: false,
+        sessionExpired: Boolean(sessionCheck.sessionExpired),
+        error: sessionCheck.error
+      };
     }
 
     const limit = Math.max(1, Math.min(100, options?.limit ?? 25));
@@ -481,13 +561,17 @@ class NotificationService {
 
       if (error) {
         const expired = this.isSessionExpiredError(error);
+        const permissionDenied = !expired && this.isPermissionDeniedError(error);
         return {
           items: [],
           hasMore: false,
           sessionExpired: expired,
+          permissionDenied,
           error: expired
             ? 'Sua sessão expirou. Faça login novamente para sincronizar seus alertas.'
-            : error.message || 'Falha ao sincronizar notificações.'
+            : permissionDenied
+              ? `Permissão negada ao consultar notificações (${error.message || '42501'}). Verifique sua sessão ou permissões da tabela.`
+              : error.message || 'Falha ao sincronizar notificações.'
         };
       }
 
@@ -531,10 +615,20 @@ class NotificationService {
     count: number;
     error?: string;
     sessionExpired?: boolean;
+    permissionDenied?: boolean;
   }> {
     const { client, configured } = this.getDb();
     if (!configured || !userId) {
       return { count: 0 };
+    }
+
+    const sessionCheck = await this.ensureAuthenticatedSession(client, userId);
+    if (!sessionCheck.ok) {
+      return {
+        count: 0,
+        sessionExpired: Boolean(sessionCheck.sessionExpired),
+        error: sessionCheck.error
+      };
     }
 
     return dedupInFlight(`notif:unread:${userId}`, async () => {
@@ -547,10 +641,14 @@ class NotificationService {
 
         if (error) {
           const expired = this.isSessionExpiredError(error);
+          const permissionDenied = !expired && this.isPermissionDeniedError(error);
           return {
             count: 0,
             sessionExpired: expired,
-            error: error.message
+            permissionDenied,
+            error: permissionDenied
+              ? `Permissão negada ao consultar alertas (${error.message || '42501'}).`
+              : error.message
           };
         }
 
@@ -579,10 +677,25 @@ class NotificationService {
   public async markAsReadDetailed(
     notificationId: string,
     userId: string
-  ): Promise<{ success: boolean; readAt?: string; error?: string; sessionExpired?: boolean }> {
+  ): Promise<{
+    success: boolean;
+    readAt?: string;
+    error?: string;
+    sessionExpired?: boolean;
+    permissionDenied?: boolean;
+  }> {
     const { client, configured } = this.getDb();
     if (!configured || !userId || !notificationId) {
       return { success: false, error: 'Sessão inválida para atualizar notificação.' };
+    }
+
+    const sessionCheck = await this.ensureAuthenticatedSession(client, userId);
+    if (!sessionCheck.ok) {
+      return {
+        success: false,
+        sessionExpired: Boolean(sessionCheck.sessionExpired),
+        error: sessionCheck.error
+      };
     }
 
     const nowIso = new Date().toISOString();
@@ -604,12 +717,16 @@ class NotificationService {
 
       if (error) {
         const expired = this.isSessionExpiredError(error);
+        const permissionDenied = !expired && this.isPermissionDeniedError(error);
         return {
           success: false,
           sessionExpired: expired,
+          permissionDenied,
           error: expired
             ? 'Sessão expirada ao marcar notificação como lida.'
-            : error.message || 'Falha ao atualizar status da notificação.'
+            : permissionDenied
+              ? `Permissão negada ao atualizar notificação (${error.message || '42501'}).`
+              : error.message || 'Falha ao atualizar status da notificação.'
         };
       }
 
@@ -639,10 +756,25 @@ class NotificationService {
    */
   public async markAllAsReadDetailed(
     userId: string
-  ): Promise<{ success: boolean; readAt?: string; error?: string; sessionExpired?: boolean }> {
+  ): Promise<{
+    success: boolean;
+    readAt?: string;
+    error?: string;
+    sessionExpired?: boolean;
+    permissionDenied?: boolean;
+  }> {
     const { client, configured } = this.getDb();
     if (!configured || !userId) {
       return { success: false, error: 'Sessão inválida para atualizar notificações.' };
+    }
+
+    const sessionCheck = await this.ensureAuthenticatedSession(client, userId);
+    if (!sessionCheck.ok) {
+      return {
+        success: false,
+        sessionExpired: Boolean(sessionCheck.sessionExpired),
+        error: sessionCheck.error
+      };
     }
 
     const nowIso = new Date().toISOString();
@@ -664,12 +796,16 @@ class NotificationService {
 
       if (error) {
         const expired = this.isSessionExpiredError(error);
+        const permissionDenied = !expired && this.isPermissionDeniedError(error);
         return {
           success: false,
           sessionExpired: expired,
+          permissionDenied,
           error: expired
             ? 'Sessão expirada ao marcar notificações como lidas.'
-            : error.message || 'Falha ao atualizar notificações.'
+            : permissionDenied
+              ? `Permissão negada ao atualizar notificações (${error.message || '42501'}).`
+              : error.message || 'Falha ao atualizar notificações.'
         };
       }
 

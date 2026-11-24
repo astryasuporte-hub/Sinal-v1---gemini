@@ -287,17 +287,104 @@ export const userService = {
   },
 
   /**
+   * Detecta erro de permissão negada (PostgreSQL SQLSTATE 42501 / RLS / 403)
+   */
+  isPermissionDeniedError(err: any): boolean {
+    if (!err) return false;
+    const msg = String(err?.message || '').toLowerCase();
+    const code = String(err?.code || '').toUpperCase();
+    const status = Number(err?.status || 0);
+    return (
+      code === '42501' ||
+      status === 403 ||
+      msg.includes('permission denied') ||
+      msg.includes('insufficient_privilege') ||
+      msg.includes('row-level security')
+    );
+  },
+
+  /**
+   * Valida sessão ativa antes de ler/gravar dados protegidos por RLS no Supabase real.
+   * Clientes mockados de teste sem `auth.getSession` permanecem compatíveis.
+   */
+  async ensureAuthenticatedSession(
+    client: any,
+    userId: string
+  ): Promise<{ ok: boolean; sessionExpired?: boolean; error?: string }> {
+    if (typeof client?.auth?.getSession !== 'function') {
+      return { ok: true };
+    }
+
+    try {
+      const { data, error } = await client.auth.getSession();
+      let session = data?.session || null;
+
+      const isNearExpiry =
+        typeof session?.expires_at === 'number' &&
+        session.expires_at * 1000 <= Date.now() + 30_000;
+
+      if (error || !session?.access_token || isNearExpiry) {
+        if (typeof client.auth.refreshSession === 'function') {
+          const refreshed = await client.auth.refreshSession();
+          if (!refreshed.error && refreshed.data?.session?.access_token) {
+            session = refreshed.data.session;
+          } else {
+            return {
+              ok: false,
+              sessionExpired: true,
+              error: 'Sua sessão expirou. Faça login novamente.'
+            };
+          }
+        } else {
+          return {
+            ok: false,
+            sessionExpired: true,
+            error: 'Sua sessão expirou. Faça login novamente.'
+          };
+        }
+      }
+
+      if (session?.user?.id && session.user.id !== userId) {
+        return {
+          ok: false,
+          sessionExpired: true,
+          error: 'Sessão divergente do usuário atual. Faça login novamente.'
+        };
+      }
+
+      return { ok: true };
+    } catch {
+      return {
+        ok: false,
+        sessionExpired: true,
+        error: 'Não foi possível validar sua sessão. Faça login novamente.'
+      };
+    }
+  },
+
+  /**
    * Carrega preferências detalhadas do usuário consolidando de forma canônica
    * `public.user_preferences` (entrega de briefings) e `public.user_settings` (configurações e `notification_settings`).
-   * Diferencia ausência de registro de falha real de rede/sessão expirada.
+   * Nunca mascara erros de permissão (42501) ou falhas reais de uma das tabelas.
    */
   async getUserPreferencesDetailed(userId: string): Promise<{
     data: any | null;
     error?: string;
     sessionExpired?: boolean;
+    permissionDenied?: boolean;
   }> {
     const { client, configured } = getDb();
     if (!configured || !userId) return { data: null };
+
+    const sessionCheck = await this.ensureAuthenticatedSession(client, userId);
+    if (!sessionCheck.ok) {
+      invalidateRequestCache(`user:prefs:${userId}`);
+      return {
+        data: null,
+        sessionExpired: Boolean(sessionCheck.sessionExpired),
+        error: sessionCheck.error || 'Sua sessão expirou. Faça login novamente.'
+      };
+    }
 
     const cacheKey = `user:prefs:${userId}`;
     const result = await swrFetch(cacheKey, 15_000, async () => {
@@ -322,72 +409,74 @@ export const userService = {
         const prefErr = prefRes.error;
         const settingsErr = settingsRes.error;
 
-      if (this.isSessionExpiredError(prefErr) || this.isSessionExpiredError(settingsErr)) {
-        return { data: null, error: 'Sua sessão expirou. Faça login novamente.', sessionExpired: true };
-      }
-
-      const prefFatal = prefErr && !isMissingRelationError(prefErr) ? prefErr : null;
-      const settingsFatal = settingsErr && !isMissingRelationError(settingsErr) ? settingsErr : null;
-
-      if (prefFatal && settingsFatal) {
-        return { data: null, error: prefFatal.message || settingsFatal.message || 'Falha ao carregar preferências do Supabase.' };
-      }
-      if (prefFatal && isMissingRelationError(settingsErr)) {
-        return { data: null, error: prefFatal.message || 'Falha ao carregar preferências do Supabase.' };
-      }
-      if (settingsFatal && isMissingRelationError(prefErr)) {
-        return { data: null, error: settingsFatal.message || 'Falha ao carregar configurações do usuário.' };
-      }
-
-      const prefData = !prefErr ? prefRes.data : null;
-      const settingsData = !settingsErr ? settingsRes.data : null;
-
-      if (!prefData && !settingsData) {
-        if (prefFatal || settingsFatal) {
-          return { data: null, error: (prefFatal || settingsFatal)?.message || 'Falha ao carregar preferências.' };
+        if (this.isSessionExpiredError(prefErr) || this.isSessionExpiredError(settingsErr)) {
+          return { data: null, error: 'Sua sessão expirou. Faça login novamente.', sessionExpired: true };
         }
-        return { data: null };
-      }
 
-      const mergedNotificationSettings =
-        (settingsData?.notification_settings && typeof settingsData.notification_settings === 'object'
-          ? settingsData.notification_settings
-          : null) ??
-        (prefData?.notification_settings && typeof prefData.notification_settings === 'object'
-          ? prefData.notification_settings
-          : undefined);
+        const prefFatal = prefErr && !isMissingRelationError(prefErr) ? prefErr : null;
+        const settingsFatal = settingsErr && !isMissingRelationError(settingsErr) ? settingsErr : null;
 
-      const merged = {
-        ...(settingsData || {}),
-        ...(prefData || {}),
-        email_morning_briefing:
-          typeof prefData?.email_morning_briefing === 'boolean'
-            ? prefData.email_morning_briefing
-            : settingsData?.email_morning_briefing,
-        email_evening_briefing:
-          typeof prefData?.email_evening_briefing === 'boolean'
-            ? prefData.email_evening_briefing
-            : settingsData?.email_evening_briefing,
-        email_breaking_alerts:
-          typeof prefData?.email_breaking_alerts === 'boolean'
-            ? prefData.email_breaking_alerts
-            : settingsData?.email_breaking_alerts,
-        weekend_edition:
-          typeof prefData?.weekend_edition === 'boolean'
-            ? prefData.weekend_edition
-            : settingsData?.weekend_edition,
-        briefing_email: prefData?.briefing_email || settingsData?.briefing_email,
-        morning_time: prefData?.morning_time || settingsData?.morning_time,
-        evening_time: prefData?.evening_time || settingsData?.evening_time,
-        timezone: prefData?.timezone || settingsData?.timezone,
-        notification_settings: mergedNotificationSettings,
-        updated_at:
-          prefData?.updated_at && settingsData?.updated_at
-            ? new Date(prefData.updated_at).getTime() >= new Date(settingsData.updated_at).getTime()
-              ? prefData.updated_at
-              : settingsData.updated_at
-            : prefData?.updated_at || settingsData?.updated_at,
-      };
+        // Nunca mascarar erro fatal (incluindo permission denied 42501) em user_settings ou user_preferences
+        if (prefFatal || settingsFatal) {
+          const primaryErr = settingsFatal || prefFatal;
+          const permissionDenied =
+            this.isPermissionDeniedError(settingsFatal) || this.isPermissionDeniedError(prefFatal);
+          const detailMsg = primaryErr?.message || 'Falha ao consultar preferências no Supabase.';
+          return {
+            data: null,
+            permissionDenied,
+            error: permissionDenied
+              ? `Permissão negada ao consultar preferências (${detailMsg}). Verifique sua sessão ou as permissões da tabela no Supabase.`
+              : detailMsg
+          };
+        }
+
+        const prefData = !prefErr ? prefRes.data : null;
+        const settingsData = !settingsErr ? settingsRes.data : null;
+
+        if (!prefData && !settingsData) {
+          return { data: null };
+        }
+
+        const mergedNotificationSettings =
+          (settingsData?.notification_settings && typeof settingsData.notification_settings === 'object'
+            ? settingsData.notification_settings
+            : null) ??
+          (prefData?.notification_settings && typeof prefData.notification_settings === 'object'
+            ? prefData.notification_settings
+            : undefined);
+
+        const merged = {
+          ...(settingsData || {}),
+          ...(prefData || {}),
+          email_morning_briefing:
+            typeof prefData?.email_morning_briefing === 'boolean'
+              ? prefData.email_morning_briefing
+              : settingsData?.email_morning_briefing,
+          email_evening_briefing:
+            typeof prefData?.email_evening_briefing === 'boolean'
+              ? prefData.email_evening_briefing
+              : settingsData?.email_evening_briefing,
+          email_breaking_alerts:
+            typeof prefData?.email_breaking_alerts === 'boolean'
+              ? prefData.email_breaking_alerts
+              : settingsData?.email_breaking_alerts,
+          weekend_edition:
+            typeof prefData?.weekend_edition === 'boolean'
+              ? prefData.weekend_edition
+              : settingsData?.weekend_edition,
+          briefing_email: prefData?.briefing_email || settingsData?.briefing_email,
+          morning_time: prefData?.morning_time || settingsData?.morning_time,
+          evening_time: prefData?.evening_time || settingsData?.evening_time,
+          timezone: prefData?.timezone || settingsData?.timezone,
+          notification_settings: mergedNotificationSettings,
+          updated_at:
+            prefData?.updated_at && settingsData?.updated_at
+              ? new Date(prefData.updated_at).getTime() >= new Date(settingsData.updated_at).getTime()
+                ? prefData.updated_at
+                : settingsData.updated_at
+              : prefData?.updated_at || settingsData?.updated_at,
+        };
 
         return { data: merged };
       } catch (err: any) {
@@ -395,7 +484,7 @@ export const userService = {
       }
     });
 
-    if (result?.error || result?.sessionExpired) {
+    if (result?.error || result?.sessionExpired || result?.permissionDenied) {
       invalidateRequestCache(cacheKey);
     }
     return result;
@@ -432,10 +521,25 @@ export const userService = {
       timezone?: string;
       notification_settings?: Record<string, any>;
     }
-  ): Promise<{ success: boolean; error?: string; sessionExpired?: boolean; updatedAt?: string }> {
+  ): Promise<{
+    success: boolean;
+    error?: string;
+    sessionExpired?: boolean;
+    permissionDenied?: boolean;
+    updatedAt?: string;
+  }> {
     const { client, configured } = getDb();
     if (!configured || !userId) {
       return { success: false, error: 'Sessão ou conexão Supabase indisponível.' };
+    }
+
+    const sessionCheck = await this.ensureAuthenticatedSession(client, userId);
+    if (!sessionCheck.ok) {
+      return {
+        success: false,
+        sessionExpired: Boolean(sessionCheck.sessionExpired),
+        error: sessionCheck.error || 'Sua sessão expirou. Faça login novamente.'
+      };
     }
 
     const nowIso = new Date().toISOString();
@@ -477,6 +581,27 @@ export const userService = {
       return { ok: !error, error };
     };
 
+    const formatWriteError = (err: any, fallback: string) => {
+      if (this.isSessionExpiredError(err)) {
+        return {
+          success: false as const,
+          sessionExpired: true,
+          error: 'Sua sessão expirou. Faça login novamente.'
+        };
+      }
+      if (this.isPermissionDeniedError(err)) {
+        return {
+          success: false as const,
+          permissionDenied: true,
+          error: `Permissão negada ao salvar preferências (${err?.message || '42501'}). Verifique sua sessão ou as permissões da tabela no Supabase.`
+        };
+      }
+      return {
+        success: false as const,
+        error: err?.message || fallback
+      };
+    };
+
     try {
       // 1. Persistir `notification_settings` quando solicitado (armazenamento canônico: user_settings, fallback user_preferences)
       if (hasNotificationSettings) {
@@ -489,16 +614,16 @@ export const userService = {
 
         const settingsWrite = await upsertTable('user_settings', 'user_id', nsPayload);
         if (!settingsWrite.ok) {
-          if (this.isSessionExpiredError(settingsWrite.error)) {
-            return { success: false, sessionExpired: true, error: 'Sua sessão expirou. Faça login novamente.' };
+          if (this.isSessionExpiredError(settingsWrite.error) || this.isPermissionDeniedError(settingsWrite.error)) {
+            return formatWriteError(settingsWrite.error, 'Falha ao salvar configurações do usuário.');
           }
 
           if (isMissingColumnError(settingsWrite.error) || isMissingRelationError(settingsWrite.error)) {
             // Tenta armazenar notification_settings em user_preferences somente se a coluna existir lá
             const prefNsWrite = await upsertTable('user_preferences', 'id', nsPayload);
             if (!prefNsWrite.ok) {
-              if (this.isSessionExpiredError(prefNsWrite.error)) {
-                return { success: false, sessionExpired: true, error: 'Sua sessão expirou. Faça login novamente.' };
+              if (this.isSessionExpiredError(prefNsWrite.error) || this.isPermissionDeniedError(prefNsWrite.error)) {
+                return formatWriteError(prefNsWrite.error, 'Falha ao salvar preferências no banco.');
               }
               if (isMissingColumnError(prefNsWrite.error) || isMissingRelationError(prefNsWrite.error)) {
                 return {
@@ -527,16 +652,16 @@ export const userService = {
         const prefWrite = await upsertTable('user_preferences', 'id', briefingFields);
 
         if (!prefWrite.ok) {
-          if (this.isSessionExpiredError(prefWrite.error)) {
-            return { success: false, sessionExpired: true, error: 'Sua sessão expirou. Faça login novamente.' };
+          if (this.isSessionExpiredError(prefWrite.error) || this.isPermissionDeniedError(prefWrite.error)) {
+            return formatWriteError(prefWrite.error, 'Falha ao salvar preferências de entrega no Supabase.');
           }
 
           if (isMissingRelationError(prefWrite.error)) {
             // Ambiente usa exclusivamente user_settings
             const settingsAllWrite = await upsertTable('user_settings', 'user_id', briefingFields);
             if (!settingsAllWrite.ok) {
-              if (this.isSessionExpiredError(settingsAllWrite.error)) {
-                return { success: false, sessionExpired: true, error: 'Sua sessão expirou. Faça login novamente.' };
+              if (this.isSessionExpiredError(settingsAllWrite.error) || this.isPermissionDeniedError(settingsAllWrite.error)) {
+                return formatWriteError(settingsAllWrite.error, 'Falha ao salvar configurações do usuário.');
               }
               if (isMissingColumnError(settingsAllWrite.error)) {
                 return {
@@ -555,8 +680,8 @@ export const userService = {
             let schedulePersistedInSettings = Object.keys(scheduleUpdates).length === 0;
             if (Object.keys(scheduleUpdates).length > 0) {
               const settingsSchedWrite = await upsertTable('user_settings', 'user_id', scheduleUpdates);
-              if (this.isSessionExpiredError(settingsSchedWrite.error)) {
-                return { success: false, sessionExpired: true, error: 'Sua sessão expirou. Faça login novamente.' };
+              if (this.isSessionExpiredError(settingsSchedWrite.error) || this.isPermissionDeniedError(settingsSchedWrite.error)) {
+                return formatWriteError(settingsSchedWrite.error, 'Falha ao salvar horários em user_settings.');
               }
               schedulePersistedInSettings = settingsSchedWrite.ok;
             }
@@ -572,13 +697,7 @@ export const userService = {
             if (Object.keys(baseUpdates).length > 0) {
               const prefBaseWrite = await upsertTable('user_preferences', 'id', baseUpdates);
               if (!prefBaseWrite.ok) {
-                if (this.isSessionExpiredError(prefBaseWrite.error)) {
-                  return { success: false, sessionExpired: true, error: 'Sua sessão expirou. Faça login novamente.' };
-                }
-                return {
-                  success: false,
-                  error: prefBaseWrite.error?.message || 'Falha ao salvar preferências de entrega no banco.'
-                };
+                return formatWriteError(prefBaseWrite.error, 'Falha ao salvar preferências de entrega no banco.');
               }
             }
           } else {
@@ -595,6 +714,81 @@ export const userService = {
     } catch (err: any) {
       return { success: false, error: err?.message || 'Erro de conexão ao salvar preferências.' };
     }
+  },
+
+  /**
+   * Inicializa preferências padrão de forma idempotente caso o usuário autenticado
+   * ainda não possua registro no banco (sem sobrescrever preferências existentes nem mascarar erro).
+   */
+  async ensureDefaultUserSettings(
+    userId: string,
+    email?: string
+  ): Promise<{
+    initialized: boolean;
+    created: boolean;
+    data?: any | null;
+    error?: string;
+    sessionExpired?: boolean;
+    permissionDenied?: boolean;
+  }> {
+    const { configured } = getDb();
+    if (!configured || !userId) {
+      return { initialized: false, created: false };
+    }
+
+    const current = await this.getUserPreferencesDetailed(userId);
+    if (current.error || current.sessionExpired || current.permissionDenied) {
+      return {
+        initialized: false,
+        created: false,
+        error: current.error,
+        sessionExpired: current.sessionExpired,
+        permissionDenied: current.permissionDenied
+      };
+    }
+
+    if (current.data) {
+      return { initialized: true, created: false, data: current.data };
+    }
+
+    const defaultPayload = {
+      email_morning_briefing: true,
+      email_evening_briefing: true,
+      email_breaking_alerts: true,
+      weekend_edition: false,
+      briefing_email: email || undefined,
+      morning_time: '07:00',
+      evening_time: '20:00',
+      timezone: 'America/Sao_Paulo',
+      notification_settings: {
+        urgentEvents: true,
+        entityUpdates: true,
+        topicAlerts: true,
+        sourcesDigest: true,
+        dailyBriefings: true,
+        onlyHighRelevance: true
+      }
+    };
+
+    const writeRes = await this.updateUserPreferencesDetailed(userId, defaultPayload);
+    if (!writeRes.success) {
+      return {
+        initialized: false,
+        created: false,
+        error: writeRes.error,
+        sessionExpired: writeRes.sessionExpired,
+        permissionDenied: writeRes.permissionDenied
+      };
+    }
+
+    return {
+      initialized: true,
+      created: true,
+      data: {
+        ...defaultPayload,
+        updated_at: writeRes.updatedAt
+      }
+    };
   },
 
   /**

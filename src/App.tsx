@@ -344,16 +344,31 @@ export default function App() {
     };
   }, []);
 
+  const [catalogStatus, setCatalogStatus] = useState<{
+    loading: boolean;
+    error: string | null;
+    partial: boolean;
+    warning: string | null;
+  }>({
+    loading: false,
+    error: null,
+    partial: false,
+    warning: null
+  });
+
   // Catálogo oficial (entidades, fontes e opcionalmente eventos) atualizado a partir do Supabase
-  const refreshCatalogFromSupabase = useCallback(async (includeEvents = false) => {
+  const refreshCatalogFromSupabase = useCallback(async (includeEvents = false, forceRefresh = false) => {
+    setCatalogStatus((prev) => ({ ...prev, loading: true }));
     try {
-      const [remoteEntities, remoteSources, remoteEvents] = await Promise.all([
-        eventService.getEntities().catch(() => []),
-        eventService.getSources().catch(() => []),
+      const [catalogRes, remoteEvents] = await Promise.all([
+        eventService.getCatalogDetailed({ forceRefresh }),
         includeEvents ? eventService.getEvents().catch(() => []) : Promise.resolve([])
       ]);
 
-      if (Array.isArray(remoteEntities) && remoteEntities.length > 0) {
+      const remoteEntities = catalogRes.entities || [];
+      const remoteSources = catalogRes.sources || [];
+
+      if (remoteEntities.length > 0) {
         setEntities((prev) => {
           const prevFollowById = new Map(prev.map((e) => [e.id, e.isFollowed]));
           const prevFollowByName = new Map(prev.map((e) => [e.name.trim().toLowerCase(), e.isFollowed]));
@@ -367,7 +382,7 @@ export default function App() {
         });
       }
 
-      if (Array.isArray(remoteSources) && remoteSources.length > 0) {
+      if (remoteSources.length > 0) {
         setSources((prev) => {
           const prevFollowById = new Map(prev.map((s) => [s.id, s.isFollowed]));
           const prevFollowByDomain = new Map(prev.map((s) => [s.domain.trim().toLowerCase(), s.isFollowed]));
@@ -384,7 +399,30 @@ export default function App() {
       if (includeEvents && Array.isArray(remoteEvents) && remoteEvents.length > 0) {
         setEvents(remoteEvents);
       }
-    } catch {}
+
+      if (catalogRes.unavailable) {
+        setCatalogStatus({
+          loading: false,
+          error: catalogRes.error || 'Não foi possível carregar entidades e fontes no momento.',
+          partial: false,
+          warning: null
+        });
+      } else {
+        setCatalogStatus({
+          loading: false,
+          error: null,
+          partial: Boolean(catalogRes.partial),
+          warning: catalogRes.warning || null
+        });
+      }
+    } catch (err: any) {
+      setCatalogStatus({
+        loading: false,
+        error: err?.message || 'Erro de conexão ao consultar catálogo de entidades e fontes.',
+        partial: false,
+        warning: null
+      });
+    }
   }, []);
 
   // Sincronização em tempo real do catálogo quando houver importação ou alteração de imagens
@@ -2026,6 +2064,8 @@ export default function App() {
                 topics={topics}
                 sources={sources}
                 events={events}
+                catalogStatus={catalogStatus}
+                onRetryCatalog={() => void refreshCatalogFromSupabase(false, true)}
                 onToggleFollowEntity={handleToggleFollowEntity}
                 onToggleFollowTopic={handleToggleFollowTopic}
                 onToggleFollowSource={handleToggleFollowSource}
@@ -2070,6 +2110,8 @@ export default function App() {
                 entities={entities}
                 topics={topics}
                 sources={sources}
+                catalogStatus={catalogStatus}
+                onRetryCatalog={() => void refreshCatalogFromSupabase(false, true)}
                 onToggleFollowEntity={handleToggleFollowEntity}
                 onToggleFollowTopic={handleToggleFollowTopic}
                 onToggleFollowSource={handleToggleFollowSource}

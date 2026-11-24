@@ -32,14 +32,25 @@ import {
   User,
   ExternalLink,
   SlidersHorizontal,
-  X
+  X,
+  AlertTriangle,
+  RefreshCw
 } from 'lucide-react';
+
+interface CatalogStatusProp {
+  loading?: boolean;
+  error?: string | null;
+  partial?: boolean;
+  warning?: string | null;
+}
 
 interface ExploreViewProps {
   entities: Entity[];
   topics: Topic[];
   sources: Source[];
   events: Event[];
+  catalogStatus?: CatalogStatusProp;
+  onRetryCatalog?: () => void;
   onToggleFollowEntity: (id: string) => void;
   onToggleFollowTopic: (id: string) => void;
   onToggleFollowSource: (id: string) => void;
@@ -52,6 +63,8 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
   topics,
   sources,
   events,
+  catalogStatus,
+  onRetryCatalog,
   onToggleFollowEntity,
   onToggleFollowTopic,
   onToggleFollowSource,
@@ -281,6 +294,36 @@ export const ExploreView: React.FC<ExploreViewProps> = ({
         onSelectTab={setSelectedPillCategory}
         ariaLabel="Categorias do explorar"
       />
+
+      {/* Aviso explícito de indisponibilidade ou degradação parcial do catálogo */}
+      {(catalogStatus?.error || catalogStatus?.partial) && (
+        <div
+          role="alert"
+          className={`rounded-2xl border px-4 py-3 text-xs flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 ${
+            catalogStatus?.error
+              ? 'border-red-900/60 bg-red-950/30 text-red-200'
+              : 'border-amber-800/60 bg-amber-950/25 text-amber-200'
+          }`}
+        >
+          <div className="flex items-start gap-2.5">
+            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+            <span className="leading-snug">
+              {catalogStatus.error || catalogStatus.warning || 'Parte do catálogo está temporariamente indisponível.'}
+            </span>
+          </div>
+          {onRetryCatalog && (
+            <button
+              type="button"
+              onClick={onRetryCatalog}
+              disabled={catalogStatus.loading}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white text-black text-xs font-bold hover:bg-zinc-200 transition cursor-pointer shrink-0 self-start sm:self-auto disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${catalogStatus.loading ? 'animate-spin' : ''}`} />
+              <span>{catalogStatus.loading ? 'Atualizando...' : 'Tentar novamente'}</span>
+            </button>
+          )}
+        </div>
+      )}
 
       {/* ================= SEÇÃO: RESULTADOS DA BUSCA (SE DIGITADO) ================= */}
       {searchResults !== null ? (

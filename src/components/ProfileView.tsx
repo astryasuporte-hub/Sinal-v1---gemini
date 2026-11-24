@@ -198,6 +198,19 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
     theme: 'dark' as 'dark' | 'light' | 'system',
     language: 'pt-BR'
   });
+  const [rawNotificationSettings, setRawNotificationSettings] = useState<Record<string, any>>({
+    urgentEvents: true,
+    entityUpdates: true,
+    topicAlerts: true,
+    sourcesDigest: true,
+    dailyBriefings: true,
+    onlyHighRelevance: true
+  });
+  const [isLoadingPreferences, setIsLoadingPreferences] = useState(false);
+  const [isSavingPreferences, setIsSavingPreferences] = useState(false);
+  const [preferencesError, setPreferencesError] = useState<string | null>(null);
+  const [preferencesSessionExpired, setPreferencesSessionExpired] = useState(false);
+  const [prefsReloadNonce, setPrefsReloadNonce] = useState(0);
 
   // Toast feedback
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -563,6 +576,186 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
     commitProfileUpdate(profile.name, editAvatarInput.trim() || null, false);
   };
 
+  // Sincronização canônica de preferências de notificações & briefings com Supabase (`user_settings` / `user_preferences`)
+  React.useEffect(() => {
+    if (!currentUser?.id) {
+      setPreferencesError(null);
+      setPreferencesSessionExpired(false);
+      setIsLoadingPreferences(false);
+      return;
+    }
+
+    let cancelled = false;
+    setIsLoadingPreferences(true);
+    setPreferencesError(null);
+    setPreferencesSessionExpired(false);
+
+    const applyRemotePrefs = (remote: any) => {
+      const ns =
+        remote?.notification_settings && typeof remote.notification_settings === 'object'
+          ? remote.notification_settings
+          : {};
+      setRawNotificationSettings((prev) => ({ ...prev, ...ns }));
+      setPreferences((prev) => ({
+        ...prev,
+        urgentEvents: typeof ns.urgentEvents === 'boolean' ? ns.urgentEvents : prev.urgentEvents,
+        followedEntities: typeof ns.entityUpdates === 'boolean' ? ns.entityUpdates : prev.followedEntities,
+        followedTopics: typeof ns.topicAlerts === 'boolean' ? ns.topicAlerts : prev.followedTopics,
+        briefingsPush: typeof ns.dailyBriefings === 'boolean' ? ns.dailyBriefings : prev.briefingsPush,
+        morningBriefing:
+          typeof remote?.email_morning_briefing === 'boolean'
+            ? remote.email_morning_briefing
+            : prev.morningBriefing,
+        eveningBriefing:
+          typeof remote?.email_evening_briefing === 'boolean'
+            ? remote.email_evening_briefing
+            : prev.eveningBriefing,
+        emailUrgentAlerts:
+          typeof remote?.email_breaking_alerts === 'boolean'
+            ? remote.email_breaking_alerts
+            : prev.emailUrgentAlerts,
+        morningTime: remote?.morning_time || prev.morningTime,
+        eveningTime: remote?.evening_time || prev.eveningTime
+      }));
+      if (remote?.timezone) {
+        setProfile((prev) => ({ ...prev, timezone: remote.timezone }));
+      }
+    };
+
+    userService
+      .getUserPreferencesDetailed(currentUser.id)
+      .then(async (res) => {
+        if (cancelled) return;
+        if (res.error) {
+          setPreferencesError(res.error);
+          setPreferencesSessionExpired(Boolean(res.sessionExpired));
+          return;
+        }
+        if (res.data) {
+          applyRemotePrefs(res.data);
+          return;
+        }
+        // Usuário autenticado sem registro ainda: inicialização idempotente segura
+        const initRes = await userService.ensureDefaultUserSettings(currentUser.id, currentUser.email || undefined);
+        if (cancelled) return;
+        if (initRes.error) {
+          setPreferencesError(initRes.error);
+          setPreferencesSessionExpired(Boolean(initRes.sessionExpired));
+          return;
+        }
+        if (initRes.data) {
+          applyRemotePrefs(initRes.data);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setPreferencesError('Erro de conexão ao consultar suas preferências no Supabase.');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingPreferences(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser?.id, currentUser?.email, prefsReloadNonce]);
+
+  const persistNotificationPreferences = async (
+    nextPrefs: typeof preferences,
+    previousPrefs: typeof preferences
+  ) => {
+    setPreferences(nextPrefs);
+    if (!currentUser?.id) {
+      onOpenAuth?.();
+      return;
+    }
+
+    const mergedNs = {
+      ...rawNotificationSettings,
+      urgentEvents: nextPrefs.urgentEvents,
+      entityUpdates: nextPrefs.followedEntities,
+      topicAlerts: nextPrefs.followedTopics,
+      dailyBriefings: nextPrefs.briefingsPush
+    };
+
+    setIsSavingPreferences(true);
+    setPreferencesError(null);
+    try {
+      const res = await userService.updateUserPreferencesDetailed(currentUser.id, {
+        notification_settings: mergedNs
+      });
+
+      if (!res.success) {
+        setPreferences(previousPrefs);
+        const msg = res.error || 'Não foi possível salvar suas preferências no Supabase.';
+        setPreferencesError(msg);
+        if (res.sessionExpired) setPreferencesSessionExpired(true);
+        showToast(msg);
+        return;
+      }
+
+      setRawNotificationSettings(mergedNs);
+      try {
+        localStorage.setItem(
+          notificationService.getUserSettingsCacheKey(currentUser.id),
+          JSON.stringify(mergedNs)
+        );
+      } catch {}
+      showToast('Preferência atualizada e salva.');
+    } finally {
+      setIsSavingPreferences(false);
+    }
+  };
+
+  const handleSaveBriefingPreferences = async () => {
+    if (!currentUser?.id) {
+      onOpenAuth?.();
+      return;
+    }
+
+    setIsSavingPreferences(true);
+    setPreferencesError(null);
+    try {
+      const res = await userService.updateUserPreferencesDetailed(currentUser.id, {
+        email_morning_briefing: preferences.morningBriefing,
+        email_evening_briefing: preferences.eveningBriefing,
+        email_breaking_alerts: preferences.emailUrgentAlerts,
+        morning_time: preferences.morningTime,
+        evening_time: preferences.eveningTime,
+        timezone: profile.timezone
+      });
+
+      if (!res.success) {
+        const msg = res.error || 'Não foi possível salvar configurações de briefings.';
+        setPreferencesError(msg);
+        if (res.sessionExpired) setPreferencesSessionExpired(true);
+        showToast(msg);
+        return;
+      }
+
+      try {
+        localStorage.setItem(
+          `fatosbr_briefing_prefs_${currentUser.id}`,
+          JSON.stringify({
+            emailAddress: profile.email,
+            morningEnabled: preferences.morningBriefing,
+            eveningEnabled: preferences.eveningBriefing,
+            morningTime: preferences.morningTime,
+            eveningTime: preferences.eveningTime,
+            timezone: profile.timezone,
+            updatedAt: res.updatedAt
+          })
+        );
+      } catch {}
+
+      setActiveModal(null);
+      showToast('Configurações de briefings salvas.');
+    } finally {
+      setIsSavingPreferences(false);
+    }
+  };
+
   // Handle Remove Avatar
   const handleRemoveAvatar = () => {
     setEditAvatarInput('');
@@ -878,6 +1071,23 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                 <p className="text-[11px] text-zinc-400">Personalize sua experiência no FatosBR.</p>
               </div>
             </div>
+
+            {preferencesError && (
+              <div className="rounded-xl border border-red-900/60 bg-red-950/30 p-3 text-[11px] text-red-200 flex items-start justify-between gap-3">
+                <span className="leading-snug">{preferencesError}</span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    preferencesSessionExpired
+                      ? onOpenAuth?.()
+                      : setPrefsReloadNonce((n) => n + 1)
+                  }
+                  className="text-white underline font-semibold shrink-0 cursor-pointer"
+                >
+                  {preferencesSessionExpired ? 'Entrar novamente' : 'Tentar novamente'}
+                </button>
+              </div>
+            )}
 
             <div className="space-y-1 text-xs">
               {onNavigateSaved && (
@@ -1701,6 +1911,23 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
               </button>
             </div>
 
+            {preferencesError && (
+              <div className="rounded-xl border border-red-900/60 bg-red-950/30 p-3 text-xs text-red-200 flex items-start justify-between gap-3">
+                <span className="leading-snug">{preferencesError}</span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    preferencesSessionExpired
+                      ? onOpenAuth?.()
+                      : setPrefsReloadNonce((n) => n + 1)
+                  }
+                  className="text-white underline font-semibold shrink-0 cursor-pointer"
+                >
+                  {preferencesSessionExpired ? 'Entrar' : 'Tentar novamente'}
+                </button>
+              </div>
+            )}
+
             <div className="space-y-3 text-xs">
               <label className="flex items-center justify-between p-3 rounded-xl bg-[#111216] border border-zinc-800 cursor-pointer">
                 <div>
@@ -1709,10 +1936,11 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                 </div>
                 <input
                   type="checkbox"
+                  disabled={isLoadingPreferences || isSavingPreferences}
                   checked={preferences.urgentEvents}
                   onChange={(e) => {
-                    setPreferences({ ...preferences, urgentEvents: e.target.checked });
-                    showToast('Preferência atualizada.');
+                    const prev = preferences;
+                    void persistNotificationPreferences({ ...preferences, urgentEvents: e.target.checked }, prev);
                   }}
                   className="w-4 h-4 accent-white rounded"
                 />
@@ -1725,10 +1953,11 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                 </div>
                 <input
                   type="checkbox"
+                  disabled={isLoadingPreferences || isSavingPreferences}
                   checked={preferences.followedEntities}
                   onChange={(e) => {
-                    setPreferences({ ...preferences, followedEntities: e.target.checked });
-                    showToast('Preferência atualizada.');
+                    const prev = preferences;
+                    void persistNotificationPreferences({ ...preferences, followedEntities: e.target.checked }, prev);
                   }}
                   className="w-4 h-4 accent-white rounded"
                 />
@@ -1741,10 +1970,11 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                 </div>
                 <input
                   type="checkbox"
+                  disabled={isLoadingPreferences || isSavingPreferences}
                   checked={preferences.followedTopics}
                   onChange={(e) => {
-                    setPreferences({ ...preferences, followedTopics: e.target.checked });
-                    showToast('Preferência atualizada.');
+                    const prev = preferences;
+                    void persistNotificationPreferences({ ...preferences, followedTopics: e.target.checked }, prev);
                   }}
                   className="w-4 h-4 accent-white rounded"
                 />
@@ -1757,10 +1987,11 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                 </div>
                 <input
                   type="checkbox"
+                  disabled={isLoadingPreferences || isSavingPreferences}
                   checked={preferences.briefingsPush}
                   onChange={(e) => {
-                    setPreferences({ ...preferences, briefingsPush: e.target.checked });
-                    showToast('Preferência atualizada.');
+                    const prev = preferences;
+                    void persistNotificationPreferences({ ...preferences, briefingsPush: e.target.checked }, prev);
                   }}
                   className="w-4 h-4 accent-white rounded"
                 />
@@ -1843,6 +2074,23 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
               </button>
             </div>
 
+            {preferencesError && (
+              <div className="rounded-xl border border-red-900/60 bg-red-950/30 p-3 text-xs text-red-200 flex items-start justify-between gap-3">
+                <span className="leading-snug">{preferencesError}</span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    preferencesSessionExpired
+                      ? onOpenAuth?.()
+                      : setPrefsReloadNonce((n) => n + 1)
+                  }
+                  className="text-white underline font-semibold shrink-0 cursor-pointer"
+                >
+                  {preferencesSessionExpired ? 'Entrar' : 'Tentar novamente'}
+                </button>
+              </div>
+            )}
+
             <div className="space-y-4 text-xs">
               <div className="p-3.5 rounded-xl bg-[#111216] border border-zinc-800 space-y-2.5">
                 <div className="flex items-center justify-between">
@@ -1912,13 +2160,12 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
 
             <div className="pt-2 flex justify-end">
               <button
-                onClick={() => {
-                  setActiveModal(null);
-                  showToast('Configurações de briefings salvas.');
-                }}
-                className="w-full py-2.5 rounded-xl bg-white text-black text-xs font-bold hover:bg-zinc-200 transition"
+                type="button"
+                disabled={isSavingPreferences || isLoadingPreferences}
+                onClick={() => void handleSaveBriefingPreferences()}
+                className="w-full py-2.5 rounded-xl bg-white text-black text-xs font-bold hover:bg-zinc-200 transition disabled:opacity-50 cursor-pointer"
               >
-                Salvar preferências
+                {isSavingPreferences ? 'Salvando...' : isLoadingPreferences ? 'Carregando...' : 'Salvar preferências'}
               </button>
             </div>
           </div>

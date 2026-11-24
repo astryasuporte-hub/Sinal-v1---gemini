@@ -92,20 +92,56 @@ function mapEventRow(row: any, sourcesMap: Record<string, SourceReference[]>): E
   };
 }
 
-async function fetchCatalogFromProxy(): Promise<{ entities?: Entity[]; sources?: Source[]; unavailable?: boolean }> {
-  const result = await swrFetch('catalog:proxy', 45_000, async () => {
+export interface CatalogFetchResult {
+  entities: Entity[];
+  sources: Source[];
+  unavailable?: boolean;
+  partial?: boolean;
+  degraded?: string[];
+  warning?: string;
+  error?: string;
+  code?: string;
+}
+
+interface ProxyCatalogPayload {
+  entities?: Entity[];
+  sources?: Source[];
+  unavailable?: boolean;
+  partial?: boolean;
+  degraded?: string[];
+  warning?: string;
+  error?: string;
+  code?: string;
+}
+
+async function fetchCatalogFromProxy(): Promise<ProxyCatalogPayload> {
+  const result = await swrFetch('catalog:proxy', 45_000, async (): Promise<ProxyCatalogPayload> => {
     const start = performance.now();
     try {
       const res = await fetchWithTimeoutAndRetry('/api/proxy/catalog', { timeoutMs: 8000, retries: 1 }).catch(() => null);
       performanceMonitor.trackApiCall('/api/proxy/catalog', performance.now() - start, res?.status || 0);
-      if (res && res.ok) {
-        return await res.json();
-      }
-      if (res && res.status >= 500) {
-        return { unavailable: true };
+      if (res) {
+        let payload: any = null;
+        try {
+          payload = await res.json();
+        } catch {
+          payload = null;
+        }
+        if (res.ok && payload && !payload.error) {
+          return payload as ProxyCatalogPayload;
+        }
+        return {
+          unavailable: true,
+          code: payload?.code || (res.status >= 500 ? 'CATALOG_UNAVAILABLE' : undefined),
+          error: payload?.error || `Falha HTTP ${res.status} ao consultar catálogo.`
+        };
       }
     } catch {}
-    return { unavailable: true };
+    return {
+      unavailable: true,
+      code: 'CATALOG_UNAVAILABLE',
+      error: 'Não foi possível conectar ao serviço de catálogo.'
+    };
   });
 
   if (result?.unavailable) {
@@ -231,12 +267,108 @@ export const eventService = {
   },
 
   /**
+   * Busca entidades e fontes canônicas preservando diagnósticos de indisponibilidade (503)
+   * e degradação parcial (`partial: true`) para exibição segura na interface.
+   */
+  async getCatalogDetailed(options?: { forceRefresh?: boolean }): Promise<CatalogFetchResult> {
+    if (options?.forceRefresh) {
+      invalidateRequestCache('catalog:');
+    }
+
+    const proxyCatalog = await fetchCatalogFromProxy();
+    if (!proxyCatalog.unavailable) {
+      const entities = Array.isArray(proxyCatalog.entities) ? proxyCatalog.entities : [];
+      const sources = Array.isArray(proxyCatalog.sources) ? proxyCatalog.sources : [];
+      const partial = Boolean(proxyCatalog.partial);
+      const degraded = Array.isArray(proxyCatalog.degraded) ? proxyCatalog.degraded : undefined;
+      return {
+        entities,
+        sources,
+        partial,
+        degraded,
+        warning:
+          proxyCatalog.warning ||
+          (partial
+            ? 'Parte do catálogo está temporariamente indisponível. Alguns itens podem não aparecer.'
+            : undefined),
+        code: proxyCatalog.code
+      };
+    }
+
+    if (isSupabaseConfigured) {
+      try {
+        const [entitiesRes, sourcesRes] = await Promise.all([
+          supabase
+            .from('entities')
+            .select(ENTITY_COLUMNS)
+            .or('is_active.is.null,is_active.eq.true')
+            .order('name'),
+          supabase
+            .from('news_sources')
+            .select(SOURCE_COLUMNS)
+            .or('is_active.is.null,is_active.eq.true')
+            .order('name')
+        ]);
+
+        const entitiesOk = !entitiesRes.error && Array.isArray(entitiesRes.data);
+        const sourcesOk = !sourcesRes.error && Array.isArray(sourcesRes.data);
+
+        if (entitiesOk || sourcesOk) {
+          const entities = entitiesOk ? entitiesRes.data!.map(mapEntityRow) : [];
+          const sources = sourcesOk ? sourcesRes.data!.map(mapSourceRow) : [];
+          const degraded: string[] = [];
+          if (!entitiesOk) degraded.push('entities');
+          if (!sourcesOk) degraded.push('sources');
+          const partial = degraded.length > 0;
+          return {
+            entities,
+            sources,
+            partial,
+            degraded: partial ? degraded : undefined,
+            warning: partial
+              ? 'Parte do catálogo está temporariamente indisponível. Exibindo dados parciais.'
+              : undefined
+          };
+        }
+
+        return {
+          entities: [],
+          sources: [],
+          unavailable: true,
+          code: proxyCatalog.code || 'CATALOG_UNAVAILABLE',
+          error:
+            entitiesRes.error?.message ||
+            sourcesRes.error?.message ||
+            proxyCatalog.error ||
+            'Catálogo temporariamente indisponível.'
+        };
+      } catch (err: any) {
+        return {
+          entities: [],
+          sources: [],
+          unavailable: true,
+          code: proxyCatalog.code || 'CATALOG_UNAVAILABLE',
+          error: err?.message || proxyCatalog.error || 'Catálogo temporariamente indisponível.'
+        };
+      }
+    }
+
+    return {
+      entities: [],
+      sources: [],
+      unavailable: true,
+      code: proxyCatalog.code || 'CATALOG_UNAVAILABLE',
+      error: proxyCatalog.error || 'Catálogo temporariamente indisponível.'
+    };
+  },
+
+  /**
    * Busca fontes canônicas (public.news_sources com logo_url do Supabase Storage).
    */
   async getSources(): Promise<Source[]> {
     const result = await swrFetch('catalog:sources', 60_000, async () => {
       const proxyCatalog = await fetchCatalogFromProxy();
-      if (Array.isArray(proxyCatalog.sources) && proxyCatalog.sources.length > 0) {
+      if (!proxyCatalog.unavailable && Array.isArray(proxyCatalog.sources)) {
         return proxyCatalog.sources;
       }
 
@@ -270,7 +402,7 @@ export const eventService = {
   async getEntities(): Promise<Entity[]> {
     const result = await swrFetch('catalog:entities', 60_000, async () => {
       const proxyCatalog = await fetchCatalogFromProxy();
-      if (Array.isArray(proxyCatalog.entities) && proxyCatalog.entities.length > 0) {
+      if (!proxyCatalog.unavailable && Array.isArray(proxyCatalog.entities)) {
         return proxyCatalog.entities;
       }
 

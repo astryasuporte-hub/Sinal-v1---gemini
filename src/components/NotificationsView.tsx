@@ -102,6 +102,8 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isMobileSearchOpen, setIsMobileSearchOpen] = useState(false);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
+  const [isLoadingSettings, setIsLoadingSettings] = useState(false);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
   const [settings, setSettings] = useState(DEFAULT_NOTIF_SETTINGS);
 
   const showToast = useCallback((text: string, isError = false) => {
@@ -112,6 +114,7 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
   // Carrega notificações reais e preferências isoladas do usuário autenticado
   useEffect(() => {
     setLoadError(null);
+    setSettingsError(null);
     setSessionExpired(false);
     setHasMore(false);
 
@@ -162,14 +165,16 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
       });
 
     // 3. Sincroniza preferências de alerta do usuário no Supabase (fonte canônica)
+    setIsLoadingSettings(true);
     userService.getUserPreferencesDetailed(currentUser.id)
       .then((res) => {
         if (cancelled) return;
         if (res.error) {
           if (res.sessionExpired) setSessionExpired(true);
-          showToast(res.error, true);
+          setSettingsError(res.error);
           return;
         }
+        setSettingsError(null);
         if (!res.data) return;
 
         const remoteSettings = res.data.notification_settings;
@@ -193,8 +198,11 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
       })
       .catch(() => {
         if (!cancelled) {
-          showToast('Erro de conexão ao sincronizar preferências de alerta.', true);
+          setSettingsError('Erro de conexão ao sincronizar preferências de alerta.');
         }
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingSettings(false);
       });
 
     return () => {
@@ -367,14 +375,20 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
     }
 
     setIsSavingSettings(true);
+    setSettingsError(null);
     try {
       const res = await userService.updateUserPreferencesDetailed(currentUser.id, {
         notification_settings: settings
       });
 
       if (!res.success) {
-        showToast(res.error || 'Não foi possível salvar preferências de alerta.', true);
-        if (res.sessionExpired) onRequireAuth?.();
+        const errMsg = res.error || 'Não foi possível salvar preferências de alerta.';
+        setSettingsError(errMsg);
+        showToast(errMsg, true);
+        if (res.sessionExpired) {
+          setSessionExpired(true);
+          onRequireAuth?.();
+        }
         return;
       }
 
@@ -385,6 +399,7 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
         );
       } catch {}
 
+      setSettingsError(null);
       setIsSettingsOpen(false);
       showToast('Preferências de alerta salvas!');
     } finally {
@@ -664,8 +679,29 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
           </button>
         </div>
 
-        {/* LISTAGEM DE NOTIFICAÇÕES, SKELETON, ERRO OU EMPTY STATE AUTÊNTICO */}
-        {isLoading && notifications.length === 0 ? (
+        {/* LISTAGEM DE NOTIFICAÇÕES, AUTENTICAÇÃO, SKELETON, ERRO OU EMPTY STATE AUTÊNTICO */}
+        {!currentUser?.id ? (
+          <div className="p-10 sm:p-14 rounded-3xl border border-[#1e2026] bg-[#111216] text-center space-y-4">
+            <div className="w-12 h-12 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center mx-auto text-zinc-300">
+              <Bell className="w-6 h-6 text-zinc-300" />
+            </div>
+            <div className="space-y-1.5 max-w-md mx-auto">
+              <h3 className="text-base font-bold text-white">Entre para ver suas notificações</h3>
+              <p className="text-xs sm:text-[13px] text-zinc-400 leading-relaxed">
+                Seus alertas personalizados e preferências de notificação ficam protegidos na sua conta FatosBR.
+              </p>
+            </div>
+            <div className="pt-1 flex items-center justify-center">
+              <button
+                type="button"
+                onClick={() => onRequireAuth?.()}
+                className="px-5 py-2.5 rounded-xl bg-white text-black text-xs font-bold hover:bg-zinc-200 transition cursor-pointer min-h-[44px]"
+              >
+                Entrar na conta
+              </button>
+            </div>
+          </div>
+        ) : isLoading && notifications.length === 0 ? (
           <div className="p-4 sm:p-6 rounded-3xl border border-[#1e2026] bg-[#111216]">
             <ListRowSkeleton count={5} />
           </div>
@@ -939,6 +975,18 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
           <p className="text-[11px] text-zinc-400 leading-snug">
             Configure quais acontecimentos e resumos geram avisos imediatos.
           </p>
+          {settingsError && (
+            <div className="rounded-xl border border-red-900/60 bg-red-950/30 p-2.5 text-[11px] text-red-200 space-y-2">
+              <p className="leading-snug">{settingsError}</p>
+              <button
+                type="button"
+                onClick={() => (sessionExpired ? onRequireAuth?.() : setReloadNonce((n) => n + 1))}
+                className="text-white underline font-semibold cursor-pointer"
+              >
+                {sessionExpired ? 'Fazer login novamente' : 'Tentar novamente'}
+              </button>
+            </div>
+          )}
           <button
             onClick={() => setIsSettingsOpen(true)}
             className="w-full py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-white text-xs font-semibold transition cursor-pointer text-center block"
@@ -966,6 +1014,19 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
                 <X className="w-4 h-4" />
               </button>
             </div>
+
+            {settingsError && (
+              <div className="rounded-xl border border-red-900/60 bg-red-950/30 p-3 text-xs text-red-200 flex items-start justify-between gap-3">
+                <span className="leading-snug">{settingsError}</span>
+                <button
+                  type="button"
+                  onClick={() => (sessionExpired ? onRequireAuth?.() : setReloadNonce((n) => n + 1))}
+                  className="text-white underline font-semibold shrink-0 cursor-pointer"
+                >
+                  {sessionExpired ? 'Entrar' : 'Tentar novamente'}
+                </button>
+              </div>
+            )}
 
             <div className="space-y-3 text-xs">
               <label className="flex items-center justify-between p-2.5 rounded-lg bg-zinc-900/50 cursor-pointer">
@@ -1039,11 +1100,11 @@ export const NotificationsView: React.FC<NotificationsViewProps> = ({
               </button>
               <button
                 type="button"
-                disabled={isSavingSettings}
+                disabled={isSavingSettings || isLoadingSettings}
                 onClick={() => void handleSaveSettings()}
                 className="px-4 py-2 rounded-xl bg-white text-black text-xs font-bold hover:bg-zinc-200 min-h-[44px] cursor-pointer disabled:opacity-50"
               >
-                {isSavingSettings ? 'Salvando...' : 'Salvar Preferências'}
+                {isSavingSettings ? 'Salvando...' : isLoadingSettings ? 'Carregando...' : 'Salvar Preferências'}
               </button>
             </div>
           </div>
