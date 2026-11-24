@@ -618,6 +618,154 @@ async function main() {
     'App.tsx, ExploreView e FollowingView propagam estado de erro/parcial do catálogo com ação de retry'
   );
 
+  // ---------------------------------------------------------------------------
+  // 8. HOMOLOGAÇÃO DE PRODUÇÃO: UNICIDADE 20261125000001, SELECT-ONLY + ACCOUNT_CONTROLS_GUARD & ROLLBACK
+  // ---------------------------------------------------------------------------
+  console.log('\n--- 8. Unicidade 20261125000001, account_controls_guard e rollback ---');
+  const migrationsDir = path.resolve('supabase/migrations');
+  const migrationFiles = fs.readdirSync(migrationsDir);
+  const v244VersionMatches = migrationFiles.filter((f) => f.startsWith('20261125000001_'));
+  assert(
+    v244VersionMatches.length === 1 &&
+      v244VersionMatches[0] === '20261125000001_v2_4_4_user_settings_grants_and_rls.sql',
+    'supabase/migrations contém exatamente um arquivo para versão 20261125000001 (sem duplicidade de rollback)'
+  );
+
+  const rollbackPath = path.resolve('supabase/rollbacks/20261125000001_rollback_user_settings_grants_and_rls.sql');
+  assert(
+    fs.existsSync(rollbackPath),
+    'Rollback V2.4.4 documentado fora de supabase/migrations em supabase/rollbacks/'
+  );
+  const rollbackSql = fs.readFileSync(rollbackPath, 'utf8');
+
+  // Reproduz estado real auditado de produção:
+  // authenticated tem SELECT (sem INSERT/UPDATE) e existe policy RESTRICTIVE `account_controls_guard`.
+  const prodSimDb = await setupIsolatedPostgresWithPreBugSchema();
+  const guardedUser = '33333333-3333-4333-8333-333333333333';
+
+  await prodSimDb.exec(`
+    GRANT USAGE ON SCHEMA public TO authenticated;
+    GRANT SELECT ON TABLE public.user_settings TO authenticated;
+    CREATE POLICY account_controls_guard ON public.user_settings
+      AS RESTRICTIVE
+      FOR ALL
+      TO authenticated
+      USING (user_id <> '${guardedUser}'::uuid)
+      WITH CHECK (user_id <> '${guardedUser}'::uuid);
+  `);
+  await prodSimDb.query(
+    `INSERT INTO public.user_settings (user_id, briefing_email, morning_time)
+     VALUES
+       ($1, 'usera@fatosbr.com.br', '07:00'),
+       ($2, 'guarded@fatosbr.com.br', '07:00')`,
+    [userA, guardedUser]
+  );
+
+  // Pré-V2.4.4: SELECT funciona para User A, mas INSERT/UPDATE falham com 42501
+  const prodPreSelect = await execAsRole(prodSimDb, 'authenticated', userA, async (tx) => {
+    return tx.query('SELECT user_id, morning_time FROM public.user_settings WHERE user_id = $1', [userA]);
+  });
+  let prodPreUpdateCode = '';
+  try {
+    await execAsRole(prodSimDb, 'authenticated', userA, async (tx) => {
+      await tx.query(`UPDATE public.user_settings SET morning_time = '08:00' WHERE user_id = $1`, [userA]);
+    });
+  } catch (err: any) {
+    prodPreUpdateCode = String(err?.code || '');
+  }
+  assert(
+    prodPreSelect.rows.length === 1 && prodPreUpdateCode === '42501',
+    'Estado exato de produção reproduzido: SELECT OK em user_settings, UPDATE falha com 42501'
+  );
+
+  // Aplica V2.4.4 2x no cenário de produção
+  await prodSimDb.exec(v244Sql);
+  await prodSimDb.exec(v244Sql);
+
+  const guardCheck = await prodSimDb.query<{
+    policyname: string;
+    permissive: string;
+    qual: string;
+    with_check: string;
+  }>(`
+    SELECT policyname, permissive, qual, with_check
+      FROM pg_policies
+     WHERE schemaname = 'public'
+       AND tablename = 'user_settings'
+       AND policyname = 'account_controls_guard'
+  `);
+  assert(
+    guardCheck.rows.length === 1 &&
+      guardCheck.rows[0].permissive === 'RESTRICTIVE' &&
+      guardCheck.rows[0].qual.includes(guardedUser),
+    'Policy account_controls_guard preservada integralmente (RESTRICTIVE + regra intacta)'
+  );
+
+  // Usuário A (liberado) consegue atualizar após V2.4.4; usuário bloqueado por account_controls_guard segue bloqueado
+  await execAsRole(prodSimDb, 'authenticated', userA, async (tx) => {
+    await tx.query(`UPDATE public.user_settings SET morning_time = '08:30' WHERE user_id = $1`, [userA]);
+  });
+  const prodPostReadA = await execAsRole(prodSimDb, 'authenticated', userA, async (tx) => {
+    return tx.query('SELECT morning_time FROM public.user_settings WHERE user_id = $1', [userA]);
+  });
+  const guardedNewUser = '44444444-4444-4444-8444-444444444444';
+  await prodSimDb.exec(`
+    DROP POLICY account_controls_guard ON public.user_settings;
+    CREATE POLICY account_controls_guard ON public.user_settings
+      AS RESTRICTIVE
+      FOR ALL
+      TO authenticated
+      USING (user_id NOT IN ('${guardedUser}'::uuid, '${guardedNewUser}'::uuid))
+      WITH CHECK (user_id NOT IN ('${guardedUser}'::uuid, '${guardedNewUser}'::uuid));
+  `);
+  // Re-run V2.4.4 once more to confirm it does not touch the updated account_controls_guard
+  await prodSimDb.exec(v244Sql);
+
+  const guardedRead = await execAsRole(prodSimDb, 'authenticated', guardedUser, async (tx) => {
+    return tx.query('SELECT user_id FROM public.user_settings');
+  });
+  let guardedInsertCode = '';
+  try {
+    await execAsRole(prodSimDb, 'authenticated', guardedNewUser, async (tx) => {
+      await tx.query(`INSERT INTO public.user_settings (user_id, morning_time) VALUES ($1, '09:00')`, [guardedNewUser]);
+    });
+  } catch (err: any) {
+    guardedInsertCode = String(err?.code || '');
+  }
+  const guardedUpdateRows = await execAsRole(prodSimDb, 'authenticated', guardedUser, async (tx) => {
+    return tx.query(`UPDATE public.user_settings SET morning_time = '09:00' WHERE user_id = $1 RETURNING user_id`, [guardedUser]);
+  });
+  assert(
+    prodPostReadA.rows[0]?.morning_time === '08:30' &&
+      guardedRead.rows.length === 0 &&
+      guardedUpdateRows.rows.length === 0 &&
+      guardedInsertCode === '42501',
+    'Após V2.4.4, User A persiste normalmente enquanto account_controls_guard continua restringindo SELECT/UPDATE e bloqueando INSERT (42501)'
+  );
+
+  // Rollback fora de supabase/migrations/ executa de forma não destrutiva e preserva account_controls_guard + dados
+  await prodSimDb.exec(rollbackSql);
+  const postRollbackPriv = await prodSimDb.query<{
+    sel: boolean;
+    ins: boolean;
+    upd: boolean;
+    guard_count: number;
+    row_count: number;
+  }>(`
+    SELECT
+      has_table_privilege('authenticated', 'public.user_settings', 'SELECT') AS sel,
+      has_table_privilege('authenticated', 'public.user_settings', 'INSERT') AS ins,
+      has_table_privilege('authenticated', 'public.user_settings', 'UPDATE') AS upd,
+      (SELECT COUNT(*)::int FROM pg_policies WHERE schemaname = 'public' AND tablename = 'user_settings' AND policyname = 'account_controls_guard') AS guard_count,
+      (SELECT COUNT(*)::int FROM public.user_settings) AS row_count
+  `);
+  const rb = postRollbackPriv.rows[0];
+  assert(
+    rb.sel === true && rb.ins === false && rb.upd === false && rb.guard_count === 1 && rb.row_count === 2,
+    'Rollback V2.4.4 reverte INSERT/UPDATE preservando SELECT, account_controls_guard e todos os dados'
+  );
+
+  await prodSimDb.close();
   await db.close();
 
   console.log(`\n==============================================================`);

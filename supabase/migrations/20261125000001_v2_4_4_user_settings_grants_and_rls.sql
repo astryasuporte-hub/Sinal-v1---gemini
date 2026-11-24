@@ -2,14 +2,15 @@
 -- FATOSBR V2.4.4 — DEFINITIVE FIX FOR USER_SETTINGS / PREFERENCES / NOTIFICATIONS
 -- GRANTS (SQLSTATE 42501), LEAST-PRIVILEGE PERMISSIONS & STRICT RLS POLICIES
 -- ==============================================================================
--- Diagnóstico confirmado:
--- - As migrações anteriores (V2.3 / V2.3.1) habilitaram RLS e criaram policies
---   em public.user_settings, public.user_preferences e public.notifications, porém
---   NÃO emitiram GRANT USAGE ON SCHEMA public TO authenticated nem GRANT de
---   tabela (SELECT, INSERT, UPDATE) para a role `authenticated`.
+-- Diagnóstico confirmado em produção (24/11/2026):
+-- - `authenticated` possui `SELECT` em `public.user_settings`, porém NÃO possui
+--   `INSERT` nem `UPDATE` (falhando com `permission denied for table user_settings`
+--   ao inicializar ou salvar preferências do usuário).
+-- - Existe em produção a policy `account_controls_guard`, que DEVE ser
+--   preservada integralmente junto com o isolamento estrito por `auth.uid()`.
 -- - No PostgreSQL, privilégios de tabela (GRANT) são avaliados ANTES da RLS.
 --   Sem GRANT explícito, qualquer acesso autenticado via Supabase client falha
---   imediatamente com: `permission denied for table user_settings` (42501).
+--   imediatamente com SQLSTATE 42501.
 --
 -- Garantias desta migração:
 -- 1. 100% idempotente e não destrutiva (preserva todas as tabelas, dados e UUIDs).
@@ -18,7 +19,11 @@
 -- 3. Remove privilégios amplos de `PUBLIC` e `anon` (REVOKE ALL).
 -- 4. Concede privilégios mínimos necessários para `authenticated` e completos para `service_role`.
 -- 5. Garante RLS ativa com policies estritas vinculadas a `auth.uid()` (sem
---    `USING (true)` para `authenticated`/`anon` e sem `SECURITY DEFINER`).
+--    `USING (true)` para `authenticated`/`anon` e sem `SECURITY DEFINER`),
+--    removendo apenas as policies nominais da V2.3/V2.3.1 e PRESERVANDO
+--    integralmente policies adicionais de produção como `account_controls_guard`.
+-- 6. Rollback documentado fora de `supabase/migrations/` em:
+--    `supabase/rollbacks/20261125000001_rollback_user_settings_grants_and_rls.sql`
 -- ==============================================================================
 
 DO $$
@@ -106,6 +111,8 @@ BEGIN
     END IF;
 
     -- RLS obrigatória e estrita
+    -- IMPORTANTE: remove somente as policies nominais da V2.3/V2.3.1; policies
+    -- de guarda em produção (como `account_controls_guard`) permanecem intactas.
     EXECUTE 'ALTER TABLE public.user_settings ENABLE ROW LEVEL SECURITY';
 
     EXECUTE 'DROP POLICY IF EXISTS "Usuário lê suas próprias configurações" ON public.user_settings';
