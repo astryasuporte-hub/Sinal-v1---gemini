@@ -619,33 +619,59 @@ async function main() {
   );
 
   // ---------------------------------------------------------------------------
-  // 8. HOMOLOGAÇÃO DE PRODUÇÃO: UNICIDADE 20261125000001, SELECT-ONLY + ACCOUNT_CONTROLS_GUARD & ROLLBACK
+  // 8. HOMOLOGAÇÃO DE PRODUÇÃO: ORGANIZAÇÃO DE MIGRAÇÕES, BASELINE REAL, ACCOUNT_CONTROLS_GUARD & ROLLBACK
   // ---------------------------------------------------------------------------
-  console.log('\n--- 8. Unicidade 20261125000001, account_controls_guard e rollback ---');
+  console.log('\n--- 8. Migrações limpas, baseline real, account_controls_guard e rollback ---');
   const migrationsDir = path.resolve('supabase/migrations');
-  const migrationFiles = fs.readdirSync(migrationsDir);
-  const v244VersionMatches = migrationFiles.filter((f) => f.startsWith('20261125000001_'));
+  const migrationFiles = fs.readdirSync(migrationsDir).filter((f) => f.endsWith('.sql'));
+  const rollbackFilesInMigrations = migrationFiles.filter((f) => f.toLowerCase().includes('rollback'));
+  const versionCounts = new Map<string, number>();
+  for (const file of migrationFiles) {
+    const version = file.split('_')[0];
+    versionCounts.set(version, (versionCounts.get(version) || 0) + 1);
+  }
+  const duplicateVersions = Array.from(versionCounts.entries()).filter(([, count]) => count > 1);
   assert(
-    v244VersionMatches.length === 1 &&
-      v244VersionMatches[0] === '20261125000001_v2_4_4_user_settings_grants_and_rls.sql',
-    'supabase/migrations contém exatamente um arquivo para versão 20261125000001 (sem duplicidade de rollback)'
+    rollbackFilesInMigrations.length === 0 && duplicateVersions.length === 0,
+    'supabase/migrations contém zero scripts de rollback e zero versões duplicadas',
+    `rollbacks=${rollbackFilesInMigrations.join(',')} dupes=${JSON.stringify(duplicateVersions)}`
   );
 
-  const rollbackPath = path.resolve('supabase/rollbacks/20261125000001_rollback_user_settings_grants_and_rls.sql');
+  const rollbacksDir = path.resolve('supabase/rollbacks');
+  const expectedRollbacks = [
+    '20261104000001_rollback_financial_security.sql',
+    '20261104000002_rollback_fix_supabase_billing_and_rbac.sql',
+    '20261123000002_rollback_perf_indexes.sql',
+    '20261123000003_rollback_perf_cursor_indexes.sql',
+    '20261124000001_rollback_payments_v2_pix_dunning_nfse.sql',
+    '20261125000001_rollback_user_settings_grants_and_rls.sql'
+  ];
   assert(
-    fs.existsSync(rollbackPath),
-    'Rollback V2.4.4 documentado fora de supabase/migrations em supabase/rollbacks/'
+    expectedRollbacks.every((f) => fs.existsSync(path.join(rollbacksDir, f))),
+    'Todos os 6 scripts de rollback (5 legados + V2.4.4) estão organizados em supabase/rollbacks/'
   );
+
+  const v244SqlNoComments = v244Sql.replace(/--.*$/gm, '');
+  assert(
+    !/ALTER\s+TABLE[\s\S]*ADD\s+COLUMN/i.test(v244SqlNoComments) && !/DROP\s+POLICY/i.test(v244SqlNoComments),
+    'Migração V2.4.4 é estritamente mínima: sem ALTER TABLE ADD COLUMN e sem DROP POLICY destrutivo'
+  );
+
+  const rollbackPath = path.join(rollbacksDir, '20261125000001_rollback_user_settings_grants_and_rls.sql');
   const rollbackSql = fs.readFileSync(rollbackPath, 'utf8');
 
-  // Reproduz estado real auditado de produção:
-  // authenticated tem SELECT (sem INSERT/UPDATE) e existe policy RESTRICTIVE `account_controls_guard`.
+  // Reproduz baseline REAL auditado de produção antes da V2.4.4:
+  // - user_settings: authenticated tem SELECT (sem INSERT/UPDATE) + policy RESTRICTIVE `account_controls_guard`
+  // - user_preferences: authenticated JÁ tem SELECT, INSERT, UPDATE
+  // - notifications: authenticated JÁ tem SELECT, UPDATE, DELETE
   const prodSimDb = await setupIsolatedPostgresWithPreBugSchema();
   const guardedUser = '33333333-3333-4333-8333-333333333333';
 
   await prodSimDb.exec(`
     GRANT USAGE ON SCHEMA public TO authenticated;
     GRANT SELECT ON TABLE public.user_settings TO authenticated;
+    GRANT SELECT, INSERT, UPDATE ON TABLE public.user_preferences TO authenticated;
+    GRANT SELECT, UPDATE, DELETE ON TABLE public.notifications TO authenticated;
     CREATE POLICY account_controls_guard ON public.user_settings
       AS RESTRICTIVE
       FOR ALL
@@ -660,8 +686,16 @@ async function main() {
        ($2, 'guarded@fatosbr.com.br', '07:00')`,
     [userA, guardedUser]
   );
+  await prodSimDb.query(
+    `INSERT INTO public.user_preferences (id, briefing_email) VALUES ($1, 'usera@fatosbr.com.br')`,
+    [userA]
+  );
+  await prodSimDb.query(
+    `INSERT INTO public.notifications (id, user_id, title, read) VALUES ($1, $2, 'Notif A', false)`,
+    [notifA1, userA]
+  );
 
-  // Pré-V2.4.4: SELECT funciona para User A, mas INSERT/UPDATE falham com 42501
+  // Pré-V2.4.4: SELECT funciona para User A, mas UPDATE em user_settings falha com 42501
   const prodPreSelect = await execAsRole(prodSimDb, 'authenticated', userA, async (tx) => {
     return tx.query('SELECT user_id, morning_time FROM public.user_settings WHERE user_id = $1', [userA]);
   });
@@ -675,7 +709,7 @@ async function main() {
   }
   assert(
     prodPreSelect.rows.length === 1 && prodPreUpdateCode === '42501',
-    'Estado exato de produção reproduzido: SELECT OK em user_settings, UPDATE falha com 42501'
+    'Baseline real reproduzido: SELECT OK em user_settings, UPDATE falha com 42501'
   );
 
   // Aplica V2.4.4 2x no cenário de produção
@@ -694,11 +728,19 @@ async function main() {
        AND tablename = 'user_settings'
        AND policyname = 'account_controls_guard'
   `);
+  const fallbackNotCreated = await prodSimDb.query<{ cnt: number }>(`
+    SELECT COUNT(*)::int AS cnt
+      FROM pg_policies
+     WHERE schemaname = 'public'
+       AND tablename IN ('user_settings', 'user_preferences')
+       AND policyname LIKE 'v2_4_4_%'
+  `);
   assert(
     guardCheck.rows.length === 1 &&
       guardCheck.rows[0].permissive === 'RESTRICTIVE' &&
-      guardCheck.rows[0].qual.includes(guardedUser),
-    'Policy account_controls_guard preservada integralmente (RESTRICTIVE + regra intacta)'
+      guardCheck.rows[0].qual.includes(guardedUser) &&
+      fallbackNotCreated.rows[0].cnt === 0,
+    'Policy account_controls_guard e policies preexistentes preservadas sem duplicação'
   );
 
   // Usuário A (liberado) consegue atualizar após V2.4.4; usuário bloqueado por account_controls_guard segue bloqueado
@@ -718,7 +760,6 @@ async function main() {
       USING (user_id NOT IN ('${guardedUser}'::uuid, '${guardedNewUser}'::uuid))
       WITH CHECK (user_id NOT IN ('${guardedUser}'::uuid, '${guardedNewUser}'::uuid));
   `);
-  // Re-run V2.4.4 once more to confirm it does not touch the updated account_controls_guard
   await prodSimDb.exec(v244Sql);
 
   const guardedRead = await execAsRole(prodSimDb, 'authenticated', guardedUser, async (tx) => {
@@ -743,26 +784,61 @@ async function main() {
     'Após V2.4.4, User A persiste normalmente enquanto account_controls_guard continua restringindo SELECT/UPDATE e bloqueando INSERT (42501)'
   );
 
-  // Rollback fora de supabase/migrations/ executa de forma não destrutiva e preserva account_controls_guard + dados
+  // Rollback fora de supabase/migrations/ executa de forma não destrutiva:
+  // reverte APENAS INSERT/UPDATE de user_settings, preservando user_preferences, notifications, SELECT, guard e dados!
   await prodSimDb.exec(rollbackSql);
   const postRollbackPriv = await prodSimDb.query<{
-    sel: boolean;
-    ins: boolean;
-    upd: boolean;
+    us_sel: boolean;
+    us_ins: boolean;
+    us_upd: boolean;
+    up_sel: boolean;
+    up_ins: boolean;
+    up_upd: boolean;
+    n_sel: boolean;
+    n_upd: boolean;
+    n_del: boolean;
     guard_count: number;
     row_count: number;
   }>(`
     SELECT
-      has_table_privilege('authenticated', 'public.user_settings', 'SELECT') AS sel,
-      has_table_privilege('authenticated', 'public.user_settings', 'INSERT') AS ins,
-      has_table_privilege('authenticated', 'public.user_settings', 'UPDATE') AS upd,
+      has_table_privilege('authenticated', 'public.user_settings', 'SELECT') AS us_sel,
+      has_table_privilege('authenticated', 'public.user_settings', 'INSERT') AS us_ins,
+      has_table_privilege('authenticated', 'public.user_settings', 'UPDATE') AS us_upd,
+      has_table_privilege('authenticated', 'public.user_preferences', 'SELECT') AS up_sel,
+      has_table_privilege('authenticated', 'public.user_preferences', 'INSERT') AS up_ins,
+      has_table_privilege('authenticated', 'public.user_preferences', 'UPDATE') AS up_upd,
+      has_table_privilege('authenticated', 'public.notifications', 'SELECT') AS n_sel,
+      has_table_privilege('authenticated', 'public.notifications', 'UPDATE') AS n_upd,
+      has_table_privilege('authenticated', 'public.notifications', 'DELETE') AS n_del,
       (SELECT COUNT(*)::int FROM pg_policies WHERE schemaname = 'public' AND tablename = 'user_settings' AND policyname = 'account_controls_guard') AS guard_count,
       (SELECT COUNT(*)::int FROM public.user_settings) AS row_count
   `);
   const rb = postRollbackPriv.rows[0];
   assert(
-    rb.sel === true && rb.ins === false && rb.upd === false && rb.guard_count === 1 && rb.row_count === 2,
-    'Rollback V2.4.4 reverte INSERT/UPDATE preservando SELECT, account_controls_guard e todos os dados'
+    rb.us_sel === true &&
+      rb.us_ins === false &&
+      rb.us_upd === false &&
+      rb.up_sel === true &&
+      rb.up_ins === true &&
+      rb.up_upd === true &&
+      rb.n_sel === true &&
+      rb.n_upd === true &&
+      rb.n_del === true &&
+      rb.guard_count === 1 &&
+      rb.row_count === 2,
+    'Rollback V2.4.4 reverte apenas INSERT/UPDATE de user_settings preservando user_preferences, notifications, SELECT, account_controls_guard e dados'
+  );
+
+  // Confirma que user_preferences continua gravável após o rollback (sem regressão)
+  await execAsRole(prodSimDb, 'authenticated', userA, async (tx) => {
+    await tx.query(`UPDATE public.user_preferences SET morning_time = '09:15' WHERE id = $1`, [userA]);
+  });
+  const upAfterRb = await execAsRole(prodSimDb, 'authenticated', userA, async (tx) => {
+    return tx.query(`SELECT morning_time FROM public.user_preferences WHERE id = $1`, [userA]);
+  });
+  assert(
+    upAfterRb.rows[0]?.morning_time === '09:15',
+    'Após rollback da V2.4.4, user_preferences segue funcional para authenticated sem regressão'
   );
 
   await prodSimDb.close();

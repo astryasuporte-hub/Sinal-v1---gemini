@@ -569,11 +569,11 @@ async function runTests() {
 
       // Valida scripts de rollback (20261123000002 e 20261123000003)
       const rollbackSql = fs.readFileSync(
-        path.resolve('supabase/migrations/20261123000002_rollback_perf_indexes.sql'),
+        path.resolve('supabase/rollbacks/20261123000002_rollback_perf_indexes.sql'),
         'utf8'
       );
       const rollback3Sql = fs.readFileSync(
-        path.resolve('supabase/migrations/20261123000003_rollback_perf_cursor_indexes.sql'),
+        path.resolve('supabase/rollbacks/20261123000003_rollback_perf_cursor_indexes.sql'),
         'utf8'
       );
       await db.exec(rollbackSql);

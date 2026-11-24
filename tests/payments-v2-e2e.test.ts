@@ -361,7 +361,7 @@ async function runTests() {
       fs.readFileSync(path.resolve(process.cwd(), 'supabase/migrations/20261124000001_payments_v2_pix_dunning_nfse.sql'), 'utf8')
     );
     await rollbackDb.exec(
-      fs.readFileSync(path.resolve(process.cwd(), 'supabase/migrations/20261124000001_rollback_payments_v2_pix_dunning_nfse.sql'), 'utf8')
+      fs.readFileSync(path.resolve(process.cwd(), 'supabase/rollbacks/20261124000001_rollback_payments_v2_pix_dunning_nfse.sql'), 'utf8')
     );
     const rbCheck = await rollbackDb.query(
       `SELECT to_regclass('internal.billing_pix_charges') AS pix, (SELECT COUNT(*)::int FROM public.subscriptions WHERE plan = 'TRIAL') AS trials`
