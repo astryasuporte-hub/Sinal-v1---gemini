@@ -12,6 +12,7 @@ import companyLogoHandler from '../_lib/handlers/admin/companyLogo.js';
 import imageLibraryHandler from '../_lib/handlers/admin/imageLibrary.js';
 import briefingsOpsHandler from '../_lib/handlers/admin/briefingsOps.js';
 import financialOpsHandler from '../_lib/handlers/admin/financialOps.js';
+import processOutboxHandler from '../_lib/handlers/notifications/processOutbox.js';
 
 export default async function handler(req: any, res: any) {
   try {
@@ -32,6 +33,10 @@ export default async function handler(req: any, res: any) {
 
     if (pathname.includes('/briefings-ops')) {
       return await briefingsOpsHandler(req, res);
+    }
+
+    if (pathname.includes('/outbox-ops')) {
+      return await processOutboxHandler(req, res);
     }
 
     if (pathname.includes('/image-library')) {

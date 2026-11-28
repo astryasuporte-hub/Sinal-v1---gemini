@@ -16,6 +16,7 @@
 
 import { executeSql, isPostgresConfigured } from './postgres.js';
 import { getServerSupabase } from './db.js';
+import { evaluateSubscriptionEligibility } from './payments/SubscriptionEligibility.js';
 
 export const ALLOWED_NOTIFICATION_TYPES = [
   'NEWS_HIGH_RELEVANCE',
@@ -53,6 +54,29 @@ export interface SegmentedEventDispatchInput {
   type?: 'NEWS_HIGH_RELEVANCE' | 'EVENT_UPDATED';
   eventRevision?: number;
   significantChangeReason?: string;
+  publishedAt?: string;
+}
+
+export interface SegmentedDispatchOptions {
+  dryRun?: boolean;
+  enforceAccessPolicy?: boolean;
+  maxPerUserPerWindow?: number;
+  floodWindowMinutes?: number;
+  perUserRunCount?: Map<string, number>;
+}
+
+export interface SegmentedDispatchResult {
+  targetedUsers: number;
+  created: number;
+  duplicates: number;
+  skippedByPreferences: number;
+  blockedByAccess: number;
+  floodCapped: number;
+  errors: number;
+  partialFailure?: boolean;
+  failedUserMasks?: string[];
+  errorDetails?: string[];
+  dryRun?: boolean;
 }
 
 export interface UserAlertPreferencesRecord {
@@ -64,6 +88,13 @@ export interface UserAlertPreferencesRecord {
   sourcesDigest: boolean;
   dailyBriefings: boolean;
   onlyHighRelevance: boolean;
+  rawSettings?: any;
+}
+
+export interface UserNotificationAccessDecision {
+  allowed: boolean;
+  reason?: string;
+  isAdmin?: boolean;
 }
 
 interface NotificationEngineDeps {
@@ -164,7 +195,77 @@ function mapPreferenceRow(userId: string, prefRow: any, settingsRow: any): UserA
     sourcesDigest: typeof ns?.sourcesDigest === 'boolean' ? ns.sourcesDigest : true,
     dailyBriefings: typeof ns?.dailyBriefings === 'boolean' ? ns.dailyBriefings : true,
     onlyHighRelevance: typeof ns?.onlyHighRelevance === 'boolean' ? ns.onlyHighRelevance : true,
+    rawSettings: settingsRow || undefined,
   };
+}
+
+const BLOCKED_ACCOUNT_STATUSES = new Set([
+  'SUSPENDED',
+  'BLOCKED',
+  'BANNED',
+  'DISABLED',
+  'DELETED',
+  'REVOKED',
+  'INACTIVE',
+]);
+
+function maskUserIdForLog(userId: string): string {
+  const clean = String(userId || '').trim();
+  if (!clean) return 'usr_anon';
+  if (clean.length <= 8) return `usr_${clean.slice(0, 2)}…`;
+  return `usr_${clean.slice(0, 4)}…${clean.slice(-4)}`;
+}
+
+function checkAccountControlMarkers(row: any, nowMs: number): string | null {
+  if (!row || typeof row !== 'object') return null;
+
+  if (row.deleted_at) return 'ACCOUNT_DELETED';
+  if (row.is_active === false) return 'ACCOUNT_INACTIVE';
+  if (row.is_suspended === true || row.suspended === true) return 'ACCOUNT_SUSPENDED';
+  if (row.is_blocked === true || row.access_blocked === true || row.blocked === true) {
+    return 'ACCOUNT_BLOCKED';
+  }
+
+  const rawStatus = String(row.account_status || row.status || '').trim().toUpperCase();
+  if (rawStatus && BLOCKED_ACCOUNT_STATUSES.has(rawStatus)) {
+    return `ACCOUNT_${rawStatus}`;
+  }
+
+  if (row.notifications_paused_until) {
+    const pausedUntilMs = Date.parse(String(row.notifications_paused_until));
+    if (Number.isFinite(pausedUntilMs) && pausedUntilMs > nowMs) {
+      return 'NOTIFICATIONS_PAUSED';
+    }
+  }
+
+  const controls =
+    row.account_controls && typeof row.account_controls === 'object' ? row.account_controls : null;
+  if (controls) {
+    if (controls.deleted === true || controls.deletedAt) return 'ACCOUNT_DELETED';
+    if (controls.suspended === true || controls.isSuspended === true) return 'ACCOUNT_SUSPENDED';
+    if (
+      controls.blocked === true ||
+      controls.isBlocked === true ||
+      controls.accessBlocked === true ||
+      controls.notificationsBlocked === true
+    ) {
+      return 'ACCOUNT_CONTROLS_BLOCKED';
+    }
+    const ctrlStatus = String(controls.status || '').trim().toUpperCase();
+    if (ctrlStatus && BLOCKED_ACCOUNT_STATUSES.has(ctrlStatus)) {
+      return `ACCOUNT_CONTROLS_${ctrlStatus}`;
+    }
+  }
+
+  const ns =
+    row.notification_settings && typeof row.notification_settings === 'object'
+      ? row.notification_settings
+      : null;
+  if (ns && (ns.accountBlocked === true || ns.suspended === true)) {
+    return 'ACCOUNT_SETTINGS_BLOCKED';
+  }
+
+  return null;
 }
 
 async function fetchUserAlertPreferences(
@@ -210,19 +311,19 @@ async function fetchUserAlertPreferences(
     prefErrorMsg = err?.message || 'Exceção ao consultar user_preferences';
   }
 
-  // 2. Consulta armazenamento canônico em public.user_settings
+  // 2. Consulta armazenamento canônico em public.user_settings (inclui account_controls quando presente)
   let settingsErrorMsg: string | null = null;
   let settingsAvailable = false;
   try {
     let { data: settingsRows, error: settingsErr } = await (supabase as any)
       .from('user_settings')
-      .select('user_id, email_breaking_alerts, notification_settings')
+      .select('*')
       .in('user_id', userIds);
 
     if (settingsErr && isMissingColumnError(settingsErr)) {
       const retry = await (supabase as any)
         .from('user_settings')
-        .select('user_id')
+        .select('user_id, email_breaking_alerts, notification_settings')
         .in('user_id', userIds);
       settingsRows = retry.data;
       settingsErr = retry.error;
@@ -259,8 +360,409 @@ async function fetchUserAlertPreferences(
   return { map };
 }
 
+/**
+ * Avalia políticas reais de acesso da conta por usuário:
+ * 1. Controles em `public.user_settings` (`account_controls`, suspensão/bloqueio/pausa).
+ * 2. Estado em `public.profiles` (quando a tabela existir: `deleted_at`, `is_active`, suspensão).
+ * 3. Elegibilidade em `public.subscriptions` + trial (`SubscriptionEligibility`), isentando admins de `internal.user_roles`.
+ */
+async function evaluateUsersNotificationAccess(
+  userIds: string[],
+  prefsMap: Map<string, UserAlertPreferencesRecord>,
+  nowMs = Date.now()
+): Promise<{ decisions: Map<string, UserNotificationAccessDecision>; error?: string }> {
+  const decisions = new Map<string, UserNotificationAccessDecision>();
+  if (userIds.length === 0) return { decisions };
+
+  const { executeSql: runSql, isPostgresConfigured: pgConfigured, getServerSupabase: getSb } = getDeps();
+  const supabase = getSb() as any;
+
+  // 1. Verifica admins em internal.user_roles (best-effort fail-safe: apenas isenta se confirmado)
+  const adminUsers = new Set<string>();
+  if (pgConfigured()) {
+    try {
+      const roleRes = await runSql(
+        `SELECT user_id::text AS user_id
+           FROM internal.user_roles
+          WHERE user_id::text = ANY($1::text[])
+            AND LOWER(role) IN ('admin', 'super_admin')`,
+        [userIds]
+      );
+      for (const r of roleRes.rows || []) {
+        if (r?.user_id) adminUsers.add(String(r.user_id));
+      }
+    } catch (err: any) {
+      if (!isMissingRelationError(err) && !isMissingColumnError(err)) {
+        console.warn('[NotificationEngine] Aviso ao consultar internal.user_roles:', err?.message);
+      }
+    }
+  } else if (typeof supabase?.schema === 'function') {
+    try {
+      const { data: roleRows } = await supabase
+        .schema('internal')
+        .from('user_roles')
+        .select('user_id, role')
+        .in('user_id', userIds)
+        .in('role', ['admin', 'super_admin']);
+      for (const r of roleRows || []) {
+        if (r?.user_id) adminUsers.add(String(r.user_id));
+      }
+    } catch {}
+  }
+
+  // 2. Consulta public.profiles (quando existir)
+  const profileByUser = new Map<string, any>();
+  let profilesError: string | null = null;
+  if (pgConfigured()) {
+    try {
+      const profRes = await runSql(
+        `SELECT * FROM public.profiles WHERE user_id::text = ANY($1::text[]) OR id::text = ANY($1::text[])`,
+        [userIds]
+      );
+      for (const r of profRes.rows || []) {
+        const uid = String(r.user_id || r.id || '');
+        if (uid) profileByUser.set(uid, r);
+      }
+    } catch (err: any) {
+      if (isMissingColumnError(err)) {
+        try {
+          const profByIdRes = await runSql(
+            `SELECT * FROM public.profiles WHERE id::text = ANY($1::text[])`,
+            [userIds]
+          );
+          for (const r of profByIdRes.rows || []) {
+            if (r?.id) profileByUser.set(String(r.id), r);
+          }
+        } catch (err2: any) {
+          if (!isMissingRelationError(err2)) {
+            profilesError = err2?.message || 'Erro ao consultar public.profiles';
+          }
+        }
+      } else if (!isMissingRelationError(err)) {
+        profilesError = err?.message || 'Erro ao consultar public.profiles';
+      }
+    }
+  } else {
+    try {
+      let { data: profRows, error: profErr } = await supabase
+        .from('profiles')
+        .select('*')
+        .in('user_id', userIds);
+
+      if (profErr && isMissingColumnError(profErr)) {
+        const retry = await supabase.from('profiles').select('*').in('id', userIds);
+        profRows = retry.data;
+        profErr = retry.error;
+      }
+
+      if (profErr) {
+        if (!isMissingRelationError(profErr)) {
+          profilesError = profErr.message || 'Erro ao consultar public.profiles';
+        }
+      } else {
+        for (const r of profRows || []) {
+          const uid = String(r?.user_id || r?.id || '');
+          if (uid) profileByUser.set(uid, r);
+        }
+      }
+    } catch (err: any) {
+      profilesError = err?.message || 'Exceção ao consultar public.profiles';
+    }
+  }
+
+  if (profilesError) {
+    return { decisions, error: profilesError };
+  }
+
+  // 3. Consulta public.subscriptions (quando a tabela existir) + auth.users.created_at para âncora de trial
+  let subscriptionsTableAvailable = false;
+  const subByUser = new Map<string, any>();
+  let subError: string | null = null;
+
+  if (pgConfigured()) {
+    try {
+      const regRes = await runSql(`SELECT to_regclass('public.subscriptions') IS NOT NULL AS exists_flag`);
+      subscriptionsTableAvailable = Boolean(regRes.rows?.[0]?.exists_flag);
+      if (subscriptionsTableAvailable) {
+        const subRes = await runSql(
+          `SELECT * FROM public.subscriptions
+            WHERE user_id::text = ANY($1::text[])
+            ORDER BY updated_at DESC NULLS LAST, created_at DESC`,
+          [userIds]
+        );
+        for (const row of subRes.rows || []) {
+          const uid = row?.user_id ? String(row.user_id) : '';
+          if (uid && !subByUser.has(uid)) {
+            subByUser.set(uid, row);
+          }
+        }
+      }
+    } catch (err: any) {
+      if (!isMissingRelationError(err)) {
+        subError = err?.message || 'Erro ao consultar public.subscriptions';
+      }
+    }
+  } else {
+    try {
+      let subQuery = supabase.from('subscriptions').select('*').in('user_id', userIds);
+      if (typeof subQuery?.order === 'function') {
+        subQuery = subQuery.order('updated_at', { ascending: false });
+      }
+      const { data: subRows, error: sErr } = await subQuery;
+      if (sErr) {
+        if (!isMissingRelationError(sErr)) {
+          subError = sErr.message || 'Erro ao consultar public.subscriptions';
+        }
+      } else {
+        // Se mock mínimo retornar array vazio e não houver nenhuma assinatura nem perfil, tratamos como opcional
+        subscriptionsTableAvailable = Array.isArray(subRows) && subRows.length > 0;
+        const sorted = [...(subRows || [])].sort(
+          (a: any, b: any) =>
+            Date.parse(b?.updated_at || b?.created_at || 0) -
+            Date.parse(a?.updated_at || a?.created_at || 0)
+        );
+        for (const row of sorted) {
+          const uid = row?.user_id ? String(row.user_id) : '';
+          if (uid && !subByUser.has(uid)) {
+            subByUser.set(uid, row);
+          }
+        }
+      }
+    } catch (err: any) {
+      subError = err?.message || 'Exceção ao consultar public.subscriptions';
+    }
+  }
+
+  if (subError) {
+    return { decisions, error: subError };
+  }
+
+  // Âncora opcional em auth.users.created_at para usuários sem linha explícita em subscriptions
+  const authCreatedAtByUser = new Map<string, string>();
+  if (subscriptionsTableAvailable && pgConfigured()) {
+    const usersWithoutSub = userIds.filter((uid) => !subByUser.has(uid));
+    if (usersWithoutSub.length > 0) {
+      try {
+        const authRes = await runSql(
+          `SELECT id::text AS id, created_at FROM auth.users WHERE id::text = ANY($1::text[])`,
+          [usersWithoutSub]
+        );
+        for (const r of authRes.rows || []) {
+          if (r?.id && r?.created_at) {
+            authCreatedAtByUser.set(String(r.id), new Date(r.created_at).toISOString());
+          }
+        }
+      } catch {}
+    }
+  }
+
+  for (const uid of userIds) {
+    const settingsRow = prefsMap.get(uid)?.rawSettings;
+    const settingsDeny = checkAccountControlMarkers(settingsRow, nowMs);
+    if (settingsDeny) {
+      decisions.set(uid, { allowed: false, reason: settingsDeny });
+      continue;
+    }
+
+    const profileRow = profileByUser.get(uid);
+    const profileDeny = checkAccountControlMarkers(profileRow, nowMs);
+    if (profileDeny) {
+      decisions.set(uid, { allowed: false, reason: profileDeny });
+      continue;
+    }
+
+    if (adminUsers.has(uid)) {
+      decisions.set(uid, { allowed: true, isAdmin: true });
+      continue;
+    }
+
+    if (subscriptionsTableAvailable) {
+      const subRow = subByUser.get(uid) || null;
+      const createdAtAnchor =
+        authCreatedAtByUser.get(uid) ||
+        (profileRow?.created_at ? new Date(profileRow.created_at).toISOString() : null);
+
+      if (subRow) {
+        const evaluation = evaluateSubscriptionEligibility({
+          row: subRow,
+          userCreatedAt: createdAtAnchor,
+          nowMs,
+        });
+        if (!evaluation.hasProAccess) {
+          decisions.set(uid, {
+            allowed: false,
+            reason: `SUBSCRIPTION_${evaluation.canonicalStatus}`,
+          });
+          continue;
+        }
+      } else if (createdAtAnchor) {
+        const evaluation = evaluateSubscriptionEligibility({
+          row: null,
+          userCreatedAt: createdAtAnchor,
+          nowMs,
+        });
+        if (!evaluation.hasProAccess) {
+          decisions.set(uid, {
+            allowed: false,
+            reason: `SUBSCRIPTION_${evaluation.canonicalStatus}`,
+          });
+          continue;
+        }
+      }
+    }
+
+    decisions.set(uid, { allowed: true });
+  }
+
+  return { decisions };
+}
+
+/**
+ * Consulta quantidade recente de notificações por usuário na janela configurada (anti-flood).
+ */
+async function fetchRecentNotificationCountsByUser(
+  userIds: string[],
+  windowMinutes: number
+): Promise<Map<string, number>> {
+  const counts = new Map<string, number>();
+  if (userIds.length === 0 || windowMinutes <= 0) return counts;
+
+  const { executeSql: runSql, isPostgresConfigured: pgConfigured, getServerSupabase: getSb } = getDeps();
+  const cutoffIso = new Date(Date.now() - windowMinutes * 60_000).toISOString();
+
+  if (pgConfigured()) {
+    try {
+      const res = await runSql(
+        `SELECT user_id::text AS user_id, COUNT(*)::int AS cnt
+           FROM public.notifications
+          WHERE user_id::text = ANY($1::text[])
+            AND created_at >= $2::timestamptz
+          GROUP BY user_id`,
+        [userIds, cutoffIso]
+      );
+      for (const r of res.rows || []) {
+        if (r?.user_id) counts.set(String(r.user_id), Number(r.cnt || 0));
+      }
+      return counts;
+    } catch (err: any) {
+      if (!isMissingRelationError(err)) {
+        console.warn('[NotificationEngine] Aviso ao verificar anti-flood via PG:', err?.message);
+      }
+    }
+  }
+
+  try {
+    const supabase = getSb() as any;
+    let query = supabase
+      .from('notifications')
+      .select('user_id, created_at')
+      .in('user_id', userIds);
+    if (typeof query?.gte === 'function') {
+      query = query.gte('created_at', cutoffIso);
+    }
+    const { data, error } = await query;
+    if (!error && Array.isArray(data)) {
+      const cutoffMs = Date.parse(cutoffIso);
+      for (const row of data) {
+        const uid = row?.user_id ? String(row.user_id) : '';
+        if (!uid) continue;
+        if (row?.created_at) {
+          const ts = Date.parse(String(row.created_at));
+          if (Number.isFinite(ts) && ts < cutoffMs) continue;
+        }
+        counts.set(uid, (counts.get(uid) || 0) + 1);
+      }
+    }
+  } catch {}
+
+  return counts;
+}
+
+/**
+ * Verifica quais usuários já possuem notificação persistida para o mesmo (event_id, category, event_revision).
+ * Usada no modo dry-run para prever deduplicações sem inserir registros.
+ */
+async function checkExistingEventNotificationsForUsers(
+  userIds: string[],
+  eventId: string,
+  eventRevision: number
+): Promise<Set<string>> {
+  const existingKeys = new Set<string>();
+  if (userIds.length === 0 || !eventId) return existingKeys;
+
+  const { executeSql: runSql, isPostgresConfigured: pgConfigured, getServerSupabase: getSb } = getDeps();
+
+  if (pgConfigured()) {
+    try {
+      const res = await runSql(
+        `SELECT user_id::text AS user_id, category
+           FROM public.notifications
+          WHERE user_id::text = ANY($1::text[])
+            AND event_id = $2
+            AND event_revision = $3`,
+        [userIds, eventId, eventRevision]
+      );
+      for (const r of res.rows || []) {
+        if (r?.user_id && r?.category) {
+          existingKeys.add(`${r.user_id}:${r.category}`);
+        }
+      }
+      return existingKeys;
+    } catch (colErr: any) {
+      if (isMissingColumnError(colErr)) {
+        try {
+          const legacyRes = await runSql(
+            `SELECT user_id::text AS user_id, category
+               FROM public.notifications
+              WHERE user_id::text = ANY($1::text[])
+                AND event_id = $2`,
+            [userIds, eventId]
+          );
+          for (const r of legacyRes.rows || []) {
+            if (r?.user_id && r?.category) {
+              existingKeys.add(`${r.user_id}:${r.category}`);
+            }
+          }
+          return existingKeys;
+        } catch {}
+      }
+    }
+  }
+
+  try {
+    const supabase = getSb() as any;
+    let { data, error } = await supabase
+      .from('notifications')
+      .select('user_id, category')
+      .in('user_id', userIds)
+      .eq('event_id', eventId)
+      .eq('event_revision', eventRevision);
+
+    if (error && isMissingColumnError(error)) {
+      const retry = await supabase
+        .from('notifications')
+        .select('user_id, category')
+        .in('user_id', userIds)
+        .eq('event_id', eventId);
+      data = retry.data;
+      error = retry.error;
+    }
+
+    if (!error && Array.isArray(data)) {
+      for (const r of data) {
+        if (r?.user_id && r?.category) {
+          existingKeys.add(`${r.user_id}:${r.category}`);
+        }
+      }
+    }
+  } catch {}
+
+  return existingKeys;
+}
+
 export const notificationEngine = {
   fetchUserAlertPreferences,
+  evaluateUsersNotificationAccess,
 
   /**
    * Cria uma notificação no Supabase de forma segura, compatível com a constraint de tipos
@@ -595,34 +1097,40 @@ export const notificationEngine = {
 
   /**
    * Serviço isolado de segmentação para acontecimentos reais persistidos.
-   * Respeita interesses seguidos (entidades, temas, fontes), relevância e preferências reais do usuário.
+   * Respeita interesses seguidos (entidades, temas, fontes), relevância, preferências reais,
+   * políticas de acesso da conta, proteção anti-flood por usuário e suporte a dry-run.
    */
   async dispatchSegmentedNotificationsForEvent(
-    input: SegmentedEventDispatchInput
-  ): Promise<{
-    targetedUsers: number;
-    created: number;
-    duplicates: number;
-    skippedByPreferences: number;
-    errors: number;
-    errorDetails?: string[];
-  }> {
-    const stats: {
-      targetedUsers: number;
-      created: number;
-      duplicates: number;
-      skippedByPreferences: number;
-      errors: number;
-      errorDetails?: string[];
-    } = {
+    input: SegmentedEventDispatchInput,
+    options?: SegmentedDispatchOptions
+  ): Promise<SegmentedDispatchResult> {
+    const isDryRun = Boolean(options?.dryRun);
+    const enforceAccessPolicy = options?.enforceAccessPolicy !== false;
+    const defaultMaxPerUser = Math.max(
+      1,
+      Number(process.env.OUTBOX_USER_FLOOD_MAX_PER_WINDOW || 10) || 10
+    );
+    const maxPerUserPerWindow =
+      options?.maxPerUserPerWindow !== undefined
+        ? Math.max(0, Number(options.maxPerUserPerWindow))
+        : defaultMaxPerUser;
+    const floodWindowMinutes =
+      options?.floodWindowMinutes !== undefined
+        ? Math.max(1, Number(options.floodWindowMinutes))
+        : Math.max(1, Number(process.env.OUTBOX_USER_FLOOD_WINDOW_MINUTES || 60) || 60);
+
+    const stats: SegmentedDispatchResult = {
       targetedUsers: 0,
       created: 0,
       duplicates: 0,
       skippedByPreferences: 0,
+      blockedByAccess: 0,
+      floodCapped: 0,
       errors: 0,
+      ...(isDryRun ? { dryRun: true } : {}),
     };
 
-    if (!input.eventId || !input.title) return stats;
+    if (!input?.eventId || !input?.title) return stats;
 
     const relevanceScore = typeof input.relevanceScore === 'number' ? input.relevanceScore : 75;
     if (relevanceScore < 70) {
@@ -632,6 +1140,7 @@ export const notificationEngine = {
     const { getServerSupabase: getSb } = getDeps();
     const supabase = getSb();
     const errorDetails: string[] = [];
+    const failedUserMasks: string[] = [];
 
     const userSignals = new Map<
       string,
@@ -722,14 +1231,45 @@ export const notificationEngine = {
         return stats;
       }
 
+      // 5. Avalia políticas de acesso da conta (account_controls, profiles, subscriptions/trial)
+      let accessDecisions = new Map<string, UserNotificationAccessDecision>();
+      if (enforceAccessPolicy) {
+        const accessRes = await evaluateUsersNotificationAccess(userIds, prefsResult.map);
+        if (accessRes.error) {
+          stats.errors += userIds.length;
+          stats.errorDetails = [...errorDetails, accessRes.error];
+          return stats;
+        }
+        accessDecisions = accessRes.decisions;
+      }
+
+      // 6. Pré-carrega contadores anti-flood recentes e deduplicação prévia (quando dryRun)
+      const recentCounts =
+        maxPerUserPerWindow > 0
+          ? await fetchRecentNotificationCountsByUser(userIds, floodWindowMinutes)
+          : new Map<string, number>();
+
+      const eventRevision = Math.max(1, Math.floor(Number(input.eventRevision ?? 1) || 1));
+      const existingDryRunKeys = isDryRun
+        ? await checkExistingEventNotificationsForUsers(userIds, input.eventId, eventRevision)
+        : new Set<string>();
+
       const canonicalType = normalizeNotificationType(input.type || 'NEWS_HIGH_RELEVANCE');
 
       for (const [userId, signals] of userSignals.entries()) {
         const prefs = prefsResult.map.get(userId);
-
         if (!prefs) {
           stats.errors++;
+          failedUserMasks.push(maskUserIdForLog(userId));
           continue;
+        }
+
+        if (enforceAccessPolicy) {
+          const access = accessDecisions.get(userId);
+          if (access && !access.allowed) {
+            stats.blockedByAccess++;
+            continue;
+          }
         }
 
         // Bloqueio in-app depende exclusivamente da preferência in-app (urgentEvents),
@@ -763,7 +1303,32 @@ export const notificationEngine = {
           continue;
         }
 
-        const eventRevision = Math.max(1, Math.floor(Number(input.eventRevision ?? 1) || 1));
+        // Proteção anti-flood por usuário:
+        // Em dry-run somamos o acumulado simulado ao persistido; em execução real o banco já reflete os inserts anteriores.
+        if (maxPerUserPerWindow > 0) {
+          const persistedCount = recentCounts.get(userId) || 0;
+          const runCount = options?.perUserRunCount?.get(userId) || 0;
+          const effectiveCount = isDryRun
+            ? persistedCount + runCount
+            : Math.max(persistedCount, runCount);
+          if (effectiveCount >= maxPerUserPerWindow) {
+            stats.floodCapped++;
+            continue;
+          }
+        }
+
+        if (isDryRun) {
+          if (existingDryRunKeys.has(`${userId}:${chosenCategory}`)) {
+            stats.duplicates++;
+          } else {
+            stats.created++;
+            if (options?.perUserRunCount) {
+              options.perUserRunCount.set(userId, (options.perUserRunCount.get(userId) || 0) + 1);
+            }
+          }
+          continue;
+        }
+
         const baseDescription = (input.summary || input.title).trim();
         const descriptionText =
           eventRevision > 1 && input.significantChangeReason
@@ -788,10 +1353,16 @@ export const notificationEngine = {
           },
         });
 
-        if (res.duplicate) stats.duplicates++;
-        else if (res.success) stats.created++;
-        else {
+        if (res.duplicate) {
+          stats.duplicates++;
+        } else if (res.success) {
+          stats.created++;
+          if (options?.perUserRunCount) {
+            options.perUserRunCount.set(userId, (options.perUserRunCount.get(userId) || 0) + 1);
+          }
+        } else {
           stats.errors++;
+          failedUserMasks.push(maskUserIdForLog(userId));
           if (res.error) errorDetails.push(res.error);
         }
       }
@@ -801,6 +1372,12 @@ export const notificationEngine = {
       errorDetails.push(err?.message || 'Erro inesperado na segmentação.');
     }
 
+    if (stats.errors > 0 && (stats.created > 0 || stats.duplicates > 0)) {
+      stats.partialFailure = true;
+    }
+    if (failedUserMasks.length > 0) {
+      stats.failedUserMasks = failedUserMasks.slice(0, 20);
+    }
     if (errorDetails.length > 0) {
       stats.errorDetails = errorDetails;
     }

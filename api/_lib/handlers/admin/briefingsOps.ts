@@ -71,6 +71,7 @@ export interface BriefingOpsSnapshot {
     failed: number;
     deadLetter: number;
     completed: number;
+    discarded?: number;
   };
   recentBriefings: Array<{
     id: string;
@@ -451,6 +452,7 @@ export default async function handler(req: any, res: any) {
         failed: Number(os.failed || 0),
         deadLetter: Number(os.deadLetter || 0),
         completed: Number(os.completed || 0),
+        discarded: Number(os.discarded || 0),
       },
       recentBriefings: recentBriefingRows.slice(0, 20).map((b) => ({
         id: String(b.id),
